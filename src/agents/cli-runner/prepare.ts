@@ -1753,6 +1753,7 @@ async function prepareCliRunContextWithinReadFence(
         isNewSession:
           !reusableCliSessionId?.trim() || reusableCliSession.mode === "reuse-with-drift",
         thinkLevel: params.thinkLevel,
+        runtimeContextFragments: params.runtimeContextFragments,
         context: [
           turnRuntimeFacts?.relocatable,
           promptBuildHookResult?.appendContext,

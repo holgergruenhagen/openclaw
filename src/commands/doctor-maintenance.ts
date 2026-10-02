@@ -1,6 +1,6 @@
 import { formatCliCommand } from "../cli/command-format.js";
 import type { PreManagedServiceStop } from "../cli/update-cli/update-command-service-maintenance.js";
-import { isDefaultInstallIdentity } from "../config/paths.js";
+import { isDefaultInstallIdentity, resolveGatewayPort } from "../config/paths.js";
 import { withMigrationStateDir } from "../config/state-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
@@ -167,6 +167,7 @@ async function beginDoctorMaintenanceForSelectedState(
     assertCustody?: () => void,
     writeConfig?: DoctorConfigWriter,
     assertRestoreAdmission = assertUpdateAdmissionCurrent,
+    compensationPort?: number,
   ) => {
     await release(assertCustody);
     assertCustody?.();
@@ -243,11 +244,13 @@ async function beginDoctorMaintenanceForSelectedState(
       if (!state) {
         return;
       }
-      const port = await resolveUpdatedGatewayRestartPort({
-        config: restoredConfig,
-        serviceEnv: state.env,
-        serviceCommand: state.command,
-      });
+      const port =
+        compensationPort ??
+        (await resolveUpdatedGatewayRestartPort({
+          config: restoredConfig,
+          serviceEnv: state.env,
+          serviceCommand: state.command,
+        }));
       const health = await settle(() =>
         waitForGatewayHealthyRestart({
           service,
@@ -357,18 +360,19 @@ async function beginDoctorMaintenanceForSelectedState(
           warn(warning);
         }
         const { createConfigIO } = await import("../config/io.factory.js");
+        const { config } = await createConfigIO({
+          configPath: resolveConfigPathForMigration(state.env),
+          env: state.env,
+          pluginValidation: "skip",
+          observe: false,
+        }).readConfigFileSnapshot();
+        // Compensation retains Doctor's selected snapshot instead of rediscovering canonical paths.
         await finish(
-          (
-            await createConfigIO({
-              configPath: resolveConfigPathForMigration(state.env),
-              env: state.env,
-              pluginValidation: "skip",
-              observe: false,
-            }).readConfigFileSnapshot()
-          ).config,
+          config,
           assertStopCustody,
           undefined,
           assertStopCustody ?? assertUpdateAdmissionCurrent,
+          stopped.servicePort ?? resolveGatewayPort(config, stopped.serviceEnv ?? state.env),
         );
       } else {
         await release();

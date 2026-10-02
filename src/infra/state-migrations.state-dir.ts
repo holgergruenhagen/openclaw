@@ -17,6 +17,7 @@ import {
   legacyInstalledPluginIndexUnsupportedMessage,
   resolveLegacyInstalledPluginIndexStorePath,
 } from "../plugins/installed-plugin-index-store-path.js";
+import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
 import { resolveRequiredHomeDir, resolveUserPath } from "./home-dir.js";
@@ -299,6 +300,10 @@ function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMig
     const legacyIndexPath = resolveLegacyInstalledPluginIndexStorePath({ stateDir: targetDir });
     if (migrationFileExists(legacyIndexPath)) {
       warnings.push(legacyInstalledPluginIndexUnsupportedMessage(legacyIndexPath));
+    }
+    if (changes.length > 0) {
+      // Relocation can expose an index cached as missing at the canonical path.
+      clearPluginMetadataLifecycleCaches();
     }
     return {
       migrated: changes.length > 0,

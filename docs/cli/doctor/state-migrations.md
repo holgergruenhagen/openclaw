@@ -65,6 +65,12 @@ An explicit `OPENCLAW_STATE_DIR` keeps its selected location. If alias creation
 fails and the move rolls back, repair continues under ownership of the original
 location and reports the rollback.
 
+If Doctor stops a managed Gateway but cannot enter maintenance, it waits for
+shutdown work to settle before restoring the service under its retained authority.
+The recovery probe uses the captured service port or Doctor's selected config,
+even when that config still has a legacy filename. This recovery does not move
+the state directory or rewrite the original config.
+
 `openclaw doctor --fix` owns general persistent file-to-SQLite migrations. It validates and claims each recognized source, writes and verifies canonical rows, records a migration receipt, then removes the retired source. Gateway, node-host, and local CLI startup leave general legacy repair to Doctor. Normal versioned database opening, native initialization, and recovery of valid current config remain available. The narrow [restart-notice importer](/gateway/restart-recovery#agent-requested-restarts) also serves the late update notices written by shipped June updaters, through the same migration owner and receipts.
 
 The container image entrypoint automatically runs `openclaw doctor --fix --non-interactive`

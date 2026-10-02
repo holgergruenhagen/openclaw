@@ -195,65 +195,41 @@ describe("default install identity", () => {
     }
   });
 
-  it("accepts the canonical paths a named profile projects", async () => {
+  it("keeps named-profile install identity isolated before its config exists", async () => {
     await withTestDir({ prefix: "openclaw-profile-install-" }, async (home) => {
       const defaultStateDir = path.join(home, ".openclaw");
       const profileStateDir = path.join(home, ".openclaw-work");
+      const profileConfigPath = path.join(profileStateDir, "openclaw.json");
+      const env = {
+        HOME: home,
+        OPENCLAW_PROFILE: "work",
+        OPENCLAW_STATE_DIR: profileStateDir,
+      };
       await fs.mkdir(defaultStateDir, { recursive: true });
       await fs.writeFile(path.join(defaultStateDir, "openclaw.json"), "{}");
 
       expect(
-        isDefaultInstallIdentity(
-          {
-            HOME: home,
-            OPENCLAW_PROFILE: "work",
-            OPENCLAW_STATE_DIR: profileStateDir,
-            OPENCLAW_CONFIG_PATH: path.join(profileStateDir, "openclaw.json"),
-          },
-          () => home,
-        ),
+        isDefaultInstallIdentity({ ...env, OPENCLAW_CONFIG_PATH: profileConfigPath }, () => home),
       ).toBe(true);
-      expect(
-        allowsProcessHomeSessionScan(
-          {
-            HOME: home,
-            OPENCLAW_PROFILE: "work",
-            OPENCLAW_STATE_DIR: profileStateDir,
-            OPENCLAW_CONFIG_PATH: path.join(profileStateDir, "openclaw.json"),
-          },
-          () => home,
-        ),
-      ).toBe(false);
+      expect(resolveConfigPath(env, undefined, () => home)).toBe(profileConfigPath);
+      expect(isDefaultInstallIdentity(env, () => home)).toBe(true);
+      expect(allowsProcessHomeSessionScan(env, () => home)).toBe(false);
       expect(
         isDefaultInstallIdentity(
           {
-            HOME: home,
-            OPENCLAW_PROFILE: "work",
-            OPENCLAW_STATE_DIR: profileStateDir,
+            ...env,
+            OPENCLAW_CONFIG_PATH: path.join(defaultStateDir, "openclaw.json"),
           },
           () => home,
         ),
       ).toBe(false);
 
       await fs.mkdir(profileStateDir, { recursive: true });
-      await fs.writeFile(path.join(profileStateDir, "openclaw.json"), "{}");
+      await fs.writeFile(profileConfigPath, "{}");
+      expect(isDefaultInstallIdentity(env, () => home)).toBe(true);
       expect(
         isDefaultInstallIdentity(
-          {
-            HOME: home,
-            OPENCLAW_PROFILE: "work",
-            OPENCLAW_STATE_DIR: profileStateDir,
-          },
-          () => home,
-        ),
-      ).toBe(true);
-      expect(
-        isDefaultInstallIdentity(
-          {
-            HOME: home,
-            OPENCLAW_PROFILE: "work",
-            OPENCLAW_STATE_DIR: path.join(home, ".openclaw-other"),
-          },
+          { ...env, OPENCLAW_STATE_DIR: path.join(home, ".openclaw-other") },
           () => home,
         ),
       ).toBe(false);

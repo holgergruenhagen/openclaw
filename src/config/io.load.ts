@@ -1,6 +1,7 @@
 import { isMainThread } from "node:worker_threads";
 import { loadDotEnvAsync } from "../infra/dotenv.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { assertCanonicalStatePaths } from "../infra/state-migrations.paths.js";
 import { withSynchronousArtifactPreservingStateSnapshot } from "../state/openclaw-state-db-readonly.js";
 import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js";
 import { applyImplicitAgentRosterDefaults } from "./implicit-agent-roster.js";
@@ -64,6 +65,7 @@ function* loadConfigWithEffects(
   const { deps, configPath, pathResolution } = context;
   let envBeforeRead: Record<string, string | undefined> | undefined;
   try {
+    assertCanonicalStatePaths({ ...pathResolution, configPath });
     yield* resolveConfigIoEffect({
       sync: () => maybeLoadDotEnvForConfig(deps.env),
       async: async () => {

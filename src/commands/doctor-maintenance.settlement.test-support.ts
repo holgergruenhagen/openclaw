@@ -70,8 +70,8 @@ vi.mock("../config/paths.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../config/paths.js")>()),
   isDefaultInstallIdentity: () => true,
 }));
-vi.mock("../config/config.js", () => ({
-  readConfigFileSnapshot: async () => ({ config: {} }),
+vi.mock("../config/io.factory.js", () => ({
+  createConfigIO: vi.fn(() => ({ readConfigFileSnapshot: async () => ({ config: {} }) })),
 }));
 vi.mock("./doctor-service-repair-policy.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./doctor-service-repair-policy.js")>()),

@@ -1,6 +1,6 @@
 /** Explicit runtime intent, owned by a managed service in the canonical machine-state store. */
 import { z } from "zod";
-import { resolveConfigPathCandidate } from "../config/paths.js";
+import { resolveConfigPath } from "../config/paths.js";
 import { sha256Hex } from "../infra/crypto-digest.js";
 import { updateConfigMachineState } from "../state/config-machine-state-write.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
@@ -27,7 +27,7 @@ function resolveScope({ kind, env }: PinScope) {
         ? resolveTaskName(nativeEnv).toLowerCase()
         : resolveSystemdServiceName(nativeEnv);
   return {
-    key: `daemon-runtime-pin:${sha256Hex(JSON.stringify([kind, process.platform, name, resolveConfigPathCandidate(env)]))}`,
+    key: `daemon-runtime-pin:${sha256Hex(JSON.stringify([kind, process.platform, name, resolveConfigPath(env)]))}`,
     options: { env },
   };
 }

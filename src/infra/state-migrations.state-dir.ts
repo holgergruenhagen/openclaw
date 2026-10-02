@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { probePathCaseInsensitiveSync, resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";
-import { isWithinDir, safeStatSync } from "@openclaw/fs-safe/path";
+import { safeStatSync } from "@openclaw/fs-safe/path";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { resolveProfileStateDir } from "../cli/profile-utils.js";
 import {
@@ -10,12 +10,7 @@ import {
   listLegacyOAuthSidecarPaths,
 } from "../commands/doctor-auth-legacy-paths.js";
 import { readCurrentConfigForResolution } from "../config/io.runtime.js";
-import {
-  resolveConfigPath,
-  resolveLegacyStateDirs,
-  resolveNewStateDir,
-  resolveStateDir,
-} from "../config/paths.js";
+import { resolveLegacyStateDirs, resolveNewStateDir, resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { inspectPersistedInstalledPluginIndexInstallRecordsSync } from "../plugins/installed-plugin-index-record-state.js";
 import {
@@ -24,8 +19,14 @@ import {
 } from "../plugins/installed-plugin-index-store-path.js";
 import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
-import { resolveUserPath } from "./home-dir.js";
+import { resolveRequiredHomeDir, resolveUserPath } from "./home-dir.js";
 import { migrationFileExists } from "./state-migrations.fs.js";
+import {
+  isLegacyDirSymlinkMirror,
+  resolveConfigPathForMigration,
+  resolveStateDirForMigration,
+  resolveSymlinkTarget,
+} from "./state-migrations.paths.js";
 import { listRetiredDeliveryQueueFiles } from "./state-migrations.retired-delivery-files.js";
 import { assertNoRetiredStateFiles } from "./state-migrations.retired-files.js";
 import type { MigrationLogger } from "./state-migrations.types.js";
@@ -193,15 +194,6 @@ export function migrateLegacyProfileWorkspace(params: {
   }
 }
 
-function resolveSymlinkTarget(linkPath: string): string | null {
-  try {
-    const target = fs.readlinkSync(linkPath);
-    return path.resolve(path.dirname(linkPath), target);
-  } catch {
-    return null;
-  }
-}
-
 function formatStateDirMigration(legacyDir: string, targetDir: string): string {
   return `State dir: ${legacyDir} → ${targetDir} (legacy path now symlinked)`;
 }
@@ -209,36 +201,6 @@ function formatStateDirMigration(legacyDir: string, targetDir: string): string {
 function isEmptyDirPath(filePath: string): boolean {
   try {
     return fs.readdirSync(filePath).length === 0;
-  } catch {
-    return false;
-  }
-}
-
-function isLegacyTreeSymlinkMirror(currentDir: string, realTargetDir: string): boolean {
-  try {
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    if (entries.length === 0) {
-      return false;
-    }
-    return entries.every((entry) => {
-      const entryPath = path.join(currentDir, entry.name);
-      const stat = fs.lstatSync(entryPath);
-      if (stat.isSymbolicLink()) {
-        const resolvedTarget = resolveSymlinkTarget(entryPath);
-        return Boolean(
-          resolvedTarget && isWithinDir(realTargetDir, fs.realpathSync(resolvedTarget)),
-        );
-      }
-      return stat.isDirectory() && isLegacyTreeSymlinkMirror(entryPath, realTargetDir);
-    });
-  } catch {
-    return false;
-  }
-}
-
-function isLegacyDirSymlinkMirror(legacyDir: string, targetDir: string): boolean {
-  try {
-    return isLegacyTreeSymlinkMirror(legacyDir, fs.realpathSync(targetDir));
   } catch {
     return false;
   }
@@ -254,8 +216,9 @@ export function resolveLegacyStateDirMigrationCandidates(params: {
   if (env.OPENCLAW_STATE_DIR?.trim()) {
     return [];
   }
-  const target = resolveNewStateDir(homedir);
-  return resolveLegacyStateDirs(homedir).map((source) => ({ source, target }));
+  const home = () => resolveRequiredHomeDir(env, homedir);
+  const target = resolveNewStateDir(home);
+  return resolveLegacyStateDirs(home).map((source) => ({ source, target }));
 }
 
 export function resolvePendingLegacyStateDirMigrationPaths(params: {
@@ -293,7 +256,7 @@ export function prepareLegacyStateDirMigration(params: StateDirMigrationParams) 
   const result = migrateLegacyStateDirRoot(params);
   autoMigrateStateDirChecked = true;
   return {
-    stateDir: resolveStateDir(params.env ?? process.env, params.homedir ?? os.homedir),
+    stateDir: resolveStateDirForMigration(params.env ?? process.env, params.homedir ?? os.homedir),
     result,
   };
 }
@@ -312,12 +275,20 @@ function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMig
   const changes: string[] = [];
   const notices: string[] = [];
   const hasCustomStateDir = Boolean(env.OPENCLAW_STATE_DIR?.trim());
-  const targetDir = hasCustomStateDir ? resolveStateDir(env, homedir) : resolveNewStateDir(homedir);
+  const home = () => resolveRequiredHomeDir(env, homedir);
+  const targetDir = hasCustomStateDir ? resolveStateDir(env, homedir) : resolveNewStateDir(home);
   assertNoRetiredStateFiles("JSON delivery queues", listRetiredDeliveryQueueFiles(targetDir));
-  const configPath = resolveConfigPath(env, resolveStateDir(env, homedir), homedir);
-  assertNoRetiredOAuthSidecarsBeforeConfigRecovery({ env, configPath });
+  const configPath = resolveConfigPathForMigration(env, homedir);
+  const sourceHome = home();
+  const sourceEnv = {
+    ...env,
+    HOME: env.HOME ?? sourceHome,
+    OPENCLAW_HOME: sourceHome,
+    OPENCLAW_STATE_DIR: resolveStateDirForMigration(env, homedir),
+  };
+  assertNoRetiredOAuthSidecarsBeforeConfigRecovery({ env: sourceEnv, configPath });
   const { env: inspectionEnv } = readCurrentConfigForResolution({
-    env,
+    env: sourceEnv,
     configPath,
   });
   assertNoRetiredStateFiles(
@@ -342,7 +313,7 @@ function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMig
     return finishMigration();
   }
 
-  const legacyDirs = resolveLegacyStateDirs(homedir);
+  const legacyDirs = resolveLegacyStateDirs(home);
   let legacyDir = legacyDirs.find((dir) => {
     try {
       return fs.existsSync(dir);

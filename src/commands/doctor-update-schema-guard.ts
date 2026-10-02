@@ -5,6 +5,7 @@ import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { formatCliJsonFailure } from "../cli/failure-output.js";
 import { exitCliAfterOutput } from "../cli/one-shot-exit.js";
 import { resolveStateDir } from "../config/paths.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import {
   clearNodeSqliteKyselyCacheForDatabase,
   executeSqliteQuerySync,
@@ -13,6 +14,7 @@ import {
 } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import { prepareSqliteReadOnlyLocation } from "../infra/sqlite-snapshot-source.js";
+import { resolveStateDirForMigration } from "../infra/state-migrations.paths.js";
 import type { UpdateDoctorWriteAuthority } from "../infra/update-doctor-result.js";
 import { POST_CORE_UPDATE_ENV } from "../infra/update-post-core-context.js";
 import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
@@ -162,7 +164,18 @@ async function readDrivingUpdater(
 }
 
 /** Prepare reusable fleet facts and refuse before CLI bootstrap or Doctor can write state. */
-export async function guardUpdateDoctorSchemaUpgrade(options: {
+export async function guardUpdateDoctorSchemaUpgrade(
+  options: Parameters<typeof guardUpdateDoctorSchemaForSelectedState>[0],
+): Promise<DoctorDatabasePreflight | undefined> {
+  if (process.env.OPENCLAW_UPDATE_IN_PROGRESS !== "1") {
+    return undefined;
+  }
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), () =>
+    guardUpdateDoctorSchemaForSelectedState(options),
+  );
+}
+
+async function guardUpdateDoctorSchemaForSelectedState(options: {
   schemas?: DoctorDatabasePreflight;
   runtime?: RuntimeEnv;
   json?: boolean;
@@ -173,9 +186,6 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
   /** Read-only pre-capture publication check; never authorizes an agent repair. */
   statePublicationOnly?: boolean;
 }): Promise<DoctorDatabasePreflight | undefined> {
-  if (process.env.OPENCLAW_UPDATE_IN_PROGRESS !== "1") {
-    return undefined;
-  }
   // Mode flags and retained captures are not live mutation authority. Only the
   // current maintenance owner can exempt physically owned disposable core images.
   const rehearsal = options.statePublicationOnly
@@ -441,7 +451,9 @@ export async function preflightUpdatePackageLifecycle(): Promise<void> {
   }
   let updater: DrivingUpdater | undefined;
   try {
-    updater = await readDrivingUpdater(true);
+    updater = await withMigrationStateDir(process.env, resolveStateDirForMigration(), () =>
+      readDrivingUpdater(true),
+    );
   } catch {
     // Unavailable legacy-driver evidence does not expand package admission.
   }
@@ -467,6 +479,16 @@ export function rehearseDeferredUpdateDoctorSchema(
 }
 
 async function rehearseDeferredUpdateDoctorSchemaForParent(
+  schemas: DoctorDatabasePreflight,
+  runtime: RuntimeEnv,
+  parent: UpdateRunDriver | undefined,
+): Promise<void> {
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), () =>
+    rehearseDeferredUpdateDoctorSchemaForSelectedState(schemas, runtime, parent),
+  );
+}
+
+async function rehearseDeferredUpdateDoctorSchemaForSelectedState(
   schemas: DoctorDatabasePreflight,
   runtime: RuntimeEnv,
   parent: UpdateRunDriver | undefined,
@@ -525,6 +547,9 @@ async function rehearseDeferredUpdateDoctorSchemaForParent(
     throw new Error("Candidate Doctor entrypoint is unavailable for private schema validation.");
   }
   const snapshot = await createConfigIO({
+    configPath: (
+      await import("../infra/state-migrations.paths.js")
+    ).resolveConfigPathForMigration(),
     observe: false,
     pluginValidation: "core-only",
   }).readConfigFileSnapshot();

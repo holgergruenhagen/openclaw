@@ -3,8 +3,10 @@ import { note } from "../../packages/terminal-core/src/note.js";
 import { readCurrentConfigForResolution } from "../config/io.runtime.js";
 import { tryGetLegacyDefaultAgentId } from "../config/legacy.default-agent-owner.js";
 import { resolveStateDir } from "../config/paths.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { throwIfDoctorStateMigrationRefused } from "../infra/state-migrations.messages.js";
+import { resolveStateDirForMigration } from "../infra/state-migrations.paths.js";
 import { assertNoRetiredStateFiles } from "../infra/state-migrations.retired-files.js";
 import type {
   LegacyStateMigrationStepReceipt,
@@ -58,12 +60,14 @@ const loadCronRepair = createLazyRuntimeModule(() => import("./doctor/cron/legac
 export async function runDoctorConfigPreflight(
   options: DoctorConfigPreflightOptions = {},
 ): Promise<DoctorConfigPreflightResult> {
-  // Reuse child imports for this state operation; every read still acquires fresh admission.
-  if (options.migrateState !== false && options.doctorOnlyStateMigrations === true) {
-    const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
-    return await withSqliteReadOnlyWorkerScope(() => runDoctorConfigPreflightOperation(options));
-  }
-  return await runDoctorConfigPreflightOperation(options);
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), async () => {
+    // Reuse child imports for this state operation; every read still acquires fresh admission.
+    if (options.migrateState !== false && options.doctorOnlyStateMigrations === true) {
+      const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
+      return await withSqliteReadOnlyWorkerScope(() => runDoctorConfigPreflightOperation(options));
+    }
+    return await runDoctorConfigPreflightOperation(options);
+  });
 }
 
 async function runDoctorConfigPreflightOperation(

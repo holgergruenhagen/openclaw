@@ -42,6 +42,18 @@ repair; canonical delivery fields and unrelated stored values keep their values.
 
 ## Legacy state migration
 
+Runtime defaults use `~/.openclaw/openclaw.json`; they no longer select
+`~/.clawdbot` or `clawdbot.json` automatically. If an old location would otherwise
+be mistaken for a fresh install, OpenClaw preserves it and asks you to run
+`openclaw doctor --fix`. Doctor selects the existing migration source before
+reading state. It also copies `clawdbot.json` to `openclaw.json` within a selected
+state directory, preserving the original file. Explicit `OPENCLAW_STATE_DIR` and
+`OPENCLAW_CONFIG_PATH` selections remain supported, including old spellings.
+An explicitly selected state root only imports its own legacy config filename.
+Incidental files such as `.env` or logs in `~/.openclaw` do not hide legacy state;
+Doctor reports conflicting roots for reconciliation instead of starting empty.
+`OPENCLAW_HOME` selects the home for both migration discovery and relocation.
+
 When Doctor selects a legacy home such as `~/.clawdbot`, it drains open database
 work before moving that directory to `~/.openclaw`. It retains exclusive source
 ownership through the move and legacy alias creation, then acquires ownership at

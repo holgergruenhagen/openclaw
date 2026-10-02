@@ -4,7 +4,7 @@ import {
   normalizeOptionalString,
   readStringValue,
 } from "@openclaw/normalization-core/string-coerce";
-import { resolveConfigPathCandidate } from "../config/paths.js";
+import { resolveConfigPath } from "../config/paths.js";
 import type { HookMappingConfig, HooksConfig, HookSessionMode } from "../config/types.hooks.js";
 import { resolveGmailHookMaxBytes } from "../hooks/gmail.js";
 import { importFileModule, resolveFunctionModuleExport } from "../hooks/module-loader.js";
@@ -198,7 +198,7 @@ export function resolveHookMappings(
     return [];
   }
 
-  const configDir = path.resolve(opts?.configDir ?? path.dirname(resolveConfigPathCandidate()));
+  const configDir = path.resolve(opts?.configDir ?? path.dirname(resolveConfigPath()));
   const transformsRootDir = path.join(configDir, "hooks", "transforms");
   const transformsDir = resolveOptionalContainedPath(
     transformsRootDir,

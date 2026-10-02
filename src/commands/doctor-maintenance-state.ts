@@ -1,5 +1,6 @@
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import { formatErrorMessage, toErrorObject } from "../infra/errors.js";
 import { resolveGatewayStateOwnerPath } from "../infra/gateway-state-owner.js";
 import { createSqliteReadOnlyWorkerScope } from "../infra/sqlite-readonly-worker.js";
@@ -35,7 +36,7 @@ export function createDoctorMaintenanceState(options: {
   let resources: OpenClawDatabaseMaintenanceScope | undefined;
   let inspections: ReturnType<typeof createSqliteReadOnlyWorkerScope> | undefined;
   let owner: Awaited<ReturnType<typeof acquireDoctorGatewayMaintenanceOwner>> | undefined;
-  let selectedEnv = env;
+  let selectedEnv = { ...env, OPENCLAW_STATE_DIR: resolveStateDir(env) };
   let captureAdmitted = false;
   let liveAuthorityReadsAdmitted = false;
   const capture = createUpdateDoctorDatabaseWriteCapture(params.databaseGenerations, {
@@ -97,6 +98,9 @@ export function createDoctorMaintenanceState(options: {
     }
   };
   const state = {
+    get env() {
+      return selectedEnv;
+    },
     get owner() {
       return owner;
     },
@@ -108,7 +112,9 @@ export function createDoctorMaintenanceState(options: {
     },
     run<T>(operation: () => T): T {
       // Cancellation stops read-only inspections; admitted writers retain their resource scope.
-      return resources!.run(() => inspections!.run(operation));
+      return withMigrationStateDir(selectedEnv, resolveStateDir(selectedEnv), () =>
+        resources!.run(() => inspections!.run(operation)),
+      );
     },
     async acquire(relocatedMaintenanceOwner?: typeof owner) {
       if (resources) {

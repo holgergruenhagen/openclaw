@@ -136,6 +136,7 @@ async function withDoctorMaintenance(
 
 type AdmissionCase = {
   name: string;
+  implicitLegacy?: true;
   postCore?: true;
   claim?: true | "different";
   maintenance?: true;
@@ -144,6 +145,7 @@ type AdmissionCase = {
 
 it.each<AdmissionCase>([
   { name: "private rehearsal" },
+  { name: "private rehearsal with implicit legacy state", implicitLegacy: true },
   { name: "missing writable marker", marker: "missing writable" },
   { name: "forged post-core marker", marker: "post-core" },
   { name: "post-core without claim or maintenance", postCore: true },
@@ -157,8 +159,18 @@ it.each<AdmissionCase>([
     marker: "post-core",
   },
 ])("preserves live agent bytes during $name admission", async (scenario) => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    if (scenario.implicitLegacy) {
+      const legacy = path.join(state.home, ".clawdbot");
+      fs.renameSync(state.stateDir, legacy);
+      vi.stubEnv("OPENCLAW_STATE_DIR", legacy);
+      vi.stubEnv("OPENCLAW_CONFIG_PATH", path.join(legacy, "openclaw.json"));
+    }
     const f = await legacyAgentFixture(scenario.postCore === true);
+    if (scenario.implicitLegacy) {
+      vi.stubEnv("OPENCLAW_STATE_DIR", undefined);
+      vi.stubEnv("OPENCLAW_CONFIG_PATH", undefined);
+    }
     if (scenario.marker) {
       vi.stubEnv(
         scenario.marker === "missing writable"
@@ -203,6 +215,9 @@ it.each<AdmissionCase>([
       });
     }
     expect(fs.readFileSync(f.pathname)).toEqual(f.bytes);
+    if (scenario.implicitLegacy) {
+      expect(fs.existsSync(state.stateDir)).toBe(false);
+    }
   });
 });
 

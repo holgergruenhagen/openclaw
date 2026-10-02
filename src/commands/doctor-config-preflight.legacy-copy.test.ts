@@ -30,7 +30,7 @@ describe("doctor legacy config migration failures", () => {
         setEnv({
           HOME: home,
           OPENCLAW_CONFIG_PATH: path.join(targetDir, "openclaw.json"),
-          OPENCLAW_STATE_DIR: path.join(home, "state"),
+          OPENCLAW_STATE_DIR: legacyDir,
         });
 
         try {
@@ -53,12 +53,54 @@ describe("doctor legacy config migration failures", () => {
       setEnv({
         HOME: home,
         OPENCLAW_CONFIG_PATH: targetPath,
-        OPENCLAW_STATE_DIR: path.join(home, "state"),
+        OPENCLAW_STATE_DIR: legacyDir,
       });
 
       await runDoctorConfigPreflight({ migrateState: false, invalidConfigNote: false });
 
       await expect(fs.readFile(targetPath, "utf-8")).resolves.toBe("{}\n");
+    });
+  });
+
+  it.each([".openclaw", "selected"])(
+    "copies a legacy filename within the selected %s state root",
+    async (directory) => {
+      await withTempDir("openclaw-doctor-legacy-filename-", async (home) => {
+        const stateDir = path.join(home, directory);
+        const source = path.join(stateDir, "clawdbot.json");
+        const target = path.join(stateDir, "openclaw.json");
+        const raw = '{"gateway":{"mode":"local"}}\n';
+        await fs.mkdir(stateDir);
+        await fs.writeFile(source, raw);
+        setEnv({
+          HOME: home,
+          ...(directory === "selected" ? { OPENCLAW_STATE_DIR: stateDir } : {}),
+        });
+
+        await runDoctorConfigPreflight({ migrateState: false, invalidConfigNote: false });
+
+        await expect(fs.readFile(target, "utf8")).resolves.toBe(raw);
+        await expect(fs.readFile(source, "utf8")).resolves.toBe(raw);
+      });
+    },
+  );
+
+  it("does not copy another installation's config into an explicitly selected state root", async () => {
+    await withTempDir("openclaw-doctor-legacy-isolation-", async (home) => {
+      const legacyDir = path.join(home, ".clawdbot");
+      const source = path.join(legacyDir, "openclaw.json");
+      const stateDir = path.join(home, "selected");
+      const raw = '{"gateway":{"mode":"local","port":23941}}\n';
+      await fs.mkdir(legacyDir);
+      await fs.writeFile(source, raw);
+      setEnv({ HOME: home, OPENCLAW_STATE_DIR: stateDir });
+
+      await runDoctorConfigPreflight({ migrateState: false, invalidConfigNote: false });
+
+      await expect(fs.stat(path.join(stateDir, "openclaw.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(fs.readFile(source, "utf8")).resolves.toBe(raw);
     });
   });
 });

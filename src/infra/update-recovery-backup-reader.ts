@@ -12,7 +12,6 @@ import {
   isNamedProfile,
   resolveCanonicalConfigPath,
   resolveConfigPath,
-  resolveDefaultConfigCandidates,
   resolveStateDir,
 } from "../config/paths.js";
 import { resolvePathViaExistingAncestorSync } from "./boundary-path.js";
@@ -22,6 +21,7 @@ import { hasErrnoCode } from "./errno.js";
 import { sameFileMutationFingerprint } from "./file-descriptor.js";
 import { root as safeRoot } from "./fs-safe.js";
 import { resolveRequiredHomeDir } from "./home-dir.js";
+import { resolveDefaultConfigCandidates } from "./state-migrations.paths.js";
 import { resolveLegacyStateDirMigrationCandidates } from "./state-migrations.state-dir.js";
 import { resolveUpdateCaptureRoot } from "./update-capture-paths.js";
 import { UPDATE_CAPTURE_PRIVACY_MARKER } from "./update-capture-privacy-marker.js";

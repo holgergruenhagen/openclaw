@@ -48,7 +48,7 @@ const resolveGatewayPortMock = vi.hoisted(() =>
 const resolveStateDirMock = vi.hoisted(() =>
   vi.fn((env: NodeJS.ProcessEnv) => env.OPENCLAW_STATE_DIR?.trim() || `${env.HOME}/.openclaw`),
 );
-const resolveConfigPathCandidateMock = vi.hoisted(() =>
+const resolveConfigPathMock = vi.hoisted(() =>
   vi.fn(
     (env: NodeJS.ProcessEnv) =>
       env.OPENCLAW_CONFIG_PATH?.trim() ||
@@ -80,7 +80,7 @@ vi.mock("../../config/io.js", () => ({
 }));
 
 vi.mock("../../config/paths.js", () => ({
-  resolveConfigPathCandidate: resolveConfigPathCandidateMock,
+  resolveConfigPath: resolveConfigPathMock,
   resolveGatewayPort: resolveGatewayPortMock,
   resolveStateDir: resolveStateDirMock,
 }));

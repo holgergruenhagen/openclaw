@@ -60,6 +60,7 @@ describe("Doctor maintenance with shared-state workers", () => {
   it.each([
     "schema-upgrade",
     "resident-worker",
+    "home-override",
     "link-rollback",
     "handoff-contender",
     "historical-contender",
@@ -86,6 +87,13 @@ describe("Doctor maintenance with shared-state workers", () => {
           fs.renameSync(state.stateDir, legacy);
           await withEnvAsync(
             {
+              ...(scenario === "home-override"
+                ? {
+                    HOME: path.join(state.home, "os-home"),
+                    USERPROFILE: path.join(state.home, "os-home"),
+                    OPENCLAW_HOME: state.home,
+                  }
+                : {}),
               OPENCLAW_STATE_DIR: "",
               OPENCLAW_CONFIG_PATH: path.join(legacy, "openclaw.json"),
               OPENCLAW_TEST_FAST: "0",
@@ -93,7 +101,9 @@ describe("Doctor maintenance with shared-state workers", () => {
             },
             async () => {
               if (scenario === "resident-worker") {
-                await writeNativeHookRelayBridgeRecord({ record: relayRecord(1), updatedAtMs: 1 });
+                await withEnvAsync({ OPENCLAW_STATE_DIR: legacy }, () =>
+                  writeNativeHookRelayBridgeRecord({ record: relayRecord(1), updatedAtMs: 1 }),
+                );
               }
               if (scenario === "link-rollback") {
                 const symlink = fs.symlinkSync;

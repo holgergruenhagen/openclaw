@@ -1,4 +1,7 @@
+import { loadCliDotEnv } from "../cli/dotenv.js";
 import { exitCliAfterOutput } from "../cli/one-shot-exit.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
+import { resolveStateDirForMigration } from "../infra/state-migrations.paths.js";
 import { LEGACY_IMPLICIT_AGENT_ID, normalizeAgentId } from "../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
 import type { DoctorDatabasePreflight } from "./doctor-database-preflight.js";
@@ -49,6 +52,17 @@ export async function doctorCommand(
   runtime?: RuntimeEnv,
   options?: DoctorOptions,
   databasePreflight?: DoctorDatabasePreflight,
+): Promise<void> {
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), () => {
+    loadCliDotEnv({ quiet: true });
+    return doctorCommandForSelectedState(runtime, options, databasePreflight);
+  });
+}
+
+async function doctorCommandForSelectedState(
+  runtime: RuntimeEnv | undefined,
+  options: DoctorOptions | undefined,
+  databasePreflight: DoctorDatabasePreflight | undefined,
 ): Promise<void> {
   const outputRuntime = runtime ?? defaultRuntime;
   if (options?.stateSqlite) {

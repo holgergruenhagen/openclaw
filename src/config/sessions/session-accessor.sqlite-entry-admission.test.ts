@@ -19,6 +19,7 @@ import { clearOpenClawAgentIntegrityVerification } from "../../state/openclaw-qu
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config.js";
 import { resolveStateDir } from "../paths.js";
+import { withMigrationStateDir } from "../state-dir.js";
 import {
   loadSessionEntry,
   onSessionIdentityMutation,
@@ -459,11 +460,11 @@ it.each(["cancel", "revoke"] as const)(
   },
 );
 
-it.each(["relative queued", "relative reopen", "implicit queued"] as const)(
+it.each(["relative queued", "relative reopen", "prepared queued"] as const)(
   "pins the selected root for %s patch work",
   async (mode) => {
     const home = roots.make("session-patch-root-selection-");
-    const implicit = mode === "implicit queued";
+    const implicit = mode === "prepared queued";
     const ownerRoot = path.join(home, implicit ? ".clawdbot" : "state");
     const successor = path.join(home, implicit ? ".openclaw" : "next-cwd");
     fs.mkdirSync(ownerRoot);
@@ -475,15 +476,11 @@ it.each(["relative queued", "relative reopen", "implicit queued"] as const)(
       HOME: home,
       OPENCLAW_HOME: home,
       OPENCLAW_CONFIG_PATH: path.join(ownerRoot, "openclaw.json"),
-      ...(implicit
-        ? // Deliberately select normal legacy discovery, not the fast-test new-root shortcut.
-          { OPENCLAW_TEST_FAST: "0" }
-        : { OPENCLAW_STATE_DIR: "state" }),
+      ...(!implicit ? { OPENCLAW_STATE_DIR: "state" } : {}),
     };
     vi.stubEnv("OPENCLAW_STATE_DIR", ownerRoot);
     const scope = { agentId: "main", env, sessionKey: "agent:main:root-selection" };
     const original = { ...scope, env: { ...env, OPENCLAW_STATE_DIR: ownerRoot } };
-    expect(resolveStateDir(env)).toBe(ownerRoot);
     replaceSessionEntrySync(original, { sessionId: "original", updatedAt: 1 });
     const database = openOpenClawAgentDatabase(toDatabaseOptions(resolveSqliteScope(original)));
     const selectedPath = database.path;
@@ -508,20 +505,25 @@ it.each(["relative queued", "relative reopen", "implicit queued"] as const)(
               "session.transcript.batch",
             ),
           );
-    const operation = own(
-      patchSessionEntryCore(
-        scope,
-        () => {
-          if (mode === "relative reopen") {
-            // The first read happened warm in A; commit must reopen A after the updater.
-            expect(closeOpenClawAgentDatabaseByPath(selectedPath)).toBe(true);
-            shiftOwner();
-          }
-          return { label: "retained selected root" };
-        },
-        { skipMaintenance: true },
-      ),
-    );
+    const start = () => {
+      expect(resolveStateDir(env)).toBe(ownerRoot);
+      const operation = own(
+        patchSessionEntryCore(
+          scope,
+          () => {
+            if (mode === "relative reopen") {
+              // The first read happened warm in A; commit must reopen A after the updater.
+              expect(closeOpenClawAgentDatabaseByPath(selectedPath)).toBe(true);
+              shiftOwner();
+            }
+            return { label: "retained selected root" };
+          },
+          { skipMaintenance: true },
+        ),
+      );
+      return { operation };
+    };
+    const { operation } = implicit ? withMigrationStateDir(env, ownerRoot, start) : start();
     if (blocker) {
       // Admission was queued with A selected; its first physical open must retain A.
       closeOpenClawAgentDatabaseByPath(selectedPath);
@@ -530,7 +532,7 @@ it.each(["relative queued", "relative reopen", "implicit queued"] as const)(
       await blocker;
     }
     // Control: unchanged caller inputs now resolve elsewhere; the operation must use
-    // its private resolved root, not repeat ambient/legacy selection after its await.
+    // its private resolved root after its prepared selection has expired or cwd changed.
     expect(resolveStateDir(env)).toBe(implicit ? successor : path.join(successor, "state"));
     await expect(operation).resolves.toMatchObject({
       sessionId: "original",

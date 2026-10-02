@@ -11,6 +11,7 @@ import { GatewayStateOwnerContentionError } from "../infra/gateway-state-owner.j
 import { StartupMaintenanceRequiredError } from "../infra/startup-maintenance-required.js";
 import { readStateLeaseProcessOwnerStatus } from "../infra/state-lease-process-owner.js";
 import { DoctorStateMigrationRefusalError } from "../infra/state-migrations.messages.js";
+import { resolveConfigPathForMigration } from "../infra/state-migrations.paths.js";
 import { DoctorUnreadableStateDatabaseError } from "../infra/state-repair-message.js";
 import {
   DoctorMaintenanceRefusalError,
@@ -155,12 +156,14 @@ export async function readDoctorMaintenanceRecoveryConfig(
   env: NodeJS.ProcessEnv,
   log: (message: string) => void,
 ): Promise<OpenClawConfig> {
-  const { readConfigFileSnapshot } = await import("../config/config.js");
+  const { createConfigIO } = await import("../config/io.factory.js");
   return resources.run(async () => {
-    const { config } = await readConfigFileSnapshot({
-      skipPluginValidation: true,
+    const { config } = await createConfigIO({
+      configPath: resolveConfigPathForMigration(env),
+      env,
+      pluginValidation: "skip",
       observe: false,
-    });
+    }).readConfigFileSnapshot();
     await assertDoctorMaintenanceReady(config, env, log);
     return config;
   });

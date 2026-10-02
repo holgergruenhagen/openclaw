@@ -1,9 +1,11 @@
 // Covers config path resolution across env, home, and agent roots.
+import { AsyncLocalStorage } from "node:async_hooks";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { resolveLegacyOAuthPath } from "../agents/auth-profiles/legacy-source-diagnostic.js";
+import { resolveDefaultConfigCandidates } from "../infra/state-migrations.paths.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import {
   allowsProcessHomeSessionScan,
@@ -15,9 +17,7 @@ import {
   normalizeStateDirEnv,
   pinRuntimePaths,
   resolveNativeServiceProfileConflict,
-  resolveDefaultConfigCandidates,
   resolveCanonicalConfigPath,
-  resolveConfigPathCandidate,
   resolveConfigPath,
   resolveGatewayPort,
   resolveIncludeRoots,
@@ -25,8 +25,41 @@ import {
   resolveStateDir,
   STATE_DIR,
 } from "./paths.js";
+import { withMigrationStateDir } from "./state-dir.js";
 
 describe("default state directory", () => {
+  it.each(["synchronous", "fulfilled", "rejected"] as const)(
+    "expires Doctor's prepared source after the %s operation settles",
+    async (settlement) => {
+      const home = path.resolve("/home/doctor");
+      const env = { HOME: home, OPENCLAW_HOME: home };
+      const legacy = path.join(home, ".clawdbot");
+      let retained!: ReturnType<typeof AsyncLocalStorage.snapshot>;
+      const capture = () => {
+        expect(resolveStateDir(env)).toBe(legacy);
+        retained = AsyncLocalStorage.snapshot();
+      };
+      if (settlement === "synchronous") {
+        withMigrationStateDir(env, legacy, capture);
+      } else {
+        const work = withMigrationStateDir(env, legacy, async () => {
+          await Promise.resolve();
+          capture();
+          if (settlement === "rejected") {
+            throw new Error("fixture repair failure");
+          }
+        });
+        if (settlement === "rejected") {
+          await expect(work).rejects.toThrow("fixture repair failure");
+        } else {
+          await work;
+        }
+      }
+      expect(resolveStateDir(env)).toBe(path.join(home, ".openclaw"));
+      expect(() => retained(() => resolveStateDir(env))).toThrow("selection has expired");
+    },
+  );
+
   it("matches filesystem aliases of the default state directory", async () => {
     await withTestDir({ prefix: "openclaw-default-state-" }, async (root) => {
       const home = path.join(root, "home");
@@ -58,7 +91,7 @@ describe("default install identity", () => {
     ).toBe(true);
   });
 
-  it("preserves implicit legacy config discovery for the default profile", async () => {
+  it("keeps the canonical default install when legacy config still awaits Doctor", async () => {
     await withTestDir({ prefix: "openclaw-default-install-legacy-config-" }, async (home) => {
       const stateDir = path.join(home, ".openclaw");
       const legacyStateDir = path.join(home, ".clawdbot");
@@ -68,7 +101,9 @@ describe("default install identity", () => {
       await fs.writeFile(legacyConfigPath, "{}");
 
       const env = { HOME: home };
-      expect(resolveConfigPathCandidate(env, () => home)).toBe(legacyConfigPath);
+      expect(resolveConfigPath(env, undefined, () => home)).toBe(
+        path.join(stateDir, "openclaw.json"),
+      );
       expect(isDefaultInstallIdentity(env, () => home)).toBe(true);
     });
   });
@@ -537,12 +572,12 @@ describe("state + config path candidates", () => {
     });
   });
 
-  it("falls back to existing legacy state dir when ~/.openclaw is missing", async () => {
+  it("keeps the runtime state root canonical while legacy state awaits Doctor", async () => {
     await withTestDir({ prefix: "openclaw-state-legacy-" }, async (root) => {
       const legacyDir = path.join(root, ".clawdbot");
       await fs.mkdir(legacyDir, { recursive: true });
       const resolved = resolveStateDir({}, () => root);
-      expect(resolved).toBe(legacyDir);
+      expect(resolved).toBe(path.join(root, ".openclaw"));
     });
   });
 
@@ -553,13 +588,12 @@ describe("state + config path candidates", () => {
       const legacyPath = path.join(legacyDir, "openclaw.json");
       await fs.writeFile(legacyPath, "{}", "utf-8");
 
-      const resolved = resolveConfigPathCandidate({}, () => root);
+      const resolved = resolveConfigPath({}, undefined, () => root);
       expect(resolved).toBe(legacyPath);
     });
   });
 
   it.each([
-    { name: "candidate", resolve: resolveConfigPathCandidate },
     { name: "active", resolve: resolveConfigPath },
     { name: "canonical", resolve: resolveCanonicalConfigPath },
   ])("resolves explicit config selection in $name without filesystem discovery", ({ resolve }) => {

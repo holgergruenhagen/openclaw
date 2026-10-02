@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
+import * as configFactory from "../config/io.factory.js";
 import { GatewayServiceStopUnsafeError } from "../daemon/service-inspection-error.js";
 import { collectNestedErrorCandidates } from "../infra/error-graph-internal.js";
 import { GATEWAY_SERVICE_STOP_TIMEOUT_MS } from "../infra/gateway-shutdown-budget.js";
@@ -315,9 +316,41 @@ it("preserves caller cancellation after a settled maintenance inspection", async
   expect(boundary.restart).not.toHaveBeenCalled();
 });
 
-it.each(["forced", "uncertain"] as const)(
-  "joins failed maintenance admission before compensating (%s)",
-  async (cleanup) => {
+it.each([
+  { cleanup: "forced", legacy: false },
+  { cleanup: "uncertain", legacy: false },
+  { cleanup: "forced", legacy: true },
+] as const)(
+  "joins failed maintenance admission before compensating ($cleanup, legacy=$legacy)",
+  async ({ cleanup, legacy }) => {
+    let legacyConfigPath: string | undefined;
+    if (legacy) {
+      const home = settlement.tempDirs.make("doctor-admission-legacy-recovery-");
+      const stateDir = path.join(home, ".clawdbot");
+      legacyConfigPath = path.join(stateDir, "clawdbot.json");
+      fs.mkdirSync(stateDir);
+      fs.writeFileSync(
+        legacyConfigPath,
+        '{"gateway":{"mode":"local","port":23941},"plugins":{"enabled":false}}\n',
+      );
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("OPENCLAW_HOME", home);
+      vi.stubEnv("OPENCLAW_STATE_DIR", undefined);
+      vi.stubEnv("OPENCLAW_CONFIG_PATH", undefined);
+      const serviceEnv = { HOME: home, OPENCLAW_HOME: home };
+      settlement.stopped.serviceEnv = serviceEnv;
+      boundary.read.mockResolvedValue({
+        installed: true,
+        running: false,
+        env: serviceEnv,
+        command: { programArguments: ["/synthetic/node", `${root}/openclaw.mjs`, "gateway"] },
+        loadState: { status: "loaded" },
+        runtime: { status: "stopped" },
+      });
+      const actual =
+        await vi.importActual<typeof import("../config/io.factory.js")>("../config/io.factory.js");
+      vi.mocked(configFactory.createConfigIO).mockImplementation(actual.createConfigIO);
+    }
     const barrier = cleanupBarrier();
     const original = new Error("service stop failed after parking the Gateway");
     const stop = boundary.stop.getMockImplementation()!;
@@ -353,6 +386,15 @@ it.each(["forced", "uncertain"] as const)(
     expect(boundary.complete).toHaveBeenCalledTimes(cleanup === "forced" ? 1 : 0);
     if (cleanup === "uncertain") {
       expect(boundary.release).not.toHaveBeenCalled();
+    }
+    if (legacyConfigPath) {
+      expect(boundary.health).toHaveBeenCalledWith(expect.objectContaining({ port: 23941 }));
+      expect(JSON.parse(fs.readFileSync(legacyConfigPath, "utf8"))).toMatchObject({
+        gateway: { port: 23941 },
+      });
+      expect(
+        fs.existsSync(path.join(path.dirname(path.dirname(legacyConfigPath)), ".openclaw")),
+      ).toBe(false);
     }
   },
 );

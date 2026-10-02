@@ -4,11 +4,7 @@ import { buildGatewayInstallPlan } from "../../commands/daemon-install-helpers.j
 import { resolveGatewayDaemonRuntime } from "../../commands/daemon-runtime.js";
 import { resolveGatewayInstallToken } from "../../commands/gateway-install-token.js";
 import { readConfigFileSnapshotForWrite } from "../../config/io.js";
-import {
-  resolveConfigPathCandidate,
-  resolveGatewayPort,
-  resolveStateDir,
-} from "../../config/paths.js";
+import { resolveConfigPath, resolveGatewayPort, resolveStateDir } from "../../config/paths.js";
 import { OPENCLAW_WRAPPER_ENV_KEY, resolveOpenClawWrapperPath } from "../../daemon/program-args.js";
 import {
   resolveBunRuntimeInfo,
@@ -96,9 +92,9 @@ function assertGatewayRepairTargetMatches(params: {
     );
   }
   const installedStateDir = resolveStateDir(installedEnv);
-  const installedConfigPath = resolveConfigPathCandidate(installedEnv);
+  const installedConfigPath = resolveConfigPath(installedEnv);
   const ambientStateDir = resolveStateDir(process.env);
-  const ambientConfigPath = resolveConfigPathCandidate(process.env);
+  const ambientConfigPath = resolveConfigPath(process.env);
   const ambientPort = resolveGatewayPort(params.config, process.env);
   const sameConfigPath =
     normalizeTargetPath(installedConfigPath) === normalizeTargetPath(ambientConfigPath);

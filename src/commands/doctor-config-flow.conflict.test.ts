@@ -144,11 +144,11 @@ describe("Doctor repair confirmation conflicts", () => {
     });
   });
 
-  it("reports a saved repair when the preferred config appears during post-write audit metadata", async () => {
+  it("reports a saved repair when config selection changes during post-write audit metadata", async () => {
     await withDoctorConfigPreflightHome(async (home) => {
       const stateDir = path.join(home, "doctor-state");
-      const configPath = path.join(stateDir, "clawdbot.json");
-      const preferredPath = path.join(stateDir, "openclaw.json");
+      const configPath = path.join(stateDir, "openclaw.json");
+      const preferredPath = path.join(stateDir, "other.json");
       await fs.mkdir(stateDir);
       const config = createRepairableConfig(home);
       const original = JSON.stringify(config, null, 2);
@@ -162,11 +162,12 @@ describe("Doctor repair confirmation conflicts", () => {
         2,
       );
       await fs.writeFile(configPath, original);
+      await fs.writeFile(preferredPath, preferred);
 
       try {
         await withEnvAsync(
           {
-            OPENCLAW_CONFIG_PATH: undefined,
+            OPENCLAW_CONFIG_PATH: configPath,
             OPENCLAW_PROFILE: undefined,
             OPENCLAW_STATE_DIR: stateDir,
             OPENCLAW_TEST_FAST: undefined,
@@ -185,9 +186,7 @@ describe("Doctor repair confirmation conflicts", () => {
             expect(confirmationShown).toBe(true);
 
             let committed = false;
-            let preferredCheckedAfterRename = false;
-            let sourceRecheckedAfterRename = false;
-            let preferredCreated = false;
+            let selectionChanged = false;
             const renameSync = fsNode.renameSync.bind(fsNode);
             vi.spyOn(fsNode, "renameSync").mockImplementation((source, destination) => {
               renameSync(source, destination);
@@ -195,32 +194,19 @@ describe("Doctor repair confirmation conflicts", () => {
                 committed = true;
               }
             });
-            const existsSync = fsNode.existsSync.bind(fsNode);
-            vi.spyOn(fsNode, "existsSync").mockImplementation((target) => {
-              const exists = existsSync(target);
-              if (committed && target === preferredPath && !exists) {
-                preferredCheckedAfterRename = true;
-              }
-              if (preferredCheckedAfterRename && target === configPath && exists) {
-                sourceRecheckedAfterRename = true;
-              }
-              return exists;
-            });
             const stat = fsNode.promises.stat.bind(fsNode.promises);
             vi.spyOn(fsNode.promises, "stat").mockImplementation(async (...args) => {
               const result = await stat(...args);
-              // Skip the atomic primitive's publication verification; the first
-              // ownership check must pass before the later audit stat loses selection.
-              if (sourceRecheckedAfterRename && !preferredCreated && args[0] === configPath) {
-                await fs.writeFile(preferredPath, preferred, { flag: "wx" });
-                preferredCreated = true;
+              if (committed && !selectionChanged && args[0] === configPath) {
+                setTestEnvValue("OPENCLAW_CONFIG_PATH", preferredPath);
+                selectionChanged = true;
               }
               return result;
             });
 
             const failure = await runInitialConfigWriteHealth(ctx).catch((error: unknown) => error);
 
-            expect(preferredCreated).toBe(true);
+            expect(selectionChanged).toBe(true);
             const saved = JSON.parse(await fs.readFile(configPath, "utf8"));
             expect(saved.browser).toEqual({ enabled: false });
             expect(saved.logging.level).toBe("info");

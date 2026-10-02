@@ -1,6 +1,11 @@
 import path from "node:path";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PreparedAgentDatabaseMigrationDiscovery } from "../infra/state-migrations.media-persistence-targets.js";
+import {
+  resolveConfigPathForMigration,
+  resolveStateDirForMigration,
+} from "../infra/state-migrations.paths.js";
 import { DoctorUnreadableStateDatabaseError } from "../infra/state-repair-message.js";
 import type { OpenClawDatabaseSchemaPreflight } from "../state/openclaw-database-preflight.js";
 
@@ -14,6 +19,15 @@ export type DoctorDatabasePreflight = OpenClawDatabaseSchemaPreflight & {
 export async function prepareDoctorDatabasePreflight(
   options: { scope?: "state"; cfg?: OpenClawConfig } = {},
 ): Promise<DoctorDatabasePreflight> {
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), () =>
+    prepareDoctorDatabasePreflightForSelectedState(options),
+  );
+}
+
+async function prepareDoctorDatabasePreflightForSelectedState(options: {
+  scope?: "state";
+  cfg?: OpenClawConfig;
+}): Promise<DoctorDatabasePreflight> {
   const { scope } = options;
   const databasePreflight = await import("../state/openclaw-database-preflight.js");
   const [
@@ -31,6 +45,7 @@ export async function prepareDoctorDatabasePreflight(
     scope === "state" || options.cfg
       ? undefined
       : await createConfigIO({
+          configPath: resolveConfigPathForMigration(),
           env: { ...process.env },
           observe: false,
           pluginValidation: "core-only",

@@ -1,6 +1,7 @@
 import { formatCliCommand } from "../cli/command-format.js";
 import type { PreManagedServiceStop } from "../cli/update-cli/update-command-service-maintenance.js";
 import { isDefaultInstallIdentity } from "../config/paths.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   findServiceOwnershipRefusal,
@@ -14,6 +15,10 @@ import { readActiveGatewayLockIdentity } from "../infra/gateway-lock.js";
 import { GATEWAY_SERVICE_STOP_TIMEOUT_MS } from "../infra/gateway-shutdown-budget.js";
 import { GatewayStateOwnerContentionError } from "../infra/gateway-state-owner.js";
 import type { AgentDatabaseMigrationTarget } from "../infra/state-migrations.media-persistence-targets.js";
+import {
+  resolveConfigPathForMigration,
+  resolveStateDirForMigration,
+} from "../infra/state-migrations.paths.js";
 import { DoctorUnreadableStateDatabaseError } from "../infra/state-repair-message.js";
 import { UPDATE_RUN_ID_ENV } from "../infra/update-control-plane-sentinel.js";
 import { DoctorMaintenanceRefusalError, UpdateDoctorError } from "../infra/update-doctor-result.js";
@@ -58,6 +63,14 @@ import {
 } from "./doctor-update-refusal.js";
 
 export async function beginDoctorMaintenance(
+  params: DoctorMaintenanceParams,
+): Promise<DoctorMaintenance | undefined> {
+  return withMigrationStateDir(process.env, resolveStateDirForMigration(), () =>
+    beginDoctorMaintenanceForSelectedState(params),
+  );
+}
+
+async function beginDoctorMaintenanceForSelectedState(
   params: DoctorMaintenanceParams,
 ): Promise<DoctorMaintenance | undefined> {
   if (!(params.options.repair === true || params.options.yes === true)) {
@@ -343,9 +356,16 @@ export async function beginDoctorMaintenance(
               : `Warning: Doctor could not reacquire maintenance ownership: ${String(ownershipError)} Restoring its service without repairing shared state.`;
           warn(warning);
         }
-        const { readConfigFileSnapshot } = await import("../config/config.js");
+        const { createConfigIO } = await import("../config/io.factory.js");
         await finish(
-          (await readConfigFileSnapshot({ skipPluginValidation: true, observe: false })).config,
+          (
+            await createConfigIO({
+              configPath: resolveConfigPathForMigration(state.env),
+              env: state.env,
+              pluginValidation: "skip",
+              observe: false,
+            }).readConfigFileSnapshot()
+          ).config,
           assertStopCustody,
           undefined,
           assertStopCustody ?? assertUpdateAdmissionCurrent,
@@ -669,7 +689,7 @@ export async function beginDoctorMaintenance(
           try {
             cfg = await readDoctorMaintenanceRecoveryConfig(
               state.resources!,
-              env,
+              state.env,
               params.runtime.log,
             );
           } catch (error) {

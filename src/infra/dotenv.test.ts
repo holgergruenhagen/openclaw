@@ -5,6 +5,7 @@ import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it, vi } from "vitest";
 import { loadCliDotEnv } from "../cli/dotenv.js";
+import { withMigrationStateDir } from "../config/state-dir.js";
 import { captureFullEnv, deleteTestEnvValue, setTestEnvValue } from "../test-utils/env.js";
 import { loadGlobalRuntimeDotEnvFiles } from "./dotenv-global.js";
 import { loadDotEnv, loadWorkspaceDotEnvFile } from "./dotenv.js";
@@ -572,7 +573,7 @@ describe("loadCliDotEnv", () => {
     });
   });
 
-  it("keeps the legacy state-dir fallback for CLI dotenv loading", async () => {
+  it("leaves legacy state-dir dotenv loading to Doctor's selected root", async () => {
     await withIsolatedEnvAndCwd(async () => {
       const base = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dotenv-legacy-"));
       const cwdDir = path.join(base, "cwd");
@@ -588,6 +589,8 @@ describe("loadCliDotEnv", () => {
 
       loadCliDotEnv({ quiet: true });
 
+      expect(process.env.LEGACY_ONLY).toBeUndefined();
+      withMigrationStateDir(process.env, legacyStateDir, () => loadCliDotEnv({ quiet: true }));
       expect(process.env.LEGACY_ONLY).toBe("from-legacy");
     });
   });

@@ -11,7 +11,7 @@ import {
   isDefaultInstallIdentity,
   isNamedProfile,
   parseGatewayPortEnvValue,
-  resolveConfigPathCandidate,
+  resolveConfigPath,
   resolveStateDir,
 } from "../config/paths.js";
 import { hasErrnoCode } from "../infra/errno.js";
@@ -351,7 +351,7 @@ async function systemdInstallationIdentity(env: GatewayServiceEnv): Promise<stri
     [
       resolveRequiredHomeDir(env, home),
       resolveStateDir(env, home),
-      resolveConfigPathCandidate(env, home),
+      resolveConfigPath(env, undefined, home),
     ].map(async (pathname) => {
       try {
         return await fs.realpath(pathname);

@@ -52,6 +52,8 @@ state directory, preserving the original file. Explicit `OPENCLAW_STATE_DIR` and
 An explicitly selected state root only imports its own legacy config filename.
 Incidental files such as `.env` or logs in `~/.openclaw` do not hide legacy state;
 Doctor reports conflicting roots for reconciliation instead of starting empty.
+An existing canonical state or quarantine database keeps that root authoritative,
+even without a config file; retained legacy state never replaces it.
 `OPENCLAW_HOME` selects the home for both migration discovery and relocation.
 
 When Doctor selects a legacy home such as `~/.clawdbot`, it drains open database

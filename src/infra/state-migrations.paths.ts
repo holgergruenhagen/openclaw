@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { isWithinDir } from "@openclaw/fs-safe/path";
 import { resolveNewStateDir, resolveStateDir } from "../config/state-dir.js";
+import {
+  resolveOpenClawStateSqlitePath,
+  resolveQuarantineStorePath,
+} from "../state/openclaw-state-db.paths.js";
 import { resolveRequiredHomeDir, resolveUserPath } from "./home-dir.js";
 import { StartupMaintenanceRequiredError } from "./startup-maintenance-required.js";
 
@@ -62,7 +66,11 @@ export function resolveStateDirForMigration(
     return resolveStateDir(env, homedir);
   }
   if (
-    ["openclaw.json", "clawdbot.json"].some((name) => fs.existsSync(path.join(canonical, name)))
+    [
+      ...["openclaw.json", "clawdbot.json"].map((name) => path.join(canonical, name)),
+      resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: canonical }),
+      resolveQuarantineStorePath({ OPENCLAW_STATE_DIR: canonical }),
+    ].some((candidate) => fs.existsSync(candidate))
   ) {
     return canonical;
   }

@@ -53,9 +53,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
+#[cfg(not(target_os = "linux"))]
+use tauri::Emitter;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, State, Url, Webview, WebviewUrl,
-    WebviewWindowBuilder,
+    AppHandle, LogicalPosition, Manager, State, Url, Webview, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;

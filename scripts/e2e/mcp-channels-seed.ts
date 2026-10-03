@@ -9,7 +9,6 @@ async function main() {
   const configPath =
     process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(stateDir, "openclaw.json");
   const now = Date.now();
-  const frozenTarget = process.env.OPENCLAW_FROZEN_PLUGIN_PRERELEASE_FIXTURE_DIALECT === "legacy";
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
 
@@ -17,7 +16,6 @@ async function main() {
     {
       gateway: {
         controlUi: {
-          ...(frozenTarget ? { allowInsecureAuth: true } : {}),
           enabled: false,
         },
       },

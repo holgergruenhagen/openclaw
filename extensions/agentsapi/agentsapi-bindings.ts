@@ -6,7 +6,7 @@ import { createNativeSessionBindingLifecycle } from "openclaw/plugin-sdk/agent-h
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import { z } from "zod";
 
-export type AgentsApiBinding = { sessionId: string; configFingerprint: string };
+export type AgentsApiBinding = z.infer<typeof bindingSchema>;
 
 /** Native identity is plugin-owned; shared runtime owns mutation and lease coordination. */
 export function createAgentsApiBindings(runtime: PluginRuntime) {

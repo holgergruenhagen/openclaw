@@ -70,7 +70,7 @@ export function createAcpParentStreamRecorder(
               type: "record",
               input: { sessionId: options.sessionId, runId: options.runId, events: prepared },
             },
-            execution.assertCurrent,
+            () => execution.assertCurrent(),
           ),
         true,
       );

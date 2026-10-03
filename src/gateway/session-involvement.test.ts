@@ -1,4 +1,7 @@
+// Complete cold handler transforms during collection, before timed visibility RPCs.
+import "./server-methods/sessions-mutations.js";
 import { describe, expect, it } from "vitest";
+import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { loadSessionEntry, replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
 import { projectPublicSessionEntry } from "../config/sessions/session-entry-projection.js";
 import {
@@ -47,12 +50,24 @@ describe("personal session involvement", () => {
         items.map((item) => item.id),
       );
       expect((await list()).sessions.map((row) => row.key)).toEqual([SESSION_KEY]);
-      const setHidden = (hidden: boolean) =>
-        f.call("sessions.setInvolvement", {
-          key: SESSION_KEY,
-          expectedSessionId: SESSION_ID,
-          hidden,
-        });
+      const setHidden = async (hidden: boolean) => {
+        const sql = observeHostDataSql();
+        try {
+          const result = await f.call("sessions.setInvolvement", {
+            key: SESSION_KEY,
+            expectedSessionId: SESSION_ID,
+            hidden,
+          });
+          expect(
+            sql.queries.filter((query) =>
+              /\b(?:insert\s+into|update|delete\s+from)\s+["`]?session_nodes\b/i.test(query),
+            ),
+          ).toEqual([]);
+          return result;
+        } finally {
+          sql.restore();
+        }
+      };
       expect((await setHidden(true)).ok).toBe(true);
       expect((await list()).sessions).toEqual([]);
       expect((await list(f.bob.id, false)).sessions[0]?.hiddenFromInvolvingMe).toBe(true);

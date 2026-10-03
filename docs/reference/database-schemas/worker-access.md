@@ -1749,3 +1749,13 @@ Discord SDK's synchronous list, touch, lifecycle setter, and unbind compatibilit
 paths remain under the same owner, deprecated for removal at the next Plugin SDK
 major. Bundled callers use the awaited variants. ACP startup session reads are a
 separate worker migration.
+
+Committed human mentions and personal session visibility write involvement through
+the existing collaboration worker. The profile owner prepares merge aliases before
+the agent transaction and revalidates them at admission and commit; the worker
+rereads the exact session incarnation and preserves mention source ordering.
+Acknowledged results invalidate session rows through their existing owner.
+The Inbox FIFO joins accepted involvement and Inbox persistence before shutdown
+closes either database owner. Unknown outcomes are never replayed. The deprecated
+synchronous MentionInbox SDK contract remains until the next Plugin SDK major.
+Schemas, stored bytes, retention, permissions, and update behavior are unchanged.

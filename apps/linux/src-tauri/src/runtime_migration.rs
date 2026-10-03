@@ -211,6 +211,7 @@ struct ServiceLayout {
 struct RuntimeIntent {
     status: String,
     revision: Option<String>,
+    definition: Option<String>,
     stored: Option<bool>,
     pin: Option<RuntimePin>,
 }
@@ -863,6 +864,13 @@ fn install(cli: &OpenClawCli, target: &Target, state: &Snapshot, bun: bool) -> R
     if bun {
         command.arg("--runtime-path").arg(&target.runtime);
     }
+    command.arg("--expected-runtime-pin").arg(
+        serde_json::json!({
+            "revision": state.binding()?.pin_revision,
+            "definition": state.service.runtime_intent.as_ref().and_then(|intent| intent.definition.as_ref()),
+        })
+        .to_string(),
+    );
     if let Some(port) = state.gateway.get("port").and_then(Value::as_u64) {
         command.args(["--port", &port.to_string()]);
     }

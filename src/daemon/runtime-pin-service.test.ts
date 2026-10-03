@@ -60,6 +60,39 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("native service runtime pin persistence", () => {
+  it.each([false, true])(
+    "checks an unpinned guarded definition under the native lock (changed=%s)",
+    async (changed) => {
+      await withOpenClawTestState({ label: "pin-native-guarded-unpinned" }, async (state) => {
+        const scope = { kind: "gateway" as const, env: state.env };
+        const service = resolveGatewayService();
+        native.command = { programArguments: ["/original/node", "/app/openclaw.mjs", "gateway"] };
+        const expected = readDaemonRuntimePin(scope, native.command);
+        if (changed) {
+          native.command = { programArguments: ["/operator/node", "/app/openclaw.mjs", "gateway"] };
+        }
+        const previous = native.command;
+        const programArguments = ["/retained/node", "/app/openclaw.mjs", "gateway"];
+        const install = service.install({
+          env: state.env,
+          stdout: process.stdout,
+          programArguments,
+          runtimePinUpdate: { expected, requireDefinitionMatch: true },
+        });
+        if (changed) {
+          await expect(install).rejects.toThrow(/changed during runtime pin planning/);
+          expect(native.install).not.toHaveBeenCalled();
+          expect(native.command).toBe(previous);
+        } else {
+          await install;
+          expect(native.install).toHaveBeenCalledOnce();
+          expect(native.command?.programArguments).toEqual(programArguments);
+        }
+        expect(readDaemonRuntimePin(scope, native.command).stored).toBe(false);
+      });
+    },
+  );
+
   it("keeps pin-unaware default writes read-only for runtime metadata", async () => {
     await withOpenClawTestState({ label: "pin-native-default" }, async (state) => {
       const service = resolveGatewayService();

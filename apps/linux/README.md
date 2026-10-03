@@ -389,6 +389,8 @@ ownership. After explicit adoption, Tauri follows the same updater-first,
 same-version switch and rollback pattern automatically on app updates. A stopped
 Gateway remains stopped; use **Start Gateway** before migration. Changing the
 service's runtime selection independently revokes the app's migration authority.
+Each runtime install carries the observed service definition and pin revision to
+the CLI, so an intervening operator selection is preserved before installation.
 
 The companion checks the latest GitHub release shortly after launch and from **Check for Updates** in the tray menu. AppImage installs download and verify the signed update in place, then wait for **Restart to update**. Package-managed installs such as `.deb` stay owned by the system package manager and link to the release download page instead of replacing installed files. The macOS and Windows test builds use a separate opt-in desktop-test update channel; macOS self-updates like the AppImage build, while Windows downloads the update first and runs its installer only after **Restart to update**.
 

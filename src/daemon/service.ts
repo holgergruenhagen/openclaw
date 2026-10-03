@@ -368,14 +368,17 @@ function withGatewayServiceMutationGuards(
           );
         }
         assertDaemonRuntimePinCurrent(scope, update.expected);
-        if (update.pin || update.expected.stored) {
+        const checkDefinition = Boolean(
+          update.pin || update.expected.stored || update.requireDefinitionMatch,
+        );
+        if (checkDefinition) {
           const previous = await service.readCommand(args.env);
           args.assertCurrent?.();
           assertDaemonRuntimePinPlan(update.expected, previous);
           assertDaemonRuntimePinCurrent(scope, update.expected);
         }
         await mutate(args);
-        if (update.pin || update.expected.stored) {
+        if (checkDefinition) {
           const command = await service.readCommand(args.env);
           args.assertCurrent?.();
           assertDaemonRuntimePinDefinition(

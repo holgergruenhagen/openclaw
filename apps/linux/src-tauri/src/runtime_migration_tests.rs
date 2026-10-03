@@ -157,6 +157,47 @@ fn identical_runtime_pin_in_another_profile_does_not_transfer_app_ownership() {
 }
 
 #[test]
+fn runtime_install_transports_observed_pin_and_definition() {
+    let fixture = Fixture::new();
+    let wrapper = fixture.wrapper();
+    let calls = fixture.0.join("install-args");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{{\"ok\":true}}\\n'\n",
+        calls.display().to_string().replace('\'', "'\\''")
+    );
+    let bun = fixture.0.join("bun");
+    for path in [&wrapper.node.runtime, &bun] {
+        fs::write(path, &script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let bun_target =
+        bundled_target(&BundledRuntime { bun, sqlite: None }, &wrapper.node.entry).unwrap();
+    let cli = OpenClawCli::browser_runtime(fixture.0.clone()).unwrap();
+    for (target, definition) in [
+        (&bun_target, Some("original-definition")),
+        (&wrapper.node, Some("bun-definition")),
+        (&bun_target, None),
+    ] {
+        let mut state = fixture.state(&wrapper);
+        state.service.runtime_intent.as_mut().unwrap().definition = definition.map(str::to_owned);
+        install(&cli, target, &state, target.bun).unwrap();
+        let argv = fs::read_to_string(&calls).unwrap();
+        let argv: Vec<_> = argv.lines().collect();
+        let expectation = argv
+            .iter()
+            .position(|arg| *arg == "--expected-runtime-pin")
+            .unwrap();
+        let observed: Value = serde_json::from_str(argv[expectation + 1]).unwrap();
+        assert_eq!(
+            observed,
+            serde_json::json!({ "revision": "no-pin", "definition": definition })
+        );
+        let runtime = argv.iter().position(|arg| *arg == "--runtime").unwrap();
+        assert_eq!(argv[runtime + 1], if target.bun { "bun" } else { "node" });
+    }
+}
+
+#[test]
 fn failed_install_does_not_restore_wrapper_from_a_foreign_healthy_rpc() {
     let fixture = Fixture::new();
     let wrapper = fixture.wrapper();
@@ -240,7 +281,7 @@ fn partial_owned_update_qualifies_node_and_restores_the_current_package() {
     let restored_status = fixture.0.join("restored-status.json");
     fs::write(&version_file, "2026.10.1\n").unwrap();
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
-    let node_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) if test -e {}; then exec /bin/cat {}; else exec /bin/cat {}; fi ;;\n *'update --yes'*) printf 'update\\n' >> {}; printf '2026.10.2\\n' > {} ;;\n *'update repair'*) printf 'repair\\n' >> {}; : > {} ;;\n *'gateway install --force --json --runtime node --port 18789') printf 'install-node\\n' >> {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-node-mutation\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&blocked), quote(&blocked_status), quote(&node_status), quote(&calls), quote(&version_file), quote(&calls), quote(&blocked), quote(&calls), quote(&restored_status), quote(&node_status), quote(&calls));
+    let node_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) if test -e {}; then exec /bin/cat {}; else exec /bin/cat {}; fi ;;\n *'update --yes'*) printf 'update\\n' >> {}; printf '2026.10.2\\n' > {} ;;\n *'update repair'*) printf 'repair\\n' >> {}; : > {} ;;\n *'gateway install --force --json --runtime node --expected-runtime-pin '*' --port 18789') printf 'install-node\\n' >> {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-node-mutation\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&blocked), quote(&blocked_status), quote(&node_status), quote(&calls), quote(&version_file), quote(&calls), quote(&blocked), quote(&calls), quote(&restored_status), quote(&node_status), quote(&calls));
     let bun_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) exec /bin/cat {} ;;\n *) printf 'unexpected-bun-maintenance\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&bun_status), quote(&calls));
     for (path, script) in [(&wrapper.node.runtime, node_script), (&bun, bun_script)] {
         fs::write(path, script).unwrap();

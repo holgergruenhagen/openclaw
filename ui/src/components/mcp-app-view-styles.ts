@@ -12,9 +12,15 @@ export const mcpAppViewStyles = css`
   .mount:empty {
     min-height: 0;
   }
-  :host([fill-container]),
-  :host([fill-container]) .mount {
+  :host([fill-container]) {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  :host([fill-container]) .mount,
+  :host([display-mode="fullscreen"]) .mount {
+    flex: 1;
     min-height: 0;
   }
   iframe {
@@ -24,6 +30,9 @@ export const mcpAppViewStyles = css`
     background: var(--board-surface, transparent);
   }
   :host([display-mode="fullscreen"]) {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
     position: fixed;
     inset: 0;
     z-index: 1000;
@@ -32,9 +41,6 @@ export const mcpAppViewStyles = css`
     margin: 0;
     border: 0;
     box-sizing: border-box;
-  }
-  :host([display-mode="fullscreen"]) .mount {
-    height: calc(100dvh - 40px);
   }
   .exit-fullscreen {
     position: absolute;

@@ -392,10 +392,45 @@ function resumed(expectedVersion) {
   const config = readJson(configPath);
   assert.equal(config.plugins.entries.codex.config.codexDynamicToolsProfile, undefined);
   const status = cli("update-status-resumed", ["update", "status", "--json"]);
+  const warnings = status.migrationWarnings;
+  assert(Array.isArray(warnings), "Pending ambiguous setup debt lost its update warning");
   assert.equal(
-    status.migrationWarnings,
-    undefined,
-    "Completed migrations still have active warnings",
+    warnings.filter((warning) =>
+      warning.startsWith('Plugin "public-setup-ambiguous" data/settings upgrade is unfinished:'),
+    ).length,
+    1,
+    "Ambiguous setup debt did not retain exactly one owner warning",
+  );
+  assert.equal(
+    warnings.some((warning) =>
+      warning.startsWith('Plugin "codex" data/settings upgrade is unfinished:'),
+    ),
+    false,
+    "Completed Codex migration retained its owner warning",
+  );
+  const retainedSourceWarnings = warnings.filter((warning) =>
+    warning.includes("[plugin_migration_source_retained]"),
+  );
+  assert.equal(
+    retainedSourceWarnings.length,
+    fixture.specimens.length,
+    "Ambiguous setup debt did not retain every protected migration source warning",
+  );
+  assert(
+    retainedSourceWarnings.every((warning) => warning.includes("public-setup-ambiguous")),
+    "Protected source warnings omitted the pending ambiguous owner",
+  );
+  for (const specimen of fixture.specimens) {
+    const storePath = Object.keys(specimen.files).find((file) => file.endsWith("/sessions.json"));
+    assert(
+      storePath && retainedSourceWarnings.some((warning) => warning.startsWith(`${storePath}:`)),
+      `Protected source warning omitted ${specimen.agentId}'s session store`,
+    );
+  }
+  assert.equal(
+    warnings.length,
+    retainedSourceWarnings.length + 1,
+    "Resumed update retained an unexpected migration warning",
   );
   assert.equal(
     status.migrationWarningsError,

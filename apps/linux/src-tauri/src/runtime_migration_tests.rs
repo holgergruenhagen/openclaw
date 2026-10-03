@@ -160,6 +160,7 @@ fn identical_runtime_pin_in_another_profile_does_not_transfer_app_ownership() {
 fn runtime_install_transports_observed_pin_and_definition() {
     let fixture = Fixture::new();
     let wrapper = fixture.wrapper();
+    fs::set_permissions(&wrapper.path, fs::Permissions::from_mode(0o700)).unwrap();
     let calls = fixture.0.join("install-args");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{{\"ok\":true}}\\n'\n",

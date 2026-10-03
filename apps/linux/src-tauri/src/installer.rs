@@ -168,7 +168,11 @@ pub(crate) fn browser_runtime(
         return Err("The native browser document changed.".into());
     }
     let runtime = crate::bundled_runtime::seed(app)?;
-    crate::runtime_migration::bind_cli_runtime_only(&cli, &runtime)?;
+    crate::runtime_migration::bind_runtime(
+        &cli,
+        &runtime,
+        crate::runtime_migration::Purpose::Browser,
+    )?;
     Ok(cli)
 }
 

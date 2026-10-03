@@ -36,12 +36,8 @@ pub(crate) enum MigrationOutcome {
     PreservedExternal,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct MigrationStatus {
     pub managed: bool,
-    pub can_adopt: bool,
-    pub can_restore: bool,
     pub paused: bool,
 }
 
@@ -134,7 +130,7 @@ fn pending_state(metadata: &Managed, state: &Snapshot) -> Result<PendingState, S
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Purpose {
+pub(crate) enum Purpose {
     Gateway,
     Browser,
 }
@@ -403,31 +399,12 @@ pub(crate) fn inspect(cli: &OpenClawCli) -> Result<MigrationStatus, String> {
     });
     Ok(MigrationStatus {
         managed: bound || pending || fresh,
-        can_adopt: wrapper.managed.is_none()
-            && state.binding().is_ok()
-            && state.unpinned()
-            && (state.absent() || state.matches_target(&wrapper.node)),
-        can_restore: (bound || pending) && retained_bytes(&wrapper).is_ok(),
         paused: state.paused(),
     })
 }
 
-/// Private browser setup has no service authority; its launcher deliberately has no service binding.
-pub(crate) fn bind_cli_runtime_only(
-    cli: &OpenClawCli,
-    runtime: &BundledRuntime,
-) -> Result<(), String> {
-    bind_runtime(cli, runtime, Purpose::Browser)
-}
-
-pub(crate) fn bind_fresh_cli_runtime(
-    cli: &OpenClawCli,
-    runtime: &BundledRuntime,
-) -> Result<(), String> {
-    bind_runtime(cli, runtime, Purpose::Gateway)
-}
-
-fn bind_runtime(
+/// Private browser launchers carry no Gateway service authority or binding.
+pub(crate) fn bind_runtime(
     cli: &OpenClawCli,
     runtime: &BundledRuntime,
     purpose: Purpose,
@@ -465,25 +442,19 @@ pub(crate) fn migrate(
     {
         return resume_pending(cli, runtime, app_version, is_current, &wrapper);
     }
-    let mode = if mode == Mode::OwnedUpdate
-        && wrapper
-            .managed
-            .as_ref()
-            .is_some_and(|value| value.purpose == Purpose::Gateway && value.binding.is_none())
-    {
-        Mode::Fresh
-    } else {
-        mode
+    let mode = match (mode, wrapper.managed.as_ref()) {
+        (Mode::OwnedUpdate, Some(metadata))
+            if metadata.purpose == Purpose::Gateway && metadata.binding.is_none() =>
+        {
+            Mode::Fresh
+        }
+        (Mode::OwnedUpdate, metadata)
+            if metadata.and_then(|value| value.binding.as_ref()).is_none() =>
+        {
+            return Ok(MigrationOutcome::PreservedExternal);
+        }
+        _ => mode,
     };
-    if mode == Mode::OwnedUpdate
-        && wrapper
-            .managed
-            .as_ref()
-            .and_then(|value| value.binding.as_ref())
-            .is_none()
-    {
-        return Ok(MigrationOutcome::PreservedExternal);
-    }
     let mut state = capture(cli, None, false)?;
     if mode == Mode::Fresh && !state.absent() {
         return Err(CHANGED.into());
@@ -680,10 +651,7 @@ fn resume_pending(
     if selection == PendingState::Node {
         wait_healthy(cli, &wrapper.node, &state.binding()?, is_current)?;
         recheck(cli, wrapper, &state, is_current, true)?;
-        let verified = capture(cli, Some(&wrapper.node), true)?;
-        if verified.binding()? != state.binding()? || !verified.healthy_for(&wrapper.node) {
-            return Err(CHANGED.into());
-        }
+        verify_healthy(cli, &wrapper.node, &state.binding()?)?;
         publish(wrapper, &retained_bytes(wrapper)?)?;
         return Err("The interrupted transition restored the previous Node runtime. Choose Use bundled runtime again when ready; a stopped Gateway remains stopped.".into());
     }
@@ -694,10 +662,7 @@ fn resume_pending(
         }
         let binding = current.binding()?;
         wait_healthy(cli, &metadata.target, &binding, is_current)?;
-        let verified = capture(cli, Some(&metadata.target), true)?;
-        if verified.binding()? != binding || !verified.healthy_for(&metadata.target) {
-            return Err(CHANGED.into());
-        }
+        verify_healthy(cli, &metadata.target, &binding)?;
         same_wrapper(wrapper)?;
         check_current(is_current)?;
         let mut completed = metadata.clone();
@@ -746,16 +711,7 @@ pub(crate) fn restore_retained_node(
     };
     require_retained_node(&state, &wrapper.node, &package_version)?;
     recheck(cli, &wrapper, &state, is_current, true)?;
-    install(cli, &wrapper.node, &state, false)?;
-    let restored = capture(cli, Some(&wrapper.node), false)?;
-    if !restored.matches_target(&wrapper.node) || !restored.unpinned() {
-        return Err(CHANGED.into());
-    }
-    wait_healthy(cli, &wrapper.node, &restored.binding()?, is_current)?;
-    let verified = capture(cli, Some(&wrapper.node), true)?;
-    if verified.binding()? != restored.binding()? || !verified.healthy_for(&wrapper.node) {
-        return Err(CHANGED.into());
-    }
+    install_retained_node(cli, &wrapper.node, &state, is_current)?;
     check_current(is_current)?;
     publish(&wrapper, &original)
 }
@@ -835,18 +791,33 @@ fn restore_after_failure(
     if capture(cli, Some(&wrapper.node), false)?.binding()? != before {
         return Err(CHANGED.into());
     }
-    install(cli, &wrapper.node, &current, false)?;
-    let restored = capture(cli, Some(&wrapper.node), false)?;
-    if !restored.matches_target(&wrapper.node) || !restored.unpinned() {
-        return Err(CHANGED.into());
-    }
-    wait_healthy(cli, &wrapper.node, &restored.binding()?, &|| true)?;
-    let verified = capture(cli, Some(&wrapper.node), true)?;
-    if verified.binding()? != restored.binding()? || !verified.healthy_for(&wrapper.node) {
-        return Err(CHANGED.into());
-    }
+    install_retained_node(cli, &wrapper.node, &current, &|| true)?;
     if wrapper.managed.is_some() {
         publish(wrapper, &retained_bytes(wrapper)?)?;
+    }
+    Ok(())
+}
+
+fn install_retained_node(
+    cli: &OpenClawCli,
+    node: &Target,
+    state: &Snapshot,
+    is_current: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    install(cli, node, state, false)?;
+    let restored = capture(cli, Some(node), false)?;
+    if !restored.matches_target(node) || !restored.unpinned() {
+        return Err(CHANGED.into());
+    }
+    let binding = restored.binding()?;
+    wait_healthy(cli, node, &binding, is_current)?;
+    verify_healthy(cli, node, &binding)
+}
+
+fn verify_healthy(cli: &OpenClawCli, target: &Target, binding: &Binding) -> Result<(), String> {
+    let verified = capture(cli, Some(target), true)?;
+    if verified.binding()? != *binding || !verified.healthy_for(target) {
+        return Err(CHANGED.into());
     }
     Ok(())
 }
@@ -1251,16 +1222,20 @@ fn backup(wrapper: &Path, kind: &str, bytes: &[u8]) -> Result<PathBuf, String> {
         ".openclaw-tauri-{kind}-{}.backup",
         uuid::Uuid::new_v4()
     ));
+    write_private_file(&path, bytes, 0o600)?;
+    Ok(path)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
-        .open(&path)
+        .mode(mode)
+        .open(path)
         .map_err(|error| error.to_string())?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|error| error.to_string())?;
-    Ok(path)
+        .map_err(|error| error.to_string())
 }
 
 fn publish(wrapper: &Wrapper, bytes: &[u8]) -> Result<(), String> {
@@ -1268,15 +1243,7 @@ fn publish(wrapper: &Wrapper, bytes: &[u8]) -> Result<(), String> {
         .path
         .with_file_name(format!(".openclaw-tauri-launcher-{}", uuid::Uuid::new_v4()));
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&temporary)
-            .map_err(|error| error.to_string())?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| error.to_string())?;
+        write_private_file(&temporary, bytes, 0o700)?;
         same_wrapper(wrapper)?;
         fs::rename(&temporary, &wrapper.path).map_err(|error| error.to_string())
     })();

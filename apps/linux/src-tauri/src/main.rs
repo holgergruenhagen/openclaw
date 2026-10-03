@@ -879,7 +879,7 @@ impl DesktopState {
         })?;
         #[cfg(not(target_os = "windows"))]
         if let Some(runtime) = runtime.as_ref() {
-            runtime_migration::bind_fresh_cli_runtime(&cli, runtime)?;
+            runtime_migration::bind_runtime(&cli, runtime, runtime_migration::Purpose::Gateway)?;
         }
         *self.inner.cli.lock().expect("CLI mutex poisoned") = Some(cli.clone());
 

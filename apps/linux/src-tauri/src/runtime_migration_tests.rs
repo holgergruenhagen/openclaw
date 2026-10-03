@@ -885,6 +885,67 @@ fn interrupted_bun_bindings_become_external_without_health_or_service_mutation()
 }
 
 #[test]
+fn operator_pause_after_pending_publication_never_installs_or_recovers_a_service() {
+    let fixture = MigrationFixture::new();
+    let mut stopped = fixture.fixture.state_json(&fixture.wrapper);
+    stopped["service"]["runtime"]["status"] = "stopped".into();
+    let paused = std::cell::Cell::new(false);
+    let interrupted = std::cell::RefCell::new(None);
+    let is_current = || {
+        let wrapper = read_wrapper(&fixture.cli).unwrap();
+        if wrapper
+            .managed
+            .as_ref()
+            .is_some_and(|metadata| metadata.pending.is_some())
+            && !paused.replace(true)
+        {
+            fixture.write_state("current", &stopped);
+            interrupted.replace(Some((wrapper.bytes, fixture.current_bytes())));
+        }
+        true
+    };
+    assert!(migrate(
+        &fixture.cli,
+        &fixture.runtime,
+        "2026.10.1",
+        Mode::Adopt,
+        &is_current,
+    )
+    .is_err());
+    let (pending_bytes, stopped_service) = interrupted
+        .into_inner()
+        .expect("the operator stop must occur after pending intent is published");
+    assert_eq!(fixture.calls(), "repair\n");
+    assert_eq!(fixture.current_bytes(), stopped_service);
+    assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), pending_bytes);
+    let metadata = read_wrapper(&fixture.cli).unwrap().managed.unwrap();
+    let pending = metadata.pending.unwrap();
+    assert_eq!(
+        pending.original,
+        fixture.fixture.state(&fixture.wrapper).binding().unwrap()
+    );
+    for (path, expected) in [
+        (&pending.original_wrapper, &pending.original_wrapper_sha256),
+        (
+            &metadata.retained_wrapper,
+            &metadata.retained_wrapper_sha256,
+        ),
+    ] {
+        assert_eq!(
+            verified_backup(path, expected).unwrap(),
+            fixture.wrapper.bytes
+        );
+    }
+    assert_eq!(
+        fixture.migrate(Mode::OwnedUpdate).unwrap(),
+        MigrationOutcome::DeferredPaused
+    );
+    assert_eq!(fixture.calls(), "repair\n");
+    assert_eq!(fixture.current_bytes(), stopped_service);
+    assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), pending_bytes);
+}
+
+#[test]
 fn interrupted_original_binding_recovers_before_installing_and_keeps_pause() {
     for paused in [false, true] {
         let fixture = MigrationFixture::new();

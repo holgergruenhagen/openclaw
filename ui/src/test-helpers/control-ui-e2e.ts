@@ -1338,7 +1338,15 @@ function installControlUiMockGateway(
     return Object.hasOwn(record, key);
   }
 
-  function applyScenarioAgentModel(method: string, value: unknown): unknown {
+  function applyScenarioAgentModel(method: string, response: unknown, params?: unknown): unknown {
+    const value =
+      method === "agents.list" &&
+      isRecord(response) &&
+      Array.isArray(response.agents) &&
+      isRecord(params) &&
+      params.includeSessionPlacement === true
+        ? { sessionPlacement: {}, ...response }
+        : response;
     if (!scenario.agentModel || !isRecord(value)) {
       return value;
     }
@@ -1889,7 +1897,7 @@ function installControlUiMockGateway(
     }
     const configured = responseFixtures.select(method, params);
     if (configured.found) {
-      const configuredValue = applyScenarioAgentModel(method, configured.value);
+      const configuredValue = applyScenarioAgentModel(method, configured.value, params);
       return method === "sessions.list"
         ? sessions.listResponse(configuredValue, params, {
             renames: groupsState.renames,
@@ -2060,6 +2068,9 @@ function installControlUiMockGateway(
         };
       case "agents.list":
         return {
+          ...(isRecord(params) && params.includeSessionPlacement === true
+            ? { sessionPlacement: {} }
+            : {}),
           agents: [
             {
               id: scenario.defaultAgentId,
@@ -2697,6 +2708,7 @@ function installControlUiMockGateway(
           applyScenarioAgentModel(
             response.method,
             payload ?? buildResponse(response.method, response.params),
+            response.params,
           ),
         );
         const mockError = isRecord(resolvedPayload) ? resolvedPayload["__mockError"] : undefined;

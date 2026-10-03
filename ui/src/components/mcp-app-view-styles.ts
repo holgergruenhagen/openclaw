@@ -1,5 +1,15 @@
 import { css } from "lit";
 
+export const mcpAppBannerStyles = css`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  background: var(--bg-accent);
+  color: var(--text);
+  font-size: 13px;
+`;
+
 export const mcpAppViewStyles = css`
   :host {
     display: block;
@@ -48,14 +58,8 @@ export const mcpAppViewStyles = css`
     right: 8px;
   }
   .inactive {
-    display: flex;
-    align-items: center;
+    ${mcpAppBannerStyles}
     justify-content: space-between;
-    gap: 12px;
-    padding: 14px;
-    background: var(--bg-accent);
-    color: var(--text);
-    font-size: 13px;
   }
   .inactive button {
     flex-shrink: 0;

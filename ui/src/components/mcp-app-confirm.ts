@@ -2,23 +2,18 @@ import { css, html, nothing } from "lit";
 import { ref } from "lit/directives/ref.js";
 import { t } from "../i18n/index.ts";
 import { registerMcpAppEnglish } from "../i18n/locales/en-mcp-app.ts";
-import { isWidgetFrameInteractable } from "./mcp-app-security.ts";
+import { mcpAppBannerStyles } from "./mcp-app-view-styles.ts";
 
 registerMcpAppEnglish();
 
 const styles = css`
   .mcp-app-confirm {
+    ${mcpAppBannerStyles}
     position: relative;
     z-index: 1;
     box-sizing: border-box;
-    display: flex;
     flex-shrink: 0;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    padding: 14px;
-    background: var(--bg-accent);
-    color: var(--text);
     font: 13px/1.4 var(--font-body, sans-serif);
     border-bottom: 1px solid var(--border);
   }
@@ -77,15 +72,14 @@ export class McpAppConfirm {
 
   constructor(private readonly requestUpdate: () => void) {}
 
-  async request(confirmation: Confirmation): Promise<boolean> {
+  request(confirmation: Confirmation): Promise<boolean> {
     if (this.pending || !confirmation.isCurrent()) {
-      return false;
+      return Promise.resolve(false);
     }
-    const accepted = await new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       this.pending = { ...confirmation, resolve };
       this.requestUpdate();
     });
-    return accepted && confirmation.isCurrent();
   }
 
   cancel(): void {
@@ -119,7 +113,7 @@ export class McpAppConfirm {
     if (restoreFocus && current) {
       pending.frame.focus({ preventScroll: true });
     }
-    pending.resolve(accepted && current && isWidgetFrameInteractable(pending.frame));
+    pending.resolve(accepted && current);
   }
 
   render() {

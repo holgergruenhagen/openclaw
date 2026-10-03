@@ -293,8 +293,8 @@ export class SqliteBoardStore implements BoardStore {
     ) => Promise<Value | undefined>,
     consume: (value: Value | undefined, sessionKey: string) => T,
   ): Promise<Awaited<T>> {
-    target = { ...target };
-    const resolved = this.options.resolveSession(target);
+    const capturedTarget = { ...target };
+    const resolved = this.options.resolveSession(capturedTarget);
     const env = cloneEnvWithPlatformSemantics(this.options.env ?? process.env);
     env.OPENCLAW_STATE_DIR = resolveStateDir(env);
     const captured = {
@@ -306,7 +306,7 @@ export class SqliteBoardStore implements BoardStore {
     // Consumer continuations retain caller authority, not this read turn's reentrant grant.
     const runInCallerContext = AsyncLocalStorage.snapshot();
     const accept = (value: Value | undefined) => {
-      this.assertTargetCurrent(target, resolved);
+      this.assertTargetCurrent(capturedTarget, resolved);
       const result = runInCallerContext(consume, value, captured.sessionKey);
       // Cleanup may await the worker after consumption has already rejected.
       if (isPromise(result)) {
@@ -317,7 +317,7 @@ export class SqliteBoardStore implements BoardStore {
     if (isIncognitoOpenClawAgentSqlitePath(captured.path, captured)) {
       // The excluded process-held owner cannot be reopened by a durable worker.
       const result = await runOpenClawAgentWorkerWrite(captured, async () => {
-        this.assertTargetCurrent(target, resolved);
+        this.assertTargetCurrent(capturedTarget, resolved);
         const read = withOpenClawAgentDatabaseReadOnly(
           (database) => native(database, captured.sessionKey),
           captured,
@@ -341,7 +341,7 @@ export class SqliteBoardStore implements BoardStore {
     });
     const assertCurrent = () => {
       execution.assertCurrent();
-      this.assertTargetCurrent(target, resolved);
+      this.assertTargetCurrent(capturedTarget, resolved);
     };
     let publication: OpenClawAgentSqliteWorkerStore<BoardReadOperations> | undefined;
     let result: { value: T } | undefined;

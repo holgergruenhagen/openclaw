@@ -5,6 +5,7 @@ import {
   withArtifactPreservingStateReads,
   withExistingOpenClawStateDatabaseReadOnly,
 } from "../../state/openclaw-state-db-readonly.js";
+import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import {
   readUserModelAuthProfile,
   updateUserModelAuthProfile,
@@ -13,6 +14,11 @@ import type { WorkerOperationHandlers } from "../../state/worker-operation-regis
 import { readAuthProfileRows, SHARED_AUTH_STORE_STATE_KEY } from "./sqlite-json.js";
 import { isMissingDatabasePath } from "./sqlite-read-pool.js";
 import type { AuthProfileRowRead } from "./types.js";
+import {
+  recordAuthProfileUsageInDatabase,
+  type AuthProfileUsageInput,
+  type AuthProfileUsageResult,
+} from "./usage-kernel.js";
 import type {
   PersonalAuthProfileUsageReduction,
   PersonalAuthProfileUsageResult,
@@ -21,6 +27,17 @@ import { reduceAuthProfileFailure } from "./usage-reduction.js";
 import { resetAuthProfileFailureState } from "./usage-state.js";
 
 export const authProfileOperations = {
+  "authProfiles.usage": (input: AuthProfileUsageInput, { stateOptions }): AuthProfileUsageResult =>
+    runOpenClawStateWriteTransaction(
+      ({ db, path }) => {
+        requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
+        const receipt = recordAuthProfileUsageInDatabase(db, path, "shared-state", input);
+        requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
+        return { ok: true, receipt };
+      },
+      stateOptions(),
+      { operationLabel: "auth-profiles.usage" },
+    ),
   "authProfiles.personalUsage": (
     input: { profileId: string; reduction: PersonalAuthProfileUsageReduction },
     { stateOptions },

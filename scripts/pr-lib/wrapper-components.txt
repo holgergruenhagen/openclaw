@@ -207,6 +207,7 @@ src/agents/agent-runtime-id.ts
 src/agents/agent-scope-config.ts
 src/agents/agent-scope.ts
 src/agents/auth-profiles/sqlite-json.ts
+src/agents/auth-profiles/store-unreadable-error.ts
 src/agents/auth-profiles/sqlite-read-pool.ts
 src/agents/configured-provider-fallback.ts
 src/agents/configured-provider-model.ts

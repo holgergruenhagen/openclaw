@@ -8,6 +8,7 @@ import { prepareAuthProfileStateMutation } from "./store-mutation.js";
 import { AuthProfileStoreUnreadableError } from "./store-unreadable-error.js";
 import type { AuthProfileFailureReason, AuthProfileStore, ProfileUsageStats } from "./types.js";
 import { computeNextProfileUsageStats } from "./usage-failure-state.js";
+import type { AuthProfileUsageInput, AuthProfileUsageResult } from "./usage-kernel.js";
 import { resolveInlineProviderApiKeyUsageId } from "./usage-state.js";
 
 export type InlineAuthFailureInput = {
@@ -42,6 +43,7 @@ export type InlineAuthFailureOperations = {
     output: import("./types.js").AuthProfileRowRead;
   };
   "authProfiles.inlineFailure": { input: InlineAuthFailureInput; output: InlineAuthFailureResult };
+  "authProfiles.usage": { input: AuthProfileUsageInput; output: AuthProfileUsageResult };
 };
 
 /** The admitted agent transaction owns the fresh read, health reduction, and durable cells. */

@@ -1,7 +1,8 @@
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 /**
  * Usage mutation and quota recovery tests for auth profiles.
- * Covers WHAM probes and store persistence hooks without contacting real providers.
+ * Covers WHAM request planning and real reducer outcomes without contacting providers.
+ * Worker persistence and publication are covered at the embedded-runner boundary.
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -19,6 +20,11 @@ import {
 import { createFailedOAuthRefreshFence, createOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import * as oauth from "./oauth.js";
 import type { AuthProfileStore, ProfileUsageStats } from "./types.js";
+import type { AuthProfileUsageReceipt } from "./usage-kernel.js";
+import {
+  reduceAuthProfileFailure,
+  type PersonalAuthProfileUsageReduction,
+} from "./usage-reduction.js";
 import {
   clearExpiredCooldowns,
   isProfileInCooldown,
@@ -38,6 +44,18 @@ const storeMocks = vi.hoisted(() => ({
   loadAuthProfileStoreWithoutExternalProfiles: vi.fn(),
   updateAuthProfileStoreWithLock: vi.fn().mockResolvedValue(null),
 }));
+const usageMocks = vi.hoisted(() => ({
+  withAuthProfileUsage: vi.fn<typeof import("./usage-write.js").withAuthProfileUsage>(),
+  readFresh: vi.fn<() => AuthProfileStore | undefined>(),
+  record:
+    vi.fn<
+      (
+        store: AuthProfileStore,
+        profileId: string,
+        reduction: PersonalAuthProfileUsageReduction,
+      ) => Promise<AuthProfileUsageReceipt | null>
+    >(),
+}));
 const fetchMock = vi.hoisted(() => vi.fn());
 const resolveApiKeyForProfileMock = vi.hoisted(() =>
   vi.fn<typeof import("./oauth.js").resolveApiKeyForProfile>(),
@@ -49,6 +67,7 @@ vi.mock("./store.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./store.js")>()),
   resolvePersistedAuthProfileOwnerAgentDir: storeMocks.resolvePersistedAuthProfileOwnerAgentDir,
 }));
+vi.mock("./usage-write.js", () => ({ withAuthProfileUsage: usageMocks.withAuthProfileUsage }));
 vi.mock("./store-runtime.js", () => ({
   loadAuthProfileStoreWithoutExternalProfiles:
     storeMocks.loadAuthProfileStoreWithoutExternalProfiles,
@@ -64,6 +83,41 @@ beforeEach(() => {
   storeMocks.saveAuthProfileStore.mockReset();
   storeMocks.loadAuthProfileStoreWithoutExternalProfiles.mockReset();
   storeMocks.updateAuthProfileStoreWithLock.mockReset();
+  usageMocks.readFresh.mockReset();
+  usageMocks.withAuthProfileUsage
+    .mockReset()
+    .mockImplementation(async (store, profileId, _agentDir, consume) =>
+      consume({
+        observed: structuredClone(usageMocks.readFresh() ?? store),
+        inherited: false,
+        record: (reduction) => usageMocks.record(store, profileId, reduction),
+      }),
+    );
+  usageMocks.record.mockReset().mockImplementation(async (store, profileId, reduction) => {
+    if (reduction.kind !== "failure") {
+      throw new Error("Failure planning fixture received a success reduction");
+    }
+    const fresh = structuredClone(usageMocks.readFresh() ?? store);
+    const previous = fresh.usageStats?.[profileId];
+    const now = Date.now();
+    // Only transport is replaced: provider observations feed the same worker reducer.
+    const next = reduceAuthProfileFailure(fresh.profiles[profileId], previous, reduction, now);
+    if (next) {
+      fresh.usageStats = { ...fresh.usageStats, [profileId]: next };
+      store.usageStats = { ...store.usageStats, [profileId]: next };
+    }
+    return {
+      store: fresh,
+      result: next ? { previous, next, now } : undefined,
+      publication: {
+        credentialsChanged: false,
+        profileSetChanged: false,
+        stateChanged: Boolean(next),
+        selectionChanged: Boolean(next),
+        profileIds: [],
+      },
+    };
+  });
   fetchMock.mockReset();
   resolveApiKeyForProfileMock.mockReset();
   // Vitest can bypass manual factories during concurrent lazy imports. Keep both
@@ -88,6 +142,7 @@ afterEach(() => {
 });
 
 function mockLockedUpdateForStore(store: AuthProfileStore): void {
+  usageMocks.readFresh.mockReturnValue(store);
   storeMocks.loadAuthProfileStoreWithoutExternalProfiles.mockImplementation(() => store);
   storeMocks.updateAuthProfileStoreWithLock.mockImplementationOnce(
     async (lockParams: { updater: (store: AuthProfileStore) => boolean }) => {
@@ -99,6 +154,7 @@ function mockLockedUpdateForStore(store: AuthProfileStore): void {
 }
 
 function mockLockedUpdatesForStore(store: AuthProfileStore): void {
+  usageMocks.readFresh.mockReturnValue(store);
   storeMocks.loadAuthProfileStoreWithoutExternalProfiles.mockImplementation(() => store);
   storeMocks.updateAuthProfileStoreWithLock.mockImplementation(
     async (lockParams: { updater: (store: AuthProfileStore) => boolean }) => {
@@ -483,16 +539,16 @@ describe("markAuthProfileFailure — detail-less provider failures", () => {
 
     expect(store.usageStats).toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(storeMocks.updateAuthProfileStoreWithLock).not.toHaveBeenCalled();
+    expect(usageMocks.withAuthProfileUsage).not.toHaveBeenCalled();
     expect(storeMocks.saveAuthProfileStore).not.toHaveBeenCalled();
   });
 });
 
-describe("markAuthProfileFailure — locked update failure", () => {
+describe("markAuthProfileFailure — worker update failure", () => {
   it("drops bookkeeping without an unlocked full-store save", async () => {
     const store = makeStore(undefined);
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    storeMocks.updateAuthProfileStoreWithLock.mockResolvedValueOnce(null);
+    usageMocks.record.mockResolvedValueOnce(null);
     setLoggerOverride({ level: "silent", consoleLevel: "warn" });
     try {
       await markAuthProfileFailure({
@@ -1121,14 +1177,9 @@ describe("markAuthProfileFailure — WHAM-aware Codex cooldowns", () => {
         primary_window: { used_percent: 45, reset_after_seconds: 9_000 },
       },
     });
-    storeMocks.updateAuthProfileStoreWithLock.mockImplementationOnce(
-      async (lockParams: { updater: (store: AuthProfileStore) => boolean }) => {
-        const freshStore = structuredClone(store);
-        freshStore.profiles["openai:default"] = createApiKeyCredential("openai", "rotated-api-key");
-        lockParams.updater(freshStore);
-        return freshStore;
-      },
-    );
+    const freshStore = structuredClone(store);
+    freshStore.profiles["openai:default"] = createApiKeyCredential("openai", "rotated-api-key");
+    usageMocks.readFresh.mockReturnValueOnce(store).mockReturnValue(freshStore);
 
     await markCodexFailureAt({ store, now, reason: "no_error_details", mockLock: false });
 

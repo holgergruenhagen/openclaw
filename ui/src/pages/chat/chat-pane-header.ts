@@ -35,6 +35,7 @@ import { displayedChatSessionBranches } from "./chat-history-branches.ts";
 import { ChatPaneDiscussion } from "./chat-pane-discussion.ts";
 import { sidebarPanelDefinitions } from "./chat-pane-embedded-panels.ts";
 import { ChatPaneHeaderMemo } from "./chat-pane-header-memo.ts";
+import { createChatHeaderPanelActions } from "./chat-pane-header-panels.ts";
 import { ChatPaneNativeSessionActions } from "./chat-pane-native-session-actions.ts";
 import { resolveChatPaneDesktopTarget, resolveChatPanePlacement } from "./chat-pane-placement.ts";
 import type { createChatPaneRails } from "./chat-pane-rails.ts";
@@ -116,6 +117,7 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
     files: () => this.headerWorkspace?.onToggleCollapsed(),
     companion: () => this.requestSessionRail("toggle"),
     subagents: () => this.requestSubagentsPanel("toggle"),
+    processes: () => this.requestBackgroundPanel("processes", "toggle"),
   };
   private readonly onHeaderDefault = () => {
     if (this.headerDefaultAction?.kind !== "status") {
@@ -288,6 +290,8 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
       this.state !== undefined && isSidebarSlotVisible(this.state.sidebarLayout, "companion");
     const subagentsVisible =
       this.state !== undefined && isSidebarSlotVisible(this.state.sidebarLayout, "subagents");
+    const processesVisible =
+      this.state !== undefined && isSidebarSlotVisible(this.state.sidebarLayout, "processes");
     const modifiedFiles =
       sessionWorkspace.list?.files.filter((file) => file.kind === "modified").length ?? 0;
     const panelMenuActions = this.headerPanelsMemo.read(
@@ -302,88 +306,22 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
         modifiedFiles,
         sessionRailVisible,
         subagentsVisible,
+        processesVisible,
         catalog,
         i18n.getLocale(),
       ],
-      () => {
-        const actions: HeaderMenuQuickAction[] = (
-          [
-            [
-              "terminal",
-              t("terminal.toggle"),
-              icons.terminal,
-              sessionWorkspace.onToggleTerminal && this.headerPanelCallbacks.terminal,
-            ],
-            [
-              "browser",
-              t("browser.toggle"),
-              icons.globe,
-              sessionWorkspace.onToggleBrowser && this.headerPanelCallbacks.browser,
-            ],
-            [
-              "desktop",
-              t("desktop.toggle"),
-              icons.monitor,
-              desktopPanelAvailable && sessionWorkspace.onToggleDesktop
-                ? this.headerPanelCallbacks.desktop
-                : undefined,
-            ],
-            [
-              "discussion",
-              discussion?.label ?? "",
-              icons.messageSquare,
-              discussion && this.headerPanelCallbacks.discussion,
-            ],
-            [
-              "changes",
-              t("chat.sessionDiff.show"),
-              icons.diff,
-              sessionWorkspace.onOpenDiff && this.headerPanelCallbacks.changes,
-            ],
-          ] as const
-        ).flatMap(([id, label, icon, onActivate]) =>
-          onActivate
-            ? [
-                {
-                  id,
-                  label,
-                  icon,
-                  onActivate,
-                  ...(id === "discussion" ? { active: discussion?.active } : {}),
-                },
-              ]
-            : [],
-        );
-        actions.push({
-          id: "session-files",
-          label: t(
-            sessionWorkspace.collapsed
-              ? "chat.workspaceFiles.showFiles"
-              : "chat.workspaceFiles.collapse",
-          ),
-          icon: icons.fileText,
-          active: !sessionWorkspace.collapsed,
-          badge: modifiedFiles,
-          onActivate: this.headerPanelCallbacks.files,
-        });
-        actions.push({
-          id: "session-companion",
-          label: t(sessionRailVisible ? "chat.rail.collapse" : "chat.rail.show"),
-          icon: icons.spark,
-          active: sessionRailVisible,
-          onActivate: this.headerPanelCallbacks.companion,
-        });
-        if (!catalog) {
-          actions.push({
-            id: "session-subagents",
-            label: t("chat.subagentsPanel.title"),
-            icon: icons.bot,
-            active: subagentsVisible,
-            onActivate: this.headerPanelCallbacks.subagents,
-          });
-        }
-        return actions;
-      },
+      () =>
+        createChatHeaderPanelActions({
+          sessionWorkspace,
+          desktopPanelAvailable,
+          discussion,
+          modifiedFiles,
+          sessionRailVisible,
+          subagentsVisible,
+          processesVisible,
+          catalog,
+          callbacks: this.headerPanelCallbacks,
+        }),
     );
     const defaultAction = !catalog && this.dashboardDefaultMenuAction(row, currentLayout);
     this.headerDefaultAction = defaultAction
@@ -582,8 +520,6 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
       renameDisabledReason,
       actionsDisabled: this.state?.connected !== true,
       panelActions: browserPanelAction,
-      subagentsExpanded: subagentsVisible,
-      onToggleSubagents: catalog ? undefined : this.headerPanelCallbacks.subagents,
       runAction: subagentStop,
       panelLayoutActions: html`${renderChatPanePanelLayoutActions(
         currentLayout,

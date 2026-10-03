@@ -207,6 +207,8 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["secrets.reload", null, "operator.admin", "<=2026.7"],
   ["secrets.resolve", null, "operator.admin", "<=2026.7"],
   ["voicewake.routing.get", "voicewake-routing", "operator.read", "<=2026.7"],
+  ["sessions.processes.list", "session-processes", "operator.read", "2026.9", OBSERVATION],
+  ["sessions.processes.stop", "session-processes", "operator.write", "2026.9"],
   ["sessions.list", "sessions-read", "operator.read", "<=2026.7", { startup: true }],
   ["sessions.subscribe", "sessions-subscriptions", "operator.read", "<=2026.7", { startup: true }],
   ["sessions.messages.subscribe", "sessions-subscriptions", "operator.read", "<=2026.7"],

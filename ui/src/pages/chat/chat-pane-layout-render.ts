@@ -60,6 +60,9 @@ type ChatPaneLayoutRenderParams = {
 };
 
 export abstract class ChatPaneLayoutRender extends ChatPaneBrowserAnnotationRender {
+  private readonly refreshProcesses = () => {
+    void this.querySelector("openclaw-chat-processes-panel")?.refresh();
+  };
   private readonly refreshSubagents = () => {
     void this.querySelector("openclaw-chat-subagents-panel")?.refresh();
   };
@@ -235,6 +238,8 @@ export abstract class ChatPaneLayoutRender extends ChatPaneBrowserAnnotationRend
       panePresentationId: this.presentationId,
       subagentsInputRegion: this.inputRegion,
       subagentsPresented: slotPresentation("subagents"),
+      processesPresented: slotPresentation("processes"),
+      onRefreshProcesses: this.refreshProcesses,
       subagentsAvailable: !catalog,
       onRefreshSubagents: this.refreshSubagents,
       onSubagentSessionSelect: (sessionKey, options) =>

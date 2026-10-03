@@ -57,6 +57,8 @@ type SidebarPanelDefinitionParams = {
   panePresentationId: string;
   subagentsInputRegion: "page" | "dock";
   subagentsPresented: PresentationValue;
+  processesPresented?: PresentationValue;
+  onRefreshProcesses?: () => void;
   subagentsAvailable: boolean;
   onRefreshSubagents: () => void;
   onSubagentSessionSelect: (
@@ -158,7 +160,7 @@ export function sidebarPanelDefinitions(
             "portal.list",
             "operator.read",
           )
-        : slot === "subagents"
+        : slot === "subagents" || slot === "processes"
           ? panelContext.subagentsAvailable
           : SIDEBAR_PANEL_SHORTCUTS[slot]?.available(panelContext)),
     ),
@@ -166,7 +168,7 @@ export function sidebarPanelDefinitions(
     loading: renderPanelLoadingSkeleton(
       textKey === "conversation" || textKey === "companion"
         ? "chat"
-        : textKey === "subagents"
+        : textKey === "subagents" || textKey === "processes"
           ? "file-list"
           : textKey === "portal"
             ? "browser"
@@ -321,6 +323,30 @@ export function sidebarPanelDefinitions(
             title=${t("chat.subagentsPanel.refresh")}
             ?disabled=${!params.connected}
             @click=${params.onRefreshSubagents}
+          >
+            ${icons.refresh}
+          </button>`
+        : undefined,
+    ),
+    definePanel(
+      "processes",
+      "processes",
+      icons.terminal,
+      state && params
+        ? html`<openclaw-chat-processes-panel
+            .sessionKey=${state.sessionKey}
+            .agentId=${params.agentId ?? "main"}
+            .presented=${livePresentation(params.processesPresented ?? false)}
+          ></openclaw-chat-processes-panel>`
+        : null,
+      params
+        ? html`<button
+            type="button"
+            class="rail-header__action"
+            aria-label=${t("chat.processesPanel.refresh")}
+            title=${t("chat.processesPanel.refresh")}
+            ?disabled=${!params.connected}
+            @click=${params.onRefreshProcesses}
           >
             ${icons.refresh}
           </button>`

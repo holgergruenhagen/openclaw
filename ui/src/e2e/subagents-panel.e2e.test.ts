@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import type { GatewaySessionRow } from "../api/types.ts";
 import type { CommandPaletteTargetDetail } from "../components/command-palette-contract.ts";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
+import { openChatSidePanelType } from "./chat-side-panel.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Subagents panel" });
@@ -173,7 +174,13 @@ suite.define(() => {
         if (capture) {
           await page.screenshot({ path: path.join(suite.artifactDir, "parent-before-panel.png") });
         }
-        await parentPane.getByRole("button", { name: "Subagents", exact: true }).click();
+        expect(
+          await parentPane
+            .locator(".chat-pane__header")
+            .getByRole("button", { name: "Subagents", exact: true })
+            .count(),
+        ).toBe(0);
+        await openChatSidePanelType(page, "Subagents");
         const panel = parentPane.locator("openclaw-chat-subagents-panel");
         const row = panel.locator(`[data-session-key="${child.key}"]`);
         await row.getByRole("button", { name: child.label, exact: true }).waitFor();
@@ -329,7 +336,13 @@ suite.define(() => {
         const parentPane = page.locator("openclaw-chat-pane.chat-pane-cache__pane--active");
         const composer = parentPane.locator(".agent-chat__composer-combobox textarea");
         await composer.fill("Keep the original parent draft");
-        await parentPane.getByRole("button", { name: "Subagents", exact: true }).click();
+        expect(
+          await parentPane
+            .locator(".chat-pane__header")
+            .getByRole("button", { name: "Subagents", exact: true })
+            .count(),
+        ).toBe(0);
+        await openChatSidePanelType(page, "Subagents");
         await parentPane
           .locator("openclaw-chat-subagents-panel")
           .getByRole("button", { name: child.label, exact: true })

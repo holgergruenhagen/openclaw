@@ -86,8 +86,6 @@ type ChatPaneHeaderProps = {
   renameDisabledReason?: string;
   actionsDisabled?: boolean;
   panelActions: TemplateResult | typeof nothing;
-  subagentsExpanded?: boolean;
-  onToggleSubagents?: () => void;
   runAction?: TemplateResult | typeof nothing;
   panelLayoutActions: TemplateResult | typeof nothing;
   presence?: TemplateResult | typeof nothing;
@@ -470,23 +468,7 @@ export function renderChatPaneHeader(props: ChatPaneHeaderProps) {
         <div class="chat-pane__actions">
           ${props.runAction ?? nothing} ${props.panelLayoutActions}
           <fieldset class="chat-pane__actions" ?disabled=${props.actionsDisabled}>
-            ${
-              compactSessionActions
-                ? nothing
-                : html`
-                    ${
-                      props.onToggleSubagents
-                        ? renderChatPanePanelToggle({
-                            label: t("chat.subagentsPanel.title"),
-                            icon: icons.bot,
-                            expanded: props.subagentsExpanded,
-                            onToggle: props.onToggleSubagents,
-                          })
-                        : nothing
-                    }
-                    ${props.panelActions}
-                  `
-            }
+            ${compactSessionActions ? nothing : props.panelActions}
             ${(
               [
                 [

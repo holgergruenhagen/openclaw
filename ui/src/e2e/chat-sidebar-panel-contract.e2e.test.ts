@@ -46,6 +46,7 @@ type ColdOpenOutcome = {
 
 const offeredSlotLabels = [
   "Subagents",
+  "Processes",
   "Review",
   "Terminal",
   "Browser",
@@ -79,6 +80,7 @@ function coldOpenScenario(): ControlUiMockGatewayScenario {
       "terminal.open",
     ],
     methodResponses: {
+      "sessions.processes.list": { sessionId: "main-session", processes: [], truncated: false },
       "browser.request": {
         cases: [
           { match: { method: "GET", path: "/tabs" }, response: { running: false, tabs: [] } },
@@ -126,6 +128,22 @@ function populatedColdOpenScenario(): ControlUiMockGatewayScenario {
     ],
     methodResponses: {
       ...sparse.methodResponses,
+      "sessions.processes.list": {
+        sessionId: "main-session",
+        truncated: false,
+        processes: [
+          {
+            processId: "process-1",
+            instanceId: "incarnation-1",
+            name: "Build application",
+            status: "running",
+            startedAt: 1,
+            tail: "Compiling",
+            truncated: false,
+            canStop: false,
+          },
+        ],
+      },
       "browser.request": {
         cases: [
           {
@@ -376,6 +394,17 @@ async function readSlotColdOpenOutcome(
       }
     } finally {
       held?.release();
+    }
+    if (label === "Processes") {
+      const processes = page.locator("openclaw-chat-processes-panel");
+      await processes
+        .getByText(
+          expectedOutcome === "content"
+            ? "Build application"
+            : "No background processes in this conversation.",
+          { exact: true },
+        )
+        .waitFor();
     }
     if (label === "Subagents") {
       const subagents = page.locator("openclaw-chat-subagents-panel");

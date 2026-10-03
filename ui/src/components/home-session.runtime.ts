@@ -90,15 +90,6 @@ export class OpenClawHomeSession extends OpenClawLightDomElement {
     ]);
     return html`
       <div class="assistant-panel-context">
-        <button
-          type="button"
-          class="rail-header__action"
-          aria-label=${t("chat.subagentsPanel.title")}
-          title=${t("chat.subagentsPanel.title")}
-          @click=${() => this.querySelector("openclaw-chat-pane")?.requestSubagentsPanel("toggle")}
-        >
-          ${icons.bot}
-        </button>
         ${
           this.includeContext
             ? html`

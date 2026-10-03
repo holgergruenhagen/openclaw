@@ -30,6 +30,7 @@ export const en: TranslationMap & {
         string
       >;
     pullRequests: TranslationMap;
+    processesPanel: TranslationMap;
   };
   configForm: TranslationMap & { sections: TranslationMap };
   configPage: TranslationMap;
@@ -3081,6 +3082,7 @@ export const en: TranslationMap & {
     archivedSessionDisabled: "This session is archived. Unarchive it to continue the conversation.",
     subagentViewOnly: "View-only subagent",
     subagentSessionDisabled: "Continue in {parent}.",
+    processesPanel: { title: "Processes", refresh: "Refresh processes" },
     subagentsPanel: {
       title: "Subagents",
       back: "Back to Subagents",
@@ -3918,6 +3920,8 @@ export const en: TranslationMap & {
       filesEmpty: "Browse files, artifacts, and changes from this session.",
       companion: "Side chat",
       companionEmpty: "Ask a focused question about this session.",
+      processes: "Processes",
+      processesEmpty: "Inspect background commands and their output for this conversation.",
       subagents: "Subagents",
       subagentsEmpty: "Follow delegated work from this conversation.",
       desktop: "Desktop",

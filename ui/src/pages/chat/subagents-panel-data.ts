@@ -322,7 +322,7 @@ export class SubagentsPanelData {
   private syncNarration(): void {
     this.narration.sync({
       enabled: Boolean(this.input?.presented && this.scope),
-      connected: Boolean(this.scope),
+      connected: Boolean(this.context.sessions.captureConnectionScope()),
       connectionIdentity: this.context.gateway.snapshot.hello,
       source: this.narrationSource,
       rows: this.sessions.map((row) => ({
@@ -615,12 +615,13 @@ export class SubagentsPanelData {
     this.hasResult = false;
     this.nextOffset = null;
     this.error = null;
-    this.narration.disconnect();
+    this.syncNarration();
   }
 
   dispose(): void {
     this.disposed = true;
     this.retire();
+    this.narration.dispose();
     for (const unsubscribe of this.unsubscribe) {
       unsubscribe();
     }

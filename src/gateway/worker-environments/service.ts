@@ -13,6 +13,7 @@ import type { WorkerInstallationArtifact } from "./bundle.js";
 import { createWorkerCredentialBroker } from "./credential-broker.js";
 import {
   createWorkerEnvironmentAccess,
+  createWorkerEnvironmentProcessObservation,
   createWorkerEnvironmentTransportLifecycle,
 } from "./environment-access.js";
 import { createWorkerEnvironmentErrorRecorder } from "./environment-errors.js";
@@ -699,6 +700,13 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
     takeMintedCredential: credentialBroker.takeMintedCredential,
     acquireTurnCredential: credentialBroker.acquireTurnCredential,
     acknowledgeCredentialDelivery: credentialBroker.acknowledgeCredentialDelivery,
+    observeProcesses: createWorkerEnvironmentProcessObservation({
+      store,
+      prepareCurrentBundle: () => prepareInstallation("bundle"),
+      isStopping: () => stopping,
+      getNodeTunnel: () => options.nodeTunnelManager,
+      trackOperation,
+    }),
     startTunnel: environmentAccess.startTunnel,
     stopTunnel: async (environmentId: string, ownerEpoch?: number) => {
       await Promise.all([

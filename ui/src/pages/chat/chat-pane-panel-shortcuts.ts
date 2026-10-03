@@ -35,4 +35,5 @@ export const SIDEBAR_PANEL_SHORTCUTS = {
   "link-reader": undefined,
   portal: undefined,
   subagents: undefined,
+  processes: undefined,
 };

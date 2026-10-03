@@ -96,7 +96,7 @@ When an incoming message causes an unstarted tool call to be skipped, its card
 and work summary show **Skipped**, including after reloading the conversation.
 Approval blocks and tool failures keep their separate outcomes.
 
-Open **Subagents** in the parent conversation's chat header or side-panel **+**
+Open the parent conversation's side panel and select **Subagents** from its **+**
 menu to inspect ordinary child runs. The panel groups running and finished work,
 shows elapsed time and available tool activity, and opens each child's existing
 view-only transcript beside the parent. It does not add rows to the left sidebar;
@@ -104,9 +104,13 @@ Swarm members remain in their parallel-tasks view. A directly opened child page
 offers **Open parent session**. The `/subagents list`, `/subagents info <id|#>`,
 and `/subagents log <id|#>` commands remain available.
 
-The **running tasks** indicator previews only active background tasks (running or
-queued). Its tooltip shows up to five tasks, with an overflow count for additional
-active tasks. Select the indicator to open the full task list, including finished tasks.
+Open **Processes** from the chat header's **Panels** menu or the side-panel **+**
+menu to inspect the conversation's background exec commands. It is separate from
+**Subagents**. Running and retained finished processes show status and elapsed
+time; selecting a process opens its recent output. **Stop** targets that exact
+process, not the parent conversation or another command with the same name.
+Hidden panels stop refreshing. Output follows the process owner's temporary
+retention limits; viewing it does not drain output waiting for the agent.
 
 Select a session's title in the chat header to rename it. Enter saves the name;
 Escape cancels the edit. While an input method is composing text, Enter and

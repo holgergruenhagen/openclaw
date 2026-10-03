@@ -8,6 +8,7 @@ export type SidebarSlotId =
   | "detail"
   | "discussion"
   | "portal"
+  | "processes"
   | "subagents"
   | "terminal"
   | "workspace"

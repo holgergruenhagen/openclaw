@@ -78,6 +78,11 @@ it.each(["__proto__", "constructor"])(
     await expect(readChannelAllowFromStore("demo", env, accountId)).rejects.toBeInstanceOf(
       TypeError,
     );
+    const missing = path.join(root, `missing-${accountId}`);
+    await expect(
+      readChannelAllowFromStore("demo", { ...env, OPENCLAW_STATE_DIR: missing }, accountId),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(fs.existsSync(missing)).toBe(false);
   },
 );
 

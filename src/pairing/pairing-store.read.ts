@@ -19,7 +19,9 @@ export async function readChannelAllowFromStore(
   );
   // Boot and Doctor own initialization. Absence grants no pairing permission.
   if (result === undefined) {
-    return [];
+    // Keep the native empty-map lookup's refusal of inherited account keys.
+    const allowFrom: Record<string, string[]> = {};
+    return (allowFrom[resolvedAccountId] ?? []).slice();
   }
   if (result.ok && result.type === "pairing.allowFrom") {
     return result.entries;

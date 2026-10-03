@@ -27,6 +27,30 @@ class RoleMatchingTests(unittest.TestCase):
                 self.assertTrue(role_matches("document frame", ("entry", "heading"), attributes))
                 self.assertFalse(role_matches("document frame", "button", attributes))
 
+    def test_shifted_entry_requires_the_observed_input_textbox_semantics(self):
+        attributes = {
+            "tag": "input", "id": "remote-url",
+            "computed-role": "textbox", "toolkit": "WebKitGTK",
+        }
+        self.assertTrue(role_matches("embedded", "entry", attributes))
+        self.assertTrue(role_matches("embedded", ("entry", "text"), attributes))
+        self.assertFalse(role_matches("embedded", "heading", attributes))
+        self.assertFalse(role_matches("embedded", "button", attributes))
+
+    def test_non_inputs_and_incomplete_entry_semantics_are_rejected(self):
+        for attributes in (
+            {"tag": "button", "computed-role": "button", "id": "remote-transport-direct"},
+            {"tag": "input", "computed-role": "button"},
+            {"tag": "section", "computed-role": "region"},
+            {"tag": "section", "computed-role": "textbox"},
+            {"tag": "input"},
+            {"computed-role": "textbox"},
+            {},
+        ):
+            with self.subTest(attributes=attributes):
+                self.assertFalse(role_matches("embedded", "entry", attributes))
+                self.assertFalse(role_matches("toggle button", "entry", attributes))
+
     def test_regions_and_incomplete_heading_semantics_are_rejected(self):
         for attributes in (
             {"computed-role": "region", "tag": "section"},

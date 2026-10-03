@@ -48,6 +48,10 @@ def role_matches(actual_role, expected_role, attributes=None):
         and attributes.get("computed-role") == "heading"
         and tag in ("h1", "h2", "h3", "h4", "h5", "h6")
         and attributes.get("level") == tag[1:]
+    ) or (
+        "entry" in roles
+        and tag == "input"
+        and attributes.get("computed-role") == "textbox"
     )
 
 
@@ -119,7 +123,9 @@ def exercise(app, Atspi, GLib, *, remote_only, local_start_failure, inline_fixtu
                         named = name.startswith(label) if prefix else name == label
                         matches = named and role_matches(actual_role, role)
                         roles = role if isinstance(role, tuple) else (role,)
-                        if named and not matches and "heading" in roles:
+                        if named and not matches and any(
+                            expected in ("heading", "entry") for expected in roles
+                        ):
                             matches = role_matches(actual_role, role, node.get_attributes())
                     # Application-root state queries can block in GTK; only
                     # inspect visibility on the semantic control being asserted.
@@ -149,7 +155,10 @@ def exercise(app, Atspi, GLib, *, remote_only, local_start_failure, inline_fixtu
 
     def empty_entry(label):
         node = wait(label, "entry")
-        if text_content(node):
+        content = text_content(node)
+        if content is None:
+            raise RuntimeError(f"Could not read {label!r}; refusing a remote connection")
+        if content:
             raise RuntimeError(f"Expected an empty {label!r}; refusing a remote connection")
 
     if inline_fixture is not None:

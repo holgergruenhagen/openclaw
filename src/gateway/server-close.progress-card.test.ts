@@ -40,7 +40,7 @@ it("settles a queued progress card across the close prelude before retiring its 
     const databasePath = resolveOpenClawAgentSqlitePath(databaseOptions);
     const shared = openOpenClawStateDatabase({ env: fixture.state.env }).db;
     const writeAdmission = agentWriteAdmission.runOpenClawAgentWriteAdmission;
-    const put = progressCardStore.put;
+    const put = progressCardStore.put.bind(progressCardStore);
     vi.spyOn(progressCardStore, "put").mockImplementationOnce(async (...args) => {
       holding = writeAdmission(databaseOptions, async () => {
         writerEntered.resolve();

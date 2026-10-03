@@ -25,9 +25,9 @@ it.each([false, true])(
   "persists tool and conditional RPC clears without caller SQL (custom=%s)",
   async (custom) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-      const cfg: OpenClawConfig = {
-        ...(custom ? { session: { store: path.join(state.stateDir, "cards.sqlite") } } : {}),
-      };
+      const cfg: OpenClawConfig = custom
+        ? { session: { store: path.join(state.stateDir, "cards.sqlite") } }
+        : {};
       setRuntimeConfigSnapshot(cfg, cfg);
       await replaceSessionEntry(
         { sessionKey, agentId: "main", storePath: cfg.session?.store },

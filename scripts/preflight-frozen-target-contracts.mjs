@@ -23,6 +23,8 @@ const toolingClosure = [
   "scripts/lib/upgrade-survivor-scenarios.json",
   "scripts/lib/release-version.mjs",
   "scripts/lib/frozen-target-compat.sh",
+  "scripts/lib/trusted-native-typescript.mjs",
+  "scripts/lib/native-typescript.mts",
   "scripts/resolve-frozen-codex-live-suite.mjs",
   "scripts/resolve-fs-safe-native-contract.mjs",
   "scripts/e2e/lib/upgrade-survivor/config-recipe.mts",
@@ -58,6 +60,10 @@ const shellOwners = {
     ],
   ],
   "openai-chat-tools": ["session_cold_storage_contract", [`${prefix}SESSION_COLD_STORAGE_MODE`]],
+  "agent-bundle-mcp-tools": [
+    "agent_bundle_mcp_contract",
+    [`${prefix}AGENT_BUNDLE_MCP_MODE`, `${prefix}AGENT_BUNDLE_MCP_CLIENT_PATH`],
+  ],
   plugins: ["plugin_harness_capabilities", [`${prefix}PLUGIN_UNINSTALL_MODE`]],
   "upgrade-survivor": [
     "upgrade_survivor_capabilities",
@@ -145,6 +151,14 @@ const selectedMetadata = {
   "openai-chat-tools": [
     "src/config/zod-schema.session.ts",
     "src/config/zod-schema.session-config.ts",
+  ],
+  "agent-bundle-mcp-tools": [
+    "package.json",
+    "scripts/e2e/agent-bundle-mcp-tools-docker-client.ts",
+    "test/e2e/qa-lab/runtime/agent-bundle-mcp-tools-docker-client.ts",
+    "scripts/e2e/lib/temp-state-dir.ts",
+    "src/agents/agent-bundle-mcp-manager-api.ts",
+    "src/agents/agent-bundle-mcp-runtime.ts",
   ],
   plugins: ["scripts/e2e/lib/plugins/assertions.mjs"],
   "upgrade-survivor": [
@@ -615,7 +629,7 @@ async function planWorkflowAdmission(input) {
       left < right ? -1 : left > right ? 1 : 0,
     ),
     sourceHistory: fsSafeNative && allow,
-    parserRequired: false,
+    parserRequired: allow && consumers.has("agent-bundle-mcp-tools"),
     obligations,
     requestedBaselines,
   };

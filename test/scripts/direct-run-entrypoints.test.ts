@@ -100,8 +100,8 @@ const EXECUTABLE_ENTRYPOINTS = [
     status: 1,
   },
   {
-    args: ["2026.7.33"],
-    output: "0",
+    args: ["--clawhub-release-security-mode", "2026.8.33"],
+    output: "required",
     script: "scripts/e2e/lib/package-compat.mjs",
     status: 0,
   },

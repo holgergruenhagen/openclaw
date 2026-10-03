@@ -64,7 +64,6 @@ import {
   type SessionHistoryBudgetKick,
   type SessionHistoryDiskBudgetParams,
 } from "./session-history-budget-state.js";
-import { deleteDiskBudgetArchivedSessionEntry } from "./session-history-entry-eviction.runtime.js";
 import {
   collectSessionAdmissionReferences,
   readDiskEvictableArchivedSessionBatchInDatabase,
@@ -457,7 +456,7 @@ async function enforceSessionHistoryMaintenanceForDatabase(
     if (usage.totalBytes <= highWaterBytes) {
       break;
     }
-    const eviction = await runExclusiveSessionLifecycleMutation({
+    const eviction = await runExclusiveSessionLifecycleMutation("history-evict", {
       scope: params.storePath,
       identities: [sessionId],
       run: async () => {
@@ -599,11 +598,13 @@ async function enforceSessionHistoryMaintenanceForDatabase(
         if (usage.totalBytes <= highWaterBytes) {
           break;
         }
-        const deletion = await runExclusiveSessionLifecycleMutation({
+        const deletion = await runExclusiveSessionLifecycleMutation("archived-delete", {
           scope: params.storePath,
           identities: [candidate.sessionKey, candidate.entry.sessionId],
-          run: async () =>
-            await deleteDiskBudgetArchivedSessionEntry(
+          run: async () => {
+            const { deleteDiskBudgetSessionEntryLifecycle } =
+              await import("./session-accessor.sqlite-lifecycle.js");
+            return await deleteDiskBudgetSessionEntryLifecycle(
               {
                 ...(params.agentId ? { agentId: params.agentId } : {}),
                 archiveTranscript: false,
@@ -615,7 +616,8 @@ async function enforceSessionHistoryMaintenanceForDatabase(
                 target: { canonicalKey: candidate.sessionKey, storeKeys: [candidate.sessionKey] },
               },
               resolved,
-            ),
+            );
+          },
         });
         if (!deletion.deleted) {
           usage = await measureSessionPhysicalDiskUsage(params.storePath);

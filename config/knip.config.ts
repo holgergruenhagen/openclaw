@@ -52,7 +52,6 @@ const repositoryScriptEntries = [
   "scripts/test-macos-native.mts!",
   "scripts/check-control-ui-performance.mts!",
   "scripts/check-control-ui-precompressed-assets.mts!",
-  "scripts/check-live-cache.ts!",
   "scripts/check-package-dist-imports.mjs!",
   "scripts/check-plugin-sdk-exports.mts!",
   // Declaration preparation and boundary checks launch this compiler worker by path.
@@ -74,6 +73,8 @@ const repositoryScriptEntries = [
   "scripts/lib/docker-e2e-container.sh!",
   // Docker and package-install harnesses invoke this verifier by path.
   "scripts/docker/verify-fs-safe-native.mjs!",
+  // Docker runtime-assets assembles package-declared bootstrap files through this CLI.
+  "scripts/docker/copy-bootstrap-scripts.mjs!",
   // Reusable Docker workflows invoke this selector from a trusted sparse checkout.
   "scripts/resolve-fs-safe-native-contract.mjs!",
   // The live Docker launcher executes this runner by path inside the package image.
@@ -203,6 +204,8 @@ const repositoryScriptEntries = [
   "scripts/mantis/observe-request-web-ui.mts!",
   "scripts/mantis/telegram-proof-bridge.mjs!",
   "scripts/mcp-code-mode-gateway-e2e.ts!",
+  // Immutable systemd installations invoke the packaged launcher by path.
+  "scripts/openclaw-immutable-launcher.mjs!",
   // Existing explicit Linux proof driver imports the inactive capsule adapter.
   // Reachability for auditing is not registration or permission to execute it.
   "scripts/openclaw-release-clawhub-plan.ts!",
@@ -404,6 +407,8 @@ const rootEntries = [
   "src/gateway/plugin-channel-reload-targets.ts!",
   // Published-update bridges import lifecycle facts from this stable dist entry.
   "src/agents/provider-runtime-lifecycle.ts!",
+  // July and later Gateways retain this lazy entry across in-place updates.
+  "src/agents/models-config.runtime.ts!",
   // Shipped compatibility facade for statusCommand and getStatusSummary.
   "src/commands/status.ts!",
   "src/cli/daemon-cli.ts!",

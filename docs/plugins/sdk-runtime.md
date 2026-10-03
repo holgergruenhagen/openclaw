@@ -143,6 +143,15 @@ Registered callables retain their instance scope, receiver binding, and lifecycl
 fencing. Plugin code runs inside a Gateway request scope established for its
 invocation.
 
+Submitting a SessionManager append transfers its ordinary JSON payload to the
+manager by reference. Treat the payload as immutable from submission, including
+while an asynchronous append is pending; nested objects and arrays are frozen.
+Append receipts and transcript views share that immutable payload. Create a new
+value for a later update. Custom JSON
+representations are normalized before transcript redaction and persistence.
+If redaction policy changes after a tool result commits, the runtime creates a
+replacement for the model context while preserving the committed transcript bytes.
+
 An admitted iterator owns its invocation scope and call lease for its lifetime.
 Advancing or closing it executes plugin code in that scope without creating a
 new scope for each event. Completion, cancellation, and stream cleanup settle
@@ -264,6 +273,8 @@ managers or prevent concurrent manager acquisition.
 permission origins, display names, manual-action prefixes, and retry policy.
 `MeetingPlatformAdapter.createPageScripts` assembles status, transcript, audio
 capture, and leave scripts while the plugin supplies identity and control sources.
+Its `statusPrelude` and `statusCall` descriptors share the factory's `platform`
+metadata, including page globals and audio/manual-action prefixes.
 
 `createStatusPreludeSource` accepts either source strings or callbacks for
 `lifecycleSource` and `manualActionSource`. Callbacks receive shared fragments for

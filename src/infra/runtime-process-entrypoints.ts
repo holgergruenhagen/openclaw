@@ -41,6 +41,9 @@ export const runtimeProcessEntrypoints = {
   boardStore: runtimeProcessEntrypoint("boards/sqlite-board-store.worker"),
   sessionSharingStore: runtimeProcessEntrypoint("config/sessions/session-sharing-store.worker"),
   heartbeatOutcomeStore: runtimeProcessEntrypoint("infra/heartbeat-outcome-store.worker"),
+  messageToolRunOutcomeStore: runtimeProcessEntrypoint(
+    "infra/message-tool-run-outcome-store.worker",
+  ),
   contextEngineTurnOutbox: runtimeProcessEntrypoint(
     "agents/harness/context-engine-turn-outbox.worker",
   ),
@@ -66,6 +69,9 @@ export const runtimeProcessEntrypoints = {
   databaseVerify: runtimeProcessEntrypoint("state/openclaw-database-verify.worker"),
   stateOwnership: runtimeProcessEntrypoint("state/openclaw-state-ownership.worker"),
   stateLeaseHeartbeat: runtimeProcessEntrypoint("state/openclaw-state-lease-heartbeat.worker"),
+  gatewayStateOwnerHeartbeat: runtimeProcessEntrypoint(
+    "infra/gateway-state-owner-heartbeat.worker",
+  ),
   sessionTranscriptArchive: runtimeProcessEntrypoint(
     "config/sessions/session-accessor.sqlite-archive.worker",
   ),

@@ -49,16 +49,21 @@ function resolvePackageTelegramOutputDir(env: NodeJS.ProcessEnv, repoRoot: strin
 const DEFAULT_RTT_CHECK_ID = "channel-canary";
 const LEGACY_CONFIG_CUTOFF = "2026.7.2-beta.4";
 
-function projectLegacyPackageQaConfig(cfg: OpenClawConfig): OpenClawConfig {
+type HistoricalPackageConfig = OpenClawConfig & {
+  agents?: {
+    list?: Array<
+      NonNullable<NonNullable<OpenClawConfig["agents"]>["entries"]>[string] & { id: string }
+    >;
+  };
+};
+
+function projectLegacyPackageQaConfig(cfg: OpenClawConfig): HistoricalPackageConfig {
   const { entries, ...agents } = cfg.agents ?? {};
   const { modelPolicy: _modelPolicy, ...legacyDefaults } = agents.defaults ?? {};
-  const memory = cfg.memory as
-    | (Record<string, unknown> & {
-        backend?: unknown;
-        citations?: unknown;
-        qmd?: unknown;
-      })
-    | undefined;
+  const memory:
+    | (NonNullable<OpenClawConfig["memory"]> & { backend?: unknown; qmd?: unknown })
+    | undefined = cfg.memory;
+  const legacyMemoryKeys: Array<"backend" | "citations" | "qmd"> = ["backend", "citations", "qmd"];
 
   return {
     ...cfg,
@@ -73,12 +78,12 @@ function projectLegacyPackageQaConfig(cfg: OpenClawConfig): OpenClawConfig {
     },
     memory: memory
       ? Object.fromEntries(
-          ["backend", "citations", "qmd"]
+          legacyMemoryKeys
             .filter((key) => memory[key] !== undefined)
             .map((key) => [key, memory[key]]),
         )
       : memory,
-  } as OpenClawConfig;
+  };
 }
 
 function resolvePackageConfigMutation(env: NodeJS.ProcessEnv = process.env) {

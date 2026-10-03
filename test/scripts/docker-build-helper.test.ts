@@ -5434,7 +5434,6 @@ process.exit(73);
   it("proves gateway suspension across a same-container process restart", () => {
     const runner = readFileSync(GATEWAY_NETWORK_DOCKER_E2E_PATH, "utf8");
     expectTextToIncludeAll(runner, [
-      'source "$ROOT_DIR/scripts/lib/frozen-target-compat.sh"',
       "plugins enable admin-http-rpc",
       "/tmp/gateway-network-configured",
       'CAPABILITIES_DIR="$(mktemp -d',
@@ -5450,7 +5449,7 @@ process.exit(73);
       'rm "$CAPABILITIES_PATH"',
       'rmdir "$CAPABILITIES_DIR"',
       'if [[ "$SUSPENSION_CAPABILITY" == "unsupported" ]]',
-      "openclaw_frozen_target_omissions_authorized",
+      "Target gateway does not advertise cooperative suspension.",
       "run_suspension_phase() {",
       "GW_MODE=suspension-$stage-restart",
       "run_suspension_phase pre",
@@ -5473,6 +5472,7 @@ process.exit(73);
     expect(runner).not.toContain("chown");
     expect(runner).not.toContain("chmod");
     expect(runner).not.toContain('rm -rf "$CAPABILITIES_DIR"');
+    expect(runner).not.toContain("frozen-target");
 
     const parseIndex = runner.indexOf('SUSPENSION_CAPABILITY="$(');
     const ownershipIndex = runner.indexOf('if [[ ! -O "$CAPABILITIES_PATH" ]]');

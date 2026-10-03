@@ -35,63 +35,6 @@ async function main() {
 
   await fs.writeFile(configPath, JSON.stringify(seededConfig, null, 2), "utf-8");
 
-  if (frozenTarget) {
-    const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
-    const sessionFile = path.join(sessionsDir, "sess-main.jsonl");
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await fs.mkdir(sessionsDir, { recursive: true });
-    await fs.writeFile(
-      storePath,
-      JSON.stringify({
-        "agent:main:main": {
-          sessionId: "sess-main",
-          sessionFile,
-          updatedAt: now,
-          deliveryContext: {
-            channel: "imessage",
-            to: "+15551234567",
-            accountId: "imessage-default",
-            threadId: "thread-42",
-          },
-          displayName: "Docker MCP Channel Smoke",
-          derivedTitle: "Docker MCP Channel Smoke",
-          lastMessagePreview: "seeded transcript",
-        },
-      }),
-      "utf-8",
-    );
-    await fs.writeFile(
-      sessionFile,
-      [
-        JSON.stringify({ type: "session", version: 1, id: "sess-main" }),
-        JSON.stringify({
-          id: "msg-1",
-          message: {
-            role: "assistant",
-            content: [{ type: "text", text: "hello from seeded transcript" }],
-            timestamp: now,
-          },
-        }),
-        JSON.stringify({
-          id: "msg-attachment",
-          message: {
-            role: "assistant",
-            content: [
-              { type: "text", text: "seeded image attachment" },
-              { type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
-            ],
-            timestamp: now + 1,
-          },
-        }),
-      ].join("\n") + "\n",
-      "utf-8",
-    );
-    process.stdout.write(
-      `${JSON.stringify({ ok: true, stateDir, configPath, sessionFile, storePath })}\n`,
-    );
-    return;
-  }
-
   const [
     { normalizeSessionDeliveryState, upsertSessionEntry },
     { appendSessionTranscriptMessagesByIdentity },

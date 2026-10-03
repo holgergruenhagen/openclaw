@@ -131,18 +131,7 @@ rmdir "$CAPABILITIES_DIR"
 CAPABILITIES_PATH=""
 CAPABILITIES_DIR=""
 if [[ "$SUSPENSION_CAPABILITY" == "unsupported" ]]; then
-  authorization_status=0
-  if openclaw_frozen_target_omissions_authorized; then
-    echo "Target gateway does not advertise cooperative suspension; authorized frozen-target omission."
-    echo "OK"
-    exit 0
-  else
-    authorization_status=$?
-  fi
-  if ((authorization_status == 2)); then
-    exit "$authorization_status"
-  fi
-  echo "Target gateway does not advertise cooperative suspension and frozen-target omissions are not authorized." >&2
+  echo "Target gateway does not advertise cooperative suspension." >&2
   exit 1
 fi
 

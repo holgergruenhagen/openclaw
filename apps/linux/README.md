@@ -381,6 +381,13 @@ switch restores and verifies Node; choose **Use bundled runtime…** again to re
 **Restore previous Node runtime…** verifies the retained Node Gateway and removes
 app ownership, so subsequent startup does not undo the rollback.
 
+If the app exits during a runtime transition after installation, it preserves
+the running service, runtime pins, and verified Node backup but stops managing
+the installation. A notice asks you to choose **Use bundled runtime…** to adopt
+it again or **Restore previous Node runtime…** to return to Node. Recovery only
+resumes automatically while the binding still matches the recorded pre-install
+state; it never claims or rolls back an unproven post-install binding.
+
 Ordinary startup and desktop updates preserve unmarked installations and saved
 operator runtime pins. Historical Tauri and terminal installs used identical
 launchers, so the app cannot safely infer ownership. This is the difference from

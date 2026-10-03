@@ -142,18 +142,18 @@ fn identical_runtime_pin_in_another_profile_does_not_transfer_app_ownership() {
         Some(state.binding().unwrap()),
     )
     .unwrap();
+    assert!(metadata.owns(&state));
     metadata.pending = Some(Pending {
         original: state.binding().unwrap(),
         original_wrapper: fixture.0.join("original.backup"),
         original_wrapper_sha256: "fixture".into(),
         mode: Mode::OwnedUpdate,
     });
-    assert!(metadata.owns(&state));
-    assert!(pending_state(&metadata, &state).is_ok());
+    assert!(!metadata.owns(&state), "intent is not committed ownership");
+    metadata.pending = None;
     state.config["daemon"]["path"] =
         serde_json::to_value(fixture.0.join("other-profile/openclaw.json")).unwrap();
     assert!(!metadata.owns(&state));
-    assert!(pending_state(&metadata, &state).is_err());
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn partial_owned_update_qualifies_node_and_restores_the_current_package() {
     );
     assert_eq!(version(&cli, Some(&wrapper.node)).unwrap(), "2026.10.2");
     assert_eq!(fs::read(&wrapper.path).unwrap(), wrapper.bytes);
-    assert!(!is_app_managed(&cli).unwrap());
+    assert!(!has_gateway_runtime_record(&cli).unwrap());
     let final_state = capture(&cli, Some(&wrapper.node), true).unwrap();
     assert!(final_state.unpinned() && final_state.healthy_for(&wrapper.node));
 }
@@ -445,7 +445,7 @@ fn explicit_adoption_updates_package_before_pin_refusal() {
             "{case}"
         );
         assert_eq!(fs::read(&wrapper.path).unwrap(), wrapper.bytes, "{case}");
-        assert!(!is_app_managed(&cli).unwrap(), "{case}");
+        assert!(!has_gateway_runtime_record(&cli).unwrap(), "{case}");
         let observed: Value = serde_json::from_slice(&fs::read(status_file).unwrap()).unwrap();
         assert_eq!(
             observed["service"]["runtimeIntent"], after["service"]["runtimeIntent"],
@@ -461,7 +461,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn external_symlinks_and_large_launchers_do_not_claim_app_ownership() {
+fn marker_preflight_does_not_follow_external_symlinks_or_large_launchers() {
     let fixture = Fixture::new();
     let external = fixture.0.join("external-cli");
     // Ownership must not inspect the linked target, even when its bytes resemble an app marker.
@@ -474,17 +474,17 @@ fn external_symlinks_and_large_launchers_do_not_claim_app_ownership() {
     let path = fixture.0.join("bin/openclaw");
     symlink(&external, &path).unwrap();
     let cli = OpenClawCli::browser_runtime(fixture.0.clone()).unwrap();
-    assert!(!is_app_managed(&cli).unwrap());
+    assert!(!has_gateway_runtime_record(&cli).unwrap());
     assert!(
         read_wrapper(&cli).is_err(),
         "explicit adoption must remain strict"
     );
     fs::remove_file(&path).unwrap();
     symlink(fixture.0.join("missing-external-cli"), &path).unwrap();
-    assert!(!is_app_managed(&cli).unwrap());
+    assert!(!has_gateway_runtime_record(&cli).unwrap());
     fs::remove_file(&path).unwrap();
     fs::write(&path, vec![b'x'; 65537]).unwrap();
-    assert!(!is_app_managed(&cli).unwrap());
+    assert!(!has_gateway_runtime_record(&cli).unwrap());
 }
 
 #[test]
@@ -657,136 +657,438 @@ fn launcher_keeps_literal_paths_arguments_and_bun_no_install() {
     );
 }
 
-#[test]
-fn interrupted_install_finishes_from_persisted_intent_without_reinstalling() {
-    let fixture = Fixture::new();
-    let wrapper = fixture.wrapper();
-    let original = fixture.state(&wrapper);
-    let bun = fixture.0.join("tools/bun/bin/bun");
-    fs::create_dir_all(bun.parent().unwrap()).unwrap();
-    let state_path = fixture.0.join("service.json");
-    let bun_state_path = fixture.0.join("bun-service.json");
-    for (path, status_path) in [
-        (&wrapper.node.runtime, &state_path),
-        (&bun, &bun_state_path),
-    ] {
-        let script = format!("#!/bin/sh\ncase \"$*\" in\n  *--version*) printf 'OpenClaw 2026.10.1\\n' ;;\n  *'gateway status'*) exec /bin/cat '{}' ;;\n  *) echo 'unexpected service mutation' >&2; exit 7 ;;\nesac\n", status_path.display().to_string().replace('\'', "'\\''"));
-        fs::write(path, script).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let write_state = |state: &Value| {
-        fs::write(&state_path, serde_json::to_vec(state).unwrap()).unwrap();
-        let mut bun_state = state.clone();
-        bun_state["cli"]["runtime"]["kind"] = Value::String("bun".into());
-        bun_state["cli"]["runtime"]["execPath"] = serde_json::to_value(&bun).unwrap();
-        fs::write(&bun_state_path, serde_json::to_vec(&bun_state).unwrap()).unwrap();
-    };
-    let runtime = BundledRuntime {
-        bun: bun.clone(),
-        sqlite: None,
-    };
-    let target = bundled_target(&runtime, &wrapper.node.entry).unwrap();
-    let mut metadata = managed_metadata(&wrapper, target, "2026.10.1".into(), None).unwrap();
-    metadata.pending = Some(Pending {
-        original: original.binding().unwrap(),
-        original_wrapper: backup(&wrapper.path, "transition", &wrapper.bytes).unwrap(),
-        original_wrapper_sha256: digest(&wrapper.bytes),
-        mode: Mode::Adopt,
-    });
-    publish(&wrapper, &render(&metadata).unwrap()).unwrap();
-    let service = serde_json::json!({
-        "cli": { "version": "2026.10.1", "runtime": { "kind": "node", "execPath": wrapper.node.runtime, "supported": true } },
-        "service": {
-            "loaded": true, "targetRole": "target", "command": { "programArguments": [bun, wrapper.node.entry, "gateway"] },
-            "runtime": { "status": "running", "pid": 4100 }, "runtimeIntent": {
-                "status": "known", "revision": "bun-pin", "stored": true,
-                "pin": { "runtime": "bun", "path": bun }
-            },
-            "revision": "installed-bun", "definitionMutation": "writable",
-            "layout": { "entrypointReal": wrapper.node.entry }
-        },
-        "gateway": { "port": 18789 }, "config": { "daemon": { "path": fixture.0.join("openclaw.json") } }, "rpc": { "ok": true },
-        "port": { "port": 18789, "status": "busy", "listeners": [{ "pid": 4100 }] }
-    });
-    let mut external = service.clone();
-    external["service"]["runtimeIntent"]["pin"]["path"] = Value::String("/independent/bun".into());
-    write_state(&external);
-    let cli = OpenClawCli::browser_runtime(fixture.0.clone()).unwrap();
-    let pending_bytes = fs::read(&wrapper.path).unwrap();
-    assert!(is_app_managed(&cli).unwrap());
-    assert!(
-        !inspect(&cli).unwrap().managed,
-        "startup must attach without updating an externally repinned service"
-    );
-    assert!(migrate(&cli, &runtime, "2026.10.1", Mode::OwnedUpdate, &|| true).is_err());
-    assert_eq!(fs::read(&wrapper.path).unwrap(), pending_bytes);
+struct MigrationFixture {
+    fixture: Fixture,
+    wrapper: Wrapper,
+    runtime: BundledRuntime,
+    cli: OpenClawCli,
+}
 
-    let mut fresh = metadata.clone();
-    fresh.pending = None;
-    publish(&read_wrapper(&cli).unwrap(), &render(&fresh).unwrap()).unwrap();
-    let mut absent = service.clone();
-    absent["service"]["loaded"] = Value::Bool(false);
-    absent["service"]["command"] = Value::Null;
-    absent["service"]["runtime"]["status"] = Value::String("stopped".into());
-    absent["service"]["runtimeIntent"]["stored"] = Value::Bool(false);
-    absent["service"]["runtimeIntent"]["pin"] = Value::Null;
-    write_state(&absent);
-    let fresh_status = inspect(&cli).unwrap();
-    assert!(
-        fresh_status.managed,
-        "startup must resume an admitted fresh setup"
-    );
-    assert!(!fresh_status.paused);
-    absent["service"]["runtimeIntent"]["stored"] = Value::Bool(true);
-    write_state(&absent);
-    assert!(
-        !inspect(&cli).unwrap().managed,
-        "an absent service's retained pin still owns runtime intent"
-    );
-    write_state(&service);
-    assert!(
-        !inspect(&cli).unwrap().managed,
-        "a fresh marker cannot adopt an existing service"
-    );
-    publish(&read_wrapper(&cli).unwrap(), &pending_bytes).unwrap();
-    write_state(&service);
-    assert!(
-        inspect(&cli).unwrap().managed,
-        "startup must resume the admitted interrupted transaction"
-    );
-    let mut paused = service.clone();
-    paused["service"]["runtime"]["status"] = Value::String("stopped".into());
-    write_state(&paused);
-    let paused_service = fs::read(&state_path).unwrap();
-    let paused_bun_service = fs::read(&bun_state_path).unwrap();
-    for mode in [Mode::Adopt, Mode::OwnedUpdate, Mode::Fresh] {
-        assert_eq!(
-            migrate(&cli, &runtime, "2026.10.1", mode, &|| true).unwrap(),
-            MigrationOutcome::DeferredPaused,
-            "{mode:?} must require Start Gateway even with a pending transition"
-        );
-        assert_eq!(fs::read(&wrapper.path).unwrap(), pending_bytes);
+impl MigrationFixture {
+    fn new() -> Self {
+        let fixture = Fixture::new();
+        let wrapper = fixture.wrapper();
+        fs::set_permissions(&wrapper.path, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = BundledRuntime {
+            bun: fixture.0.join("bun"),
+            sqlite: None,
+        };
+        let quote =
+            |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        for (kind, executable) in [("node", &wrapper.node.runtime), ("bun", &runtime.bun)] {
+            let script = format!(
+                "#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw 2026.10.1\\n' ;;\n *'gateway status'*) printf '%s\\n' \"{kind} $*\" >> {}; exec /bin/cat {} ;;\n *'update repair'*) printf 'repair\\n' >> {} ;;\n *'gateway install'*'--runtime bun '*) printf 'install-bun\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *'gateway install'*'--runtime node '*) printf 'install-node\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-mutation\\n' >> {}; exit 9 ;;\nesac\n",
+                quote(&fixture.0.join("inspections")), quote(&fixture.0.join(format!("current-{kind}.json"))),
+                quote(&fixture.0.join("calls")), quote(&fixture.0.join("calls")),
+                quote(&fixture.0.join("installed-node.json")), quote(&fixture.0.join("current-node.json")),
+                quote(&fixture.0.join("installed-bun.json")), quote(&fixture.0.join("current-bun.json")),
+                quote(&fixture.0.join("calls")),
+                quote(&fixture.0.join("restored-node.json")), quote(&fixture.0.join("current-node.json")),
+                quote(&fixture.0.join("restored-bun.json")), quote(&fixture.0.join("current-bun.json")),
+                quote(&fixture.0.join("calls")),
+            );
+            fs::write(executable, script).unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let cli = OpenClawCli::browser_runtime(fixture.0.clone()).unwrap();
+        let result = Self {
+            fixture,
+            wrapper,
+            runtime,
+            cli,
+        };
+        let original = result.fixture.state_json(&result.wrapper);
+        result.write_state("current", &original);
+        result.write_state("installed", &result.bun_state());
+        let mut restored = original;
+        restored["service"]["revision"] = "restored-node".into();
+        result.write_state("restored", &restored);
+        result
     }
-    assert!(restore_retained_node(&cli, &|| true)
-        .unwrap_err()
-        .contains("Start it before"));
-    assert_eq!(fs::read(&wrapper.path).unwrap(), pending_bytes);
-    assert_eq!(fs::read(&state_path).unwrap(), paused_service);
-    assert_eq!(fs::read(&bun_state_path).unwrap(), paused_bun_service);
-    write_state(&service);
-    assert_eq!(
-        migrate(&cli, &runtime, "2026.10.1", Mode::OwnedUpdate, &|| true).unwrap(),
-        MigrationOutcome::Current
-    );
-    let completed = read_wrapper(&cli).unwrap().managed.unwrap();
-    assert!(completed.pending.is_none());
-    assert_eq!(completed.binding.unwrap().pin_revision, "bun-pin");
-    assert_eq!(
-        verified_backup(
-            &completed.retained_wrapper,
-            &completed.retained_wrapper_sha256
+
+    fn write_state(&self, name: &str, state: &Value) {
+        for (kind, runtime) in [
+            ("node", &self.wrapper.node.runtime),
+            ("bun", &self.runtime.bun),
+        ] {
+            let mut projected = state.clone();
+            projected["cli"]["runtime"]["kind"] = kind.into();
+            projected["cli"]["runtime"]["execPath"] = serde_json::to_value(runtime).unwrap();
+            fs::write(
+                self.fixture.0.join(format!("{name}-{kind}.json")),
+                serde_json::to_vec(&projected).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn bun_state(&self) -> Value {
+        let mut state = self.fixture.state_json(&self.wrapper);
+        state["service"]["command"]["programArguments"][0] =
+            serde_json::to_value(&self.runtime.bun).unwrap();
+        state["service"]["revision"] = "installed-bun".into();
+        state["service"]["runtimeIntent"] = serde_json::json!({
+            "status": "known", "revision": "bun-pin", "stored": true,
+            "pin": { "runtime": "bun", "path": self.runtime.bun }
+        });
+        state
+    }
+
+    fn publish_pending(&self, original: &Value, mode: Mode) -> Managed {
+        let mut metadata = managed_metadata(
+            &self.wrapper,
+            bundled_target(&self.runtime, &self.wrapper.node.entry).unwrap(),
+            "2026.10.1".into(),
+            None,
         )
-        .unwrap(),
-        wrapper.bytes
-    );
+        .unwrap();
+        let original: Snapshot = serde_json::from_value(original.clone()).unwrap();
+        metadata.pending = Some(Pending {
+            original: original.binding().unwrap(),
+            original_wrapper: backup(&self.wrapper.path, "transition", &self.wrapper.bytes)
+                .unwrap(),
+            original_wrapper_sha256: digest(&self.wrapper.bytes),
+            mode,
+        });
+        self.publish_metadata(&metadata);
+        metadata
+    }
+
+    fn publish_metadata(&self, metadata: &Managed) {
+        publish(
+            &read_wrapper(&self.cli).unwrap(),
+            &render(metadata).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn migrate(&self, mode: Mode) -> Result<MigrationOutcome, String> {
+        migrate(&self.cli, &self.runtime, "2026.10.1", mode, &|| true)
+    }
+
+    fn calls(&self) -> String {
+        fs::read_to_string(self.fixture.0.join("calls")).unwrap_or_default()
+    }
+
+    fn current_bytes(&self) -> [Vec<u8>; 2] {
+        ["node", "bun"]
+            .map(|kind| fs::read(self.fixture.0.join(format!("current-{kind}.json"))).unwrap())
+    }
+}
+
+#[test]
+fn interrupted_bun_bindings_become_external_without_health_or_service_mutation() {
+    for case in [
+        "same-bun",
+        "changed-definition",
+        "changed-pin",
+        "different-runtime",
+        "different-profile",
+        "unknown-intent",
+        "failed-health",
+        "paused",
+    ] {
+        let fixture = MigrationFixture::new();
+        let metadata =
+            fixture.publish_pending(&fixture.fixture.state_json(&fixture.wrapper), Mode::Adopt);
+        let pending_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        let mut state = fixture.bun_state();
+        match case {
+            "changed-definition" => state["service"]["revision"] = "operator-definition".into(),
+            "changed-pin" => {
+                state["service"]["runtimeIntent"]["revision"] =
+                    "operator-repinned-identical-bun".into()
+            }
+            "different-runtime" => {
+                state["service"]["runtimeIntent"]["pin"]["path"] = "/independent/bun".into()
+            }
+            "different-profile" => {
+                state["config"]["daemon"]["path"] =
+                    serde_json::to_value(fixture.fixture.0.join("other-profile/openclaw.json"))
+                        .unwrap()
+            }
+            "unknown-intent" => state["service"]["runtimeIntent"]["status"] = "unknown".into(),
+            "failed-health" => state["rpc"]["ok"] = false.into(),
+            "paused" => state["service"]["runtime"]["status"] = "stopped".into(),
+            _ => {}
+        }
+        fixture.write_state("current", &state);
+        let service_bytes = fixture.current_bytes();
+        assert!(has_gateway_runtime_record(&fixture.cli).unwrap());
+        assert_eq!(
+            fixture.migrate(Mode::OwnedUpdate).unwrap(),
+            MigrationOutcome::PreservedExternal,
+            "{case}"
+        );
+        let external = read_wrapper(&fixture.cli).unwrap().managed.unwrap();
+        let mut expected = metadata.clone();
+        expected.purpose = Purpose::External;
+        expected.binding = None;
+        expected.pending = None;
+        assert_eq!(
+            external, expected,
+            "recovery metadata is retained for {case}"
+        );
+        let snapshot: Snapshot = serde_json::from_value(state).unwrap();
+        assert!(!external.owns(&snapshot));
+        assert_eq!(interrupted_notice(&fixture.cli), Some(INTERRUPTED));
+        assert!(
+            has_gateway_runtime_record(&fixture.cli).unwrap(),
+            "a record is not ownership"
+        );
+        let pending = metadata.pending.unwrap();
+        assert_eq!(
+            verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256).unwrap(),
+            fixture.wrapper.bytes
+        );
+        assert_eq!(
+            verified_backup(
+                &external.retained_wrapper,
+                &external.retained_wrapper_sha256
+            )
+            .unwrap(),
+            fixture.wrapper.bytes
+        );
+        let archives: Vec<_> = fs::read_dir(fixture.wrapper.path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".openclaw-tauri-interrupted-")
+            })
+            .collect();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(fs::read(&archives[0]).unwrap(), pending_bytes);
+        assert_eq!(
+            fs::metadata(&archives[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let external_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        assert_eq!(
+            fixture.migrate(Mode::OwnedUpdate).unwrap(),
+            MigrationOutcome::PreservedExternal
+        );
+        assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), external_bytes);
+        assert_eq!(fixture.current_bytes(), service_bytes, "{case}");
+        assert_eq!(
+            fixture.calls(),
+            "",
+            "no automatic failure rollback for {case}"
+        );
+        assert!(fs::read_to_string(fixture.fixture.0.join("inspections"))
+            .unwrap()
+            .lines()
+            .all(|line| line.starts_with("node ") && line.contains("--no-probe")));
+    }
+}
+
+#[test]
+fn interrupted_original_binding_recovers_before_installing_and_keeps_pause() {
+    for paused in [false, true] {
+        let fixture = MigrationFixture::new();
+        let mut original = fixture.fixture.state_json(&fixture.wrapper);
+        if paused {
+            original["service"]["runtime"]["status"] = "stopped".into();
+        }
+        fixture.write_state("current", &original);
+        let metadata = fixture.publish_pending(&original, Mode::Adopt);
+        let pending_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        if paused {
+            for mode in [Mode::OwnedUpdate, Mode::Adopt, Mode::Fresh] {
+                assert_eq!(
+                    fixture.migrate(mode).unwrap(),
+                    MigrationOutcome::DeferredPaused
+                );
+                assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), pending_bytes);
+            }
+            assert!(restore_retained_node(&fixture.cli, &|| true)
+                .unwrap_err()
+                .contains("Start it before"));
+            assert_eq!(fixture.calls(), "");
+        } else {
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::Migrated
+            );
+            assert_eq!(fixture.calls(), "repair\ninstall-bun\n");
+            let completed = read_wrapper(&fixture.cli).unwrap().managed.unwrap();
+            assert_eq!(completed.purpose, Purpose::Gateway);
+            assert!(completed.pending.is_none());
+            assert_eq!(completed.binding.as_ref().unwrap().pin_revision, "bun-pin");
+            assert_eq!(
+                verified_backup(
+                    &metadata.retained_wrapper,
+                    &metadata.retained_wrapper_sha256
+                )
+                .unwrap(),
+                fixture.wrapper.bytes
+            );
+            assert_eq!(
+                verified_backup(
+                    &completed.retained_wrapper,
+                    &completed.retained_wrapper_sha256
+                )
+                .unwrap(),
+                fixture.wrapper.bytes
+            );
+        }
+    }
+}
+
+#[test]
+fn external_runtime_requires_explicit_readoption_or_verified_node_restore() {
+    for action in ["readopt", "readopt-pending", "restore"] {
+        let fixture = MigrationFixture::new();
+        let metadata =
+            fixture.publish_pending(&fixture.fixture.state_json(&fixture.wrapper), Mode::Adopt);
+        fixture.write_state("current", &fixture.bun_state());
+        if action != "readopt-pending" {
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::PreservedExternal
+            );
+        }
+        assert_eq!(fixture.calls(), "");
+        if action == "restore" {
+            let mut unsupported = fixture.bun_state();
+            unsupported["cli"]["runtime"]["supported"] = false.into();
+            fixture.write_state("current", &unsupported);
+            let external_bytes = fs::read(&fixture.wrapper.path).unwrap();
+            assert!(restore_retained_node(&fixture.cli, &|| true)
+                .unwrap_err()
+                .contains("retained Node"));
+            assert_eq!(fixture.calls(), "");
+            assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), external_bytes);
+            fixture.write_state("current", &fixture.bun_state());
+            restore_retained_node(&fixture.cli, &|| true).unwrap();
+            assert_eq!(fixture.calls(), "install-node\n");
+            assert_eq!(
+                fs::read(&fixture.wrapper.path).unwrap(),
+                fixture.wrapper.bytes
+            );
+            assert!(!has_gateway_runtime_record(&fixture.cli).unwrap());
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::PreservedExternal
+            );
+        } else {
+            assert_eq!(
+                fixture.migrate(Mode::Adopt).unwrap(),
+                MigrationOutcome::Migrated
+            );
+            assert_eq!(fixture.calls(), "repair\ninstall-bun\n");
+            let completed = read_wrapper(&fixture.cli).unwrap().managed.unwrap();
+            assert_eq!(completed.purpose, Purpose::Gateway);
+            assert_eq!(completed.retained_wrapper, metadata.retained_wrapper);
+            assert!(completed.owns(&capture(&fixture.cli, None, true).unwrap()));
+            assert_eq!(interrupted_notice(&fixture.cli), None);
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::Current
+            );
+        }
+    }
+}
+
+#[test]
+fn external_readoption_preserves_other_pins_and_paused_services() {
+    for case in ["other-pin", "paused"] {
+        let fixture = MigrationFixture::new();
+        fixture.publish_pending(&fixture.fixture.state_json(&fixture.wrapper), Mode::Adopt);
+        let mut state = fixture.bun_state();
+        if case == "other-pin" {
+            state["service"]["runtimeIntent"]["pin"]["path"] = "/independent/bun".into();
+        } else {
+            state["service"]["runtime"]["status"] = "stopped".into();
+        }
+        fixture.write_state("current", &state);
+        assert_eq!(
+            fixture.migrate(Mode::OwnedUpdate).unwrap(),
+            MigrationOutcome::PreservedExternal
+        );
+        let external_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        let service_bytes = fixture.current_bytes();
+        if case == "other-pin" {
+            assert!(fixture.migrate(Mode::Adopt).is_err());
+        } else {
+            assert_eq!(
+                fixture.migrate(Mode::Adopt).unwrap(),
+                MigrationOutcome::DeferredPaused
+            );
+            assert!(restore_retained_node(&fixture.cli, &|| true)
+                .unwrap_err()
+                .contains("Start it before"));
+        }
+        assert_eq!(fixture.calls(), "");
+        assert_eq!(fixture.current_bytes(), service_bytes);
+        assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), external_bytes);
+    }
+}
+
+#[test]
+fn interrupted_intent_keeps_pending_marker_when_a_recovery_backup_is_modified() {
+    for retained_node in [false, true] {
+        let fixture = MigrationFixture::new();
+        let metadata =
+            fixture.publish_pending(&fixture.fixture.state_json(&fixture.wrapper), Mode::Adopt);
+        fixture.write_state("current", &fixture.bun_state());
+        let pending_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        let backup = if retained_node {
+            &metadata.retained_wrapper
+        } else {
+            &metadata.pending.as_ref().unwrap().original_wrapper
+        };
+        fs::write(backup, "changed recovery bytes").unwrap();
+        assert!(fixture
+            .migrate(Mode::OwnedUpdate)
+            .unwrap_err()
+            .contains("recovery wrapper changed"));
+        assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), pending_bytes);
+        assert_eq!(fixture.calls(), "");
+    }
+}
+
+#[test]
+fn fresh_startup_uses_migration_admission_and_preserves_existing_services_or_pins() {
+    for case in ["absent", "retained-pin", "existing"] {
+        let fixture = MigrationFixture::new();
+        let metadata = managed_metadata(
+            &fixture.wrapper,
+            bundled_target(&fixture.runtime, &fixture.wrapper.node.entry).unwrap(),
+            "2026.10.1".into(),
+            None,
+        )
+        .unwrap();
+        fixture.publish_metadata(&metadata);
+        let mut state = fixture.fixture.state_json(&fixture.wrapper);
+        if case != "existing" {
+            state["service"]["loaded"] = false.into();
+            state["service"]["command"] = Value::Null;
+            state["service"]["runtime"]["status"] = "stopped".into();
+        }
+        if case == "retained-pin" {
+            state["service"]["runtimeIntent"]["stored"] = true.into();
+        }
+        fixture.write_state("current", &state);
+        let wrapper_bytes = fs::read(&fixture.wrapper.path).unwrap();
+        let service_bytes = fixture.current_bytes();
+        if case == "absent" {
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::Migrated
+            );
+            assert_eq!(fixture.calls(), "install-bun\n");
+        } else {
+            assert_eq!(
+                fixture.migrate(Mode::OwnedUpdate).unwrap(),
+                MigrationOutcome::PreservedExternal
+            );
+            assert!(fixture.migrate(Mode::Fresh).is_err());
+            assert_eq!(fixture.calls(), "");
+            assert_eq!(fixture.current_bytes(), service_bytes);
+            assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), wrapper_bytes);
+        }
+    }
 }

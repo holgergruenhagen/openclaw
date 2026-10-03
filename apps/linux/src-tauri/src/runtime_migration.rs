@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 const MARKER: &str = "# OpenClaw-Tauri runtime v1 ";
 const CHANGED: &str = "The Gateway or CLI changed ownership. Its current selection was preserved; inspect it before retrying.";
+pub(crate) const INTERRUPTED: &str = "The runtime transition was interrupted; this app is not managing it until you choose Use bundled runtime or Restore previous Node runtime.";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct BundledRuntime {
@@ -36,13 +37,8 @@ pub(crate) enum MigrationOutcome {
     PreservedExternal,
 }
 
-pub(crate) struct MigrationStatus {
-    pub managed: bool,
-    pub paused: bool,
-}
-
 /// Startup must not execute or adopt an unmarked CLI just to discover app ownership.
-pub(crate) fn is_app_managed(cli: &OpenClawCli) -> Result<bool, String> {
+pub(crate) fn has_gateway_runtime_record(cli: &OpenClawCli) -> Result<bool, String> {
     let Some(path) = cli.managed_wrapper() else {
         return Ok(false);
     };
@@ -64,7 +60,7 @@ pub(crate) fn is_app_managed(cli: &OpenClawCli) -> Result<bool, String> {
     }
     Ok(read_wrapper(cli)?
         .managed
-        .is_some_and(|metadata| metadata.purpose == Purpose::Gateway))
+        .is_some_and(|metadata| metadata.purpose != Purpose::Browser))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -103,41 +99,18 @@ struct Pending {
     mode: Mode,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PendingState {
-    Original,
-    Bun,
-    Node,
-}
-
-fn pending_state(metadata: &Managed, state: &Snapshot) -> Result<PendingState, String> {
-    let pending = metadata.pending.as_ref().ok_or(CHANGED)?;
-    let binding = state.binding()?;
-    if binding.config_path != pending.original.config_path {
-        return Err(CHANGED.into());
-    }
-    if binding == pending.original {
-        return Ok(PendingState::Original);
-    }
-    if state.matches_bun(&metadata.target) {
-        return Ok(PendingState::Bun);
-    }
-    if state.unpinned() && state.matches_target(&metadata.node) {
-        return Ok(PendingState::Node);
-    }
-    Err(CHANGED.into())
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Purpose {
     Gateway,
     Browser,
+    External,
 }
 
 impl Managed {
     fn owns(&self, state: &Snapshot) -> bool {
         self.purpose == Purpose::Gateway
+            && self.pending.is_none()
             && self.binding.as_ref().is_some_and(|binding| {
                 state.binding().is_ok_and(|current| {
                     binding.pin_revision == current.pin_revision
@@ -153,6 +126,15 @@ struct Wrapper {
     bytes: Vec<u8>,
     node: Target,
     managed: Option<Managed>,
+}
+
+impl Wrapper {
+    fn inspection_target(&self) -> Option<&Target> {
+        self.managed
+            .as_ref()
+            .filter(|metadata| metadata.pending.is_some() || metadata.purpose == Purpose::External)
+            .map(|_| &self.node)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -371,36 +353,12 @@ impl Snapshot {
     }
 }
 
-pub(crate) fn inspect(cli: &OpenClawCli) -> Result<MigrationStatus, String> {
-    let wrapper = read_wrapper(cli)?;
-    let state = capture(
-        cli,
-        wrapper
-            .managed
-            .as_ref()
-            .and_then(|value| value.pending.as_ref())
-            .map(|_| &wrapper.node),
-        false,
-    )?;
-    let bound = wrapper
+pub(crate) fn interrupted_notice(cli: &OpenClawCli) -> Option<&'static str> {
+    read_wrapper(cli)
+        .ok()?
         .managed
-        .as_ref()
-        .is_some_and(|metadata| metadata.owns(&state));
-    let pending = wrapper.managed.as_ref().is_some_and(|metadata| {
-        metadata.purpose == Purpose::Gateway && pending_state(metadata, &state).is_ok()
-    });
-    let fresh = wrapper.managed.as_ref().is_some_and(|metadata| {
-        metadata.purpose == Purpose::Gateway
-            && metadata.pending.is_none()
-            && metadata.binding.is_none()
-            && state.binding().is_ok()
-            && state.absent()
-            && state.unpinned()
-    });
-    Ok(MigrationStatus {
-        managed: bound || pending || fresh,
-        paused: state.paused(),
-    })
+        .filter(|metadata| metadata.purpose == Purpose::External)
+        .map(|_| INTERRUPTED)
 }
 
 /// Private browser launchers carry no Gateway service authority or binding.
@@ -440,8 +398,14 @@ pub(crate) fn migrate(
         .as_ref()
         .is_some_and(|metadata| metadata.pending.is_some())
     {
-        return resume_pending(cli, runtime, app_version, is_current, &wrapper);
+        let outcome = resume_pending(cli, runtime, app_version, is_current, &wrapper)?;
+        return if mode == Mode::Adopt && outcome == MigrationOutcome::PreservedExternal {
+            migrate(cli, runtime, app_version, mode, is_current)
+        } else {
+            Ok(outcome)
+        };
     }
+    let requested_mode = mode;
     let mode = match (mode, wrapper.managed.as_ref()) {
         (Mode::OwnedUpdate, Some(metadata))
             if metadata.purpose == Purpose::Gateway && metadata.binding.is_none() =>
@@ -455,7 +419,16 @@ pub(crate) fn migrate(
         }
         _ => mode,
     };
-    let mut state = capture(cli, None, false)?;
+    let mut state = capture(cli, wrapper.inspection_target(), false)?;
+    if requested_mode == Mode::OwnedUpdate
+        && !(wrapper
+            .managed
+            .as_ref()
+            .is_some_and(|metadata| metadata.owns(&state))
+            || (mode == Mode::Fresh && state.absent() && state.unpinned()))
+    {
+        return Ok(MigrationOutcome::PreservedExternal);
+    }
     if mode == Mode::Fresh && !state.absent() {
         return Err(CHANGED.into());
     }
@@ -487,7 +460,7 @@ pub(crate) fn migrate(
     {
         return Err(CHANGED.into());
     }
-    let installed = version(cli, None)?;
+    let installed = version(cli, wrapper.inspection_target())?;
     let app_version = if crate::is_release_version(app_version) {
         app_version
     } else {
@@ -529,7 +502,7 @@ pub(crate) fn migrate(
     };
     if package_updated {
         wrapper = read_wrapper(cli).map_err(refusal)?;
-        state = capture(cli, None, false).map_err(refusal)?;
+        state = capture(cli, wrapper.inspection_target(), false).map_err(refusal)?;
     }
     // Core may refresh the service's definition and pin binding while preserving runtime intent.
     admit(&wrapper, &state, mode).map_err(refusal)?;
@@ -564,7 +537,7 @@ pub(crate) fn migrate(
         "recovery",
         &serde_json::to_vec(&serde_json::json!({
             "wrapper": String::from_utf8_lossy(&wrapper.bytes),
-            "service": capture_value(cli, None, false)?,
+            "service": capture_value(cli, wrapper.inspection_target(), false)?,
             "retainedNode": wrapper.node,
         }))
         .map_err(|error| error.to_string())?,
@@ -634,50 +607,38 @@ fn resume_pending(
 ) -> Result<MigrationOutcome, String> {
     let metadata = wrapper.managed.as_ref().ok_or(CHANGED)?;
     let pending = metadata.pending.as_ref().ok_or(CHANGED)?;
-    let state = capture(cli, Some(&wrapper.node), false)?;
-    let selection = pending_state(metadata, &state)?;
-    if state.paused() {
-        return Ok(MigrationOutcome::DeferredPaused);
-    }
-    require_retained_node(&state, &wrapper.node, &metadata.package_version)?;
-    recheck(cli, wrapper, &state, is_current, true)?;
-    if selection == PendingState::Original {
+    let state = capture(cli, Some(&wrapper.node), false);
+    if state
+        .as_ref()
+        .ok()
+        .and_then(|state| state.binding().ok())
+        .as_ref()
+        == Some(&pending.original)
+    {
+        let state = state?;
+        if state.paused() {
+            return Ok(MigrationOutcome::DeferredPaused);
+        }
+        require_retained_node(&state, &wrapper.node, &metadata.package_version)?;
+        recheck(cli, wrapper, &state, is_current, true)?;
         publish(
             wrapper,
             &verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256)?,
         )?;
         return migrate(cli, runtime, app_version, pending.mode, is_current);
     }
-    if selection == PendingState::Node {
-        wait_healthy(cli, &wrapper.node, &state.binding()?, is_current)?;
-        recheck(cli, wrapper, &state, is_current, true)?;
-        verify_healthy(cli, &wrapper.node, &state.binding()?)?;
-        publish(wrapper, &retained_bytes(wrapper)?)?;
-        return Err("The interrupted transition restored the previous Node runtime. Choose Use bundled runtime again when ready; a stopped Gateway remains stopped.".into());
-    }
-    let result = (|| {
-        let current = capture(cli, Some(&wrapper.node), false)?;
-        if !current.matches_bun(&metadata.target) {
-            return Err(CHANGED.into());
-        }
-        let binding = current.binding()?;
-        wait_healthy(cli, &metadata.target, &binding, is_current)?;
-        verify_healthy(cli, &metadata.target, &binding)?;
-        same_wrapper(wrapper)?;
-        check_current(is_current)?;
-        let mut completed = metadata.clone();
-        completed.binding = Some(binding);
-        completed.pending = None;
-        publish(wrapper, &render(&completed)?)
-    })();
-    if let Err(error) = result {
-        let recovery = restore_retained_node(cli, &|| true);
-        return Err(match recovery {
-            Ok(()) => format!("Interrupted Bun activation failed: {error} The retained Node runtime was restored. Retry to use bundled Bun."),
-            Err(recovery) => format!("Interrupted Bun activation failed: {error} Recovery needs attention: {recovery}"),
-        });
-    }
-    migrate(cli, runtime, app_version, Mode::OwnedUpdate, is_current)
+    // Matching runtime bytes cannot prove who installed the current binding after a crash.
+    // Preserve both recovery artifacts before retiring intent; do not touch the service.
+    retained_bytes(wrapper)?;
+    verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256)?;
+    backup(&wrapper.path, "interrupted", &wrapper.bytes)?;
+    check_current(is_current)?;
+    let mut external = metadata.clone();
+    external.purpose = Purpose::External;
+    external.binding = None;
+    external.pending = None;
+    publish(wrapper, &render(&external)?)?;
+    Ok(MigrationOutcome::PreservedExternal)
 }
 
 pub(crate) fn restore_retained_node(
@@ -690,8 +651,8 @@ pub(crate) fn restore_retained_node(
         .as_ref()
         .ok_or("This CLI is not managed by OpenClaw-Tauri.")?;
     let state = capture(cli, Some(&wrapper.node), false)?;
-    if metadata.pending.is_some() {
-        pending_state(metadata, &state)?;
+    if metadata.pending.is_some() || metadata.purpose == Purpose::External {
+        state.binding()?;
         check_current(is_current)?;
     } else {
         admit(&wrapper, &state, Mode::OwnedUpdate)?;
@@ -732,7 +693,13 @@ fn admit(wrapper: &Wrapper, state: &Snapshot, mode: Mode) -> Result<(), String> 
         };
     }
     if let Some(metadata) = &wrapper.managed {
-        return if metadata.owns(state) {
+        return if metadata.owns(state)
+            || (mode == Mode::Adopt
+                && metadata.purpose == Purpose::External
+                && (state.matches_bun(&metadata.target)
+                    || (state.unpinned()
+                        && (state.absent() || state.matches_target(&wrapper.node)))))
+        {
             Ok(())
         } else {
             Err(CHANGED.into())
@@ -897,15 +864,7 @@ fn recheck(
 ) -> Result<(), String> {
     check_current(is_current)?;
     same_wrapper(wrapper)?;
-    let current = capture(
-        cli,
-        wrapper
-            .managed
-            .as_ref()
-            .and_then(|value| value.pending.as_ref())
-            .map(|_| &wrapper.node),
-        false,
-    )?;
+    let current = capture(cli, wrapper.inspection_target(), false)?;
     if require_intent {
         if current.binding()? != expected.binding()? || current.paused() != expected.paused() {
             return Err(CHANGED.into());

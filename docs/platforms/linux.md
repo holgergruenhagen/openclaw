@@ -169,7 +169,13 @@ update separately.
 
 Once adopted, future app updates use that same migration owner automatically.
 This matches the native macOS app's updater-first, same-version switch and
-rollback pattern; only legacy unmarked installations need explicit adoption.
+rollback pattern. Legacy unmarked installations and interrupted runtime transitions
+need explicit adoption. After an interrupted post-install transition, the app
+preserves the service, pins, and verified Node backup and shows a notice that it
+is no longer managing that installation. Choose **Use bundled runtime…** to adopt
+it again or **Restore previous Node runtime…** to return to Node. Only a transition
+whose binding still matches the recorded pre-install state resumes automatically;
+an unproven post-install binding is never claimed or rolled back automatically.
 The CLI still owns configuration, database migrations, backups, and service
 installation. The companion preserves independently selected runtime pins.
 Development app builds retain the installed CLI version.

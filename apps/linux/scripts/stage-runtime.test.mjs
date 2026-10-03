@@ -20,3 +20,8 @@ test("hides Linux ELF resources from linuxdeploy without changing executable byt
   assert.deepEqual(resource.subarray(prefix.length), executable);
   assert.equal(resourceBytes("darwin", executable), executable, "preserve signed macOS bytes");
 });
+
+test("preserves the system-Node setup on FreeBSD", () => {
+  assert.equal(runtimeTarget("x86_64-unknown-freebsd"), null);
+  assert.equal(runtimeTarget("aarch64-unknown-freebsd"), null);
+});

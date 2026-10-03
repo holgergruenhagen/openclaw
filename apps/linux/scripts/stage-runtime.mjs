@@ -16,8 +16,8 @@ export function resourceBytes(platform, executable) {
 }
 
 export function runtimeTarget(triple) {
-  if (triple.includes("-windows-")) {
-    return null; // No signed Windows fork is published yet.
+  if (triple.includes("-windows-") || triple.endsWith("-unknown-freebsd")) {
+    return null; // Preserve Node where no bundled fork is published.
   }
   const platform = triple.endsWith("-apple-darwin")
     ? "darwin"
@@ -90,6 +90,6 @@ export function stageRuntime(triple) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const host = `${process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch}-${process.platform === "darwin" ? "apple-darwin" : process.platform === "linux" ? "unknown-linux-gnu" : "pc-windows-msvc"}`;
+  const host = `${process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch}-${process.platform === "darwin" ? "apple-darwin" : process.platform === "linux" ? "unknown-linux-gnu" : process.platform === "win32" ? "pc-windows-msvc" : `unknown-${process.platform}`}`;
   stageRuntime(process.env.TAURI_ENV_TARGET_TRIPLE || host);
 }

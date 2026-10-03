@@ -27,9 +27,9 @@ const QUICKCHAT_SHORTCUT_ID: &str = "quickchat-shortcut";
 const START_ID: &str = "start-gateway";
 const STOP_ID: &str = "stop-gateway";
 const RESTART_ID: &str = "restart-gateway";
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const ADOPT_RUNTIME_ID: &str = "adopt-bundled-runtime";
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const RESTORE_RUNTIME_ID: &str = "restore-node-runtime";
 const QUIT_ID: &str = "quit";
 
@@ -251,7 +251,7 @@ pub fn build(
         menu_builder
     };
     let menu_builder = menu_builder.separator().items(&[&start, &stop, &restart]);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let menu_builder = menu_builder
         .text(ADOPT_RUNTIME_ID, "Use bundled runtime…")
         .text(RESTORE_RUNTIME_ID, "Restore previous Node runtime…");
@@ -455,15 +455,15 @@ fn handle_menu(
             app.state::<GatewayOperationQueue>()
                 .submit_action(GatewayAction::Restart);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         ADOPT_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::Adopt),
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         RESTORE_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::RestoreNode),
         _ => {}
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn confirm_runtime_action(app: &AppHandle, action: crate::RuntimeAction) {
     use tauri_plugin_dialog::MessageDialogButtons;
     if app.state::<DesktopState>().is_quitting() {

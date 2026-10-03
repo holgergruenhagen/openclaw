@@ -1,4 +1,4 @@
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod bundled_runtime;
 mod chrome_setup;
 mod cli;
@@ -32,7 +32,7 @@ mod pending_approvals;
 mod quickchat;
 mod quickchat_widgets;
 mod remote_gateway;
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod runtime_migration;
 mod tray;
 mod updater;
@@ -62,7 +62,7 @@ use tauri_plugin_opener::OpenerExt;
 
 const CONNECTED_WATCH_INTERVAL: Duration = Duration::from_secs(15);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimeAction {
     Adopt,
@@ -831,7 +831,7 @@ impl DesktopState {
         if explicit_local {
             self.inner.remote_tunnels.clear();
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.update_owned_runtime(app, &cli, selection)? {
             let snapshot = gateway::status(&cli)?;
             self.show_local(app, "stopped", false, None)?;
@@ -853,7 +853,7 @@ impl DesktopState {
             .operation
             .lock()
             .map_err(|_| "Installer lock is unavailable.".to_string())?;
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Ok(cli) = OpenClawCli::discover() {
             if runtime_migration::is_app_managed(&cli)? {
                 if self.update_owned_runtime(app, &cli, selection)? {
@@ -863,21 +863,21 @@ impl DesktopState {
                 return self.finish_local_connection(app, cli, ready);
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let fresh = matches!(OpenClawCli::discover(), Err(CliError::Missing))
             && std::env::var_os("OPENCLAW_DESKTOP_CLI").is_none()
             && installer::managed_launcher_absent(
                 &cli::openclaw_home().map_err(|error| error.to_string())?,
             )?;
-        #[cfg(target_os = "windows")]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let fresh = false;
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let runtime = fresh.then(|| bundled_runtime::seed(app)).transpose()?;
         installer::install(app, channel, fresh)?;
         let cli = OpenClawCli::discover().map_err(|error| {
             format!("OpenClaw is installed, but the CLI could not be found: {error}")
         })?;
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(runtime) = runtime.as_ref() {
             runtime_migration::bind_runtime(&cli, runtime, runtime_migration::Purpose::Gateway)?;
         }
@@ -903,7 +903,7 @@ impl DesktopState {
             }
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(runtime) = runtime {
             runtime_migration::migrate(
                 &cli,
@@ -957,7 +957,7 @@ impl DesktopState {
             self.update_tray(&snapshot);
             return Ok(snapshot);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.update_owned_runtime(app, &cli, selection)?;
             snapshot = gateway::status(&cli)?;
@@ -967,7 +967,7 @@ impl DesktopState {
         self.finish_local_connection(app, cli, ready)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn runtime_operation_is_current(&self, app: &AppHandle, selection: u64) -> bool {
         !self.is_quitting()
             && app
@@ -975,7 +975,7 @@ impl DesktopState {
                 .selection_is_current(selection)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn update_owned_runtime(
         &self,
         app: &AppHandle,
@@ -1006,7 +1006,7 @@ impl DesktopState {
         ))
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn runtime_action(
         &self,
         app: &AppHandle,
@@ -3497,7 +3497,7 @@ fn main() {
                 GatewayOperation::Install(channel) => {
                     operation_state.install_cli(&operation_app, channel, selection)
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 GatewayOperation::Runtime(action) => {
                     operation_state.runtime_action(&operation_app, action, selection)
                 }

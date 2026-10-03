@@ -604,6 +604,8 @@ export const databaseWorkerCoreTestFiles = [
   "src/auto-reply/reply/route-reply.prepared.test.ts",
   "src/auto-reply/reply/route-reply.recovery-owner.test.ts",
   "src/media/store.cleanup.test.ts",
+  "src/media/generated-html-provenance.test.ts",
+  "src/media/web-media.test.ts",
   "src/state/agent-provenance.test.ts",
   "src/state/user-profiles.avatar-worker.test.ts",
   "src/state/user-channel-identities.test.ts",

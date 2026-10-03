@@ -20,6 +20,7 @@ import { FsSafeError, isPathInside, type OpenResult } from "../infra/fs-safe.js"
 import { retryAsync } from "../infra/retry.js";
 import { writeSiblingTempFile } from "../infra/sibling-temp-file.js";
 import { captureChannelReadScope } from "../shared/channel-read-authority.js";
+import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { resolveConfigDir } from "../utils.js";
 import { MEDIA_FILE_MODE, SaveMediaSourceError } from "./store.shared.js";
 
@@ -284,6 +285,7 @@ export async function prunePlaybackTranscodeCache(): Promise<void> {
 
 /** Prunes stale delivery staging without touching inbound replay or SQLite-owned outgoing media. */
 export async function pruneOutboundMedia(): Promise<void> {
+  const context = captureOpenClawStateWorkerContext();
   const outboundDir = resolveMediaScopedDir(OUTBOUND_STAGING_SUBDIR, "pruneOutboundMedia");
   await openMediaStore(MEDIA_MAX_BYTES, outboundDir).pruneExpired({
     ttlMs: OUTBOUND_STAGING_TTL_MS,
@@ -291,15 +293,16 @@ export async function pruneOutboundMedia(): Promise<void> {
     pruneEmptyDirs: true,
   });
   const { pruneStaleTrustedGeneratedHtmlMarkers } = await import("./web-media.js");
-  await pruneStaleTrustedGeneratedHtmlMarkers();
+  await pruneStaleTrustedGeneratedHtmlMarkers(context);
 }
 
 /** Prunes expired non-playback media, optionally recursing into scoped subdirectories. */
 export async function cleanOldMedia(ttlMs = DEFAULT_TTL_MS, options: CleanOldMediaOptions = {}) {
+  const context = captureOpenClawStateWorkerContext();
   await pruneNonPlaybackMedia(ttlMs, options);
   // Trust metadata must not outlive the staged file that it authorizes.
   const { pruneStaleTrustedGeneratedHtmlMarkers } = await import("./web-media.js");
-  await pruneStaleTrustedGeneratedHtmlMarkers();
+  await pruneStaleTrustedGeneratedHtmlMarkers(context);
 }
 
 /** Media-store file metadata returned after bytes are persisted under a safe media ID. */

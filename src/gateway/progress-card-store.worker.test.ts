@@ -13,7 +13,6 @@ import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import * as publications from "../state/openclaw-agent-worker-store.js";
 import { runOpenClawAgentWriteAdmission } from "../state/openclaw-agent-write-admission.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { resolveGatewaySessionDatabase } from "./board-store.js";
 import { progressCardStore } from "./progress-card-store.js";
 import { createProgressCardHandlers } from "./server-methods/progress-card.js";
 import type { GatewayRequestContext, RespondFn } from "./server-methods/types.js";
@@ -34,7 +33,7 @@ it.each([false, true])(
         { sessionKey, agentId: "main", storePath: cfg.session?.store },
         { sessionId: "card-session", updatedAt: 1 },
       );
-      const target = resolveGatewaySessionDatabase(sessionKey, "main");
+      const target = { agentId: "main", path: cfg.session?.store };
       const db = openOpenClawAgentDatabase(target).db;
       const handlers = createProgressCardHandlers();
       const broadcast = vi.fn();
@@ -86,7 +85,7 @@ it("keeps queued inputs and FIFO revisions, refusing a changed target before mut
       { sessionKey, agentId: "main" },
       { sessionId: "queued-session", updatedAt: 1 },
     );
-    const target = resolveGatewaySessionDatabase(sessionKey, "main");
+    const target = { agentId: "main" };
     const release = createDeferredCore();
     const holding = runOpenClawAgentWriteAdmission(target, () => release.promise);
     const steps = [{ step: "Captured", status: "pending" as const }];
@@ -172,7 +171,7 @@ it("preserves native decoding errors and never replays a lost committed reply", 
       { sessionId: "uncertain-session", updatedAt: 1 },
     );
     await progressCardStore.put(sessionKey, { markdown: "Before" });
-    const db = openOpenClawAgentDatabase(resolveGatewaySessionDatabase(sessionKey, "main")).db;
+    const db = openOpenClawAgentDatabase({ agentId: "main" }).db;
     db.prepare("UPDATE session_progress_cards SET steps_json = '{' WHERE session_key = ?").run(
       sessionKey,
     );

@@ -80,11 +80,13 @@ disconnection, and manual recovery.
 
 ### Desktop compatibility
 
-The companion shares one Bun fork pin with the native macOS app and CI. Runtime
-admission, SQLite safety checks, and the fork's disabled implicit package
-auto-install remain enabled. Windows Tauri test builds retain their existing
-runtime until a signed Windows fork is available; an unsigned dry-run is not
-shippable. See [Bun compatibility](/install/bun-compatibility).
+The Linux companion shares one Bun fork pin with the native macOS app and CI.
+Runtime admission, SQLite safety checks, and the fork's disabled implicit package
+auto-install remain enabled. macOS Tauri test builds keep their existing runtime
+behavior; the native macOS app owns its separate bundled runtime. Windows Tauri
+test builds retain their existing runtime until a signed Windows fork is
+available; an unsigned dry-run is not shippable. See
+[Bun compatibility](/install/bun-compatibility).
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
 newer plus a `libstdc++` that provides `GLIBCXX_3.4.30`. Ubuntu 22.04 and
@@ -147,40 +149,43 @@ after the new dashboard loads successfully.
 The macOS Tauri build is named **OpenClaw-Tauri** and keeps its saved connections
 separate from the native **OpenClaw** app.
 
-### Adopt the bundled runtime
+<a id="adopt-the-bundled-runtime" />
 
-Fresh local installations record explicit app ownership. Older installations
-remain unchanged until you choose **Use bundled runtime…** in the tray menu and
-confirm. Historical Tauri and terminal installations have identical launchers,
-so automatic adoption could take over a separately managed Gateway. Operator
-runtime pins and external CLI overrides remain under their existing owner.
+### Use the bundled runtime
 
-Adoption uses the installed CLI's updater first, then switches the same package
-version to bundled Bun and verifies Gateway health. The app retains a recovery
-backup and Node tools; failed health after a confirmed runtime install restores
-and verifies Node. A rejected or unverified install preserves the current service
-and pins instead of attempting rollback. Choose
-**Use bundled runtime…** again to retry, or **Restore previous Node runtime…**
-to leave app runtime management after a successful adoption. A stopped Gateway
-stays stopped until you choose **Start Gateway**.
+On Linux, fresh local setup installs the Gateway on the bundled OpenClaw Bun
+fork through the canonical CLI. The install guard requires the service to still
+be absent. A service that appears during setup blocks that installation. The app's
+runtime marker is informational and never authorizes automatic service changes.
 
-The confirmed CLI update may restart the Gateway and can finish even if a saved
-runtime pin prevents the later Bun switch. In that case the pin is preserved,
-the installation remains unadopted, and the app reports the completed package
-update separately.
+For any existing Gateway that uses another runtime, choose **Use bundled
+runtime…** in the tray menu. This includes Node, an older bundled Bun after an
+app update, and an operator-selected runtime. The confirmation shows the current
+runtime. The CLI install checks that the service definition and runtime pin still
+match what you confirmed before switching to the current bundled Bun. If either
+changed, the action refuses. A paused or stopped Gateway stays stopped; choose
+**Start Gateway** before switching runtimes.
 
-Once adopted, future app updates use that same migration owner automatically.
-This matches the native macOS app's updater-first, same-version switch and
-rollback pattern. Legacy unmarked installations and interrupted runtime transitions
-need explicit adoption. After an interrupted post-install transition, the app
-preserves the service, pins, and verified Node backup and shows a notice that it
-is no longer managing that installation. Choose **Use bundled runtime…** to adopt
-it again or **Restore previous Node runtime…** to return to Node. Only a transition
-whose binding still matches the recorded pre-install state resumes automatically;
-an unproven post-install binding is never claimed or rolled back automatically.
-The CLI still owns configuration, database migrations, backups, and service
-installation. The companion preserves independently selected runtime pins.
-Development app builds retain the installed CLI version.
+The app checks Gateway health after installation. On failure it shows the error
+and a CLI command to return to the previous runtime. It does not automatically
+restore a runtime. To return to Node, install a
+[supported Node version](/install/node-compatibility) if needed, then run:
+
+```sh
+openclaw gateway install --force --runtime node
+```
+
+To return to a particular previous executable, use
+`openclaw gateway install --force --runtime-path /absolute/path/to/node-or-bun`.
+The CLI owns service installation. Switching an existing Gateway's runtime
+leaves its CLI launcher unchanged.
+
+Startup and app updates never change an existing Gateway service or runtime pin.
+After an app update, the current service keeps its existing runtime until you
+choose **Use bundled runtime…** again. Immutable app runtime directories are
+retained, so updates never remove a runtime referenced by a service. These actions
+are Linux-only; macOS Tauri keeps its existing behavior, separate from the
+[native macOS app](/platforms/mac/bundled-gateway).
 
 ### Desktop sharing
 

@@ -156,7 +156,7 @@ attempting any repair.
 For real managed-service smoke tests, use a disposable OS account with its
 canonical account `HOME`. Core deliberately denies native-service authority
 when `HOME` or the profile's state directory is relocated. A temporary `HOME`
-alone therefore cannot prove Gateway installation or runtime migration.
+alone therefore cannot prove Gateway installation or runtime switching.
 
 ### Inline browser live regression on Linux
 
@@ -254,7 +254,7 @@ uses the same isolated fixtures and also runs in the Linux App workflow.
 The welcome screen explains what OpenClaw can do and asks where your assistant
 should live:
 
-- **On this computer** installs the CLI when needed and runs fresh installations
+- **On this computer** installs the CLI when needed and, on Linux, runs fresh installations
   on the bundled OpenClaw Bun fork, then starts the Gateway as a systemd user
   service. Release builds install their matching stable version; development builds ask for a release channel
   and preselect Development.
@@ -366,40 +366,37 @@ For OpenAI, **ChatGPT Login** uses a ChatGPT or Codex subscription, while
 its browser callback is not reachable, choose **ChatGPT Device Pairing** from
 the additional sign-in options.
 
+## Gateway runtime
+
+On Linux, fresh local setup installs the Gateway on the bundled OpenClaw Bun
+fork through the canonical CLI. The install carries an `--expected-runtime-pin`
+guard with `definition: null`, so it refuses if a service has appeared since
+setup observed no service. The app records an informational marker; it never uses
+that marker as permission to change a service automatically.
+
+**Use bundled runtime…** appears in the tray whenever the existing Gateway uses
+another runtime, including Node, an older bundled Bun, or an operator-selected
+runtime. The action shows the current runtime and asks for confirmation. It
+passes that observation's service definition and runtime pin to the CLI's
+`--expected-runtime-pin` guard, which refuses an intervening service or pin
+change. A paused or stopped Gateway stays stopped; choose **Start Gateway**
+before switching runtimes.
+
+After the install, the app checks Gateway health. A failed health check shows
+the error and a CLI command to return to the previous runtime; it does not
+automatically reinstall it. To return to Node, install a supported Node version
+if needed, then run `openclaw gateway install --force --runtime node`. To select
+a particular previous executable, use
+`openclaw gateway install --force --runtime-path /absolute/path/to/node-or-bun`.
+
+Startup and desktop updates leave existing Gateway services and runtime pins
+unchanged, including services previously installed by the app. After an app
+update provides a newer Bun, choose **Use bundled runtime…** again to switch.
+The CLI owns service installation. These runtime actions are Linux-only; macOS
+Tauri keeps its existing behavior, separate from the native macOS app.
+Switching an existing Gateway's runtime leaves its CLI launcher unchanged.
+
 ## Updates
-
-Fresh local installations record app ownership in their managed CLI launcher.
-For an older installation, choose **Use bundled runtime…** from the tray menu
-and confirm adoption. The app first uses the installed CLI's updater to reach
-the app version, then switches the same package to its pinned Bun runtime and
-verifies Gateway health. Development builds retain the installed package version.
-The CLI update can complete even if a saved runtime pin prevents the subsequent
-Bun switch. The pin stays under its existing owner and the installation remains
-unadopted; the app reports the completed package update separately.
-Backups and the same-version Node tools remain available for recovery. Failed
-health after a confirmed runtime install restores and verifies Node; choose
-**Use bundled runtime…** again to retry. A rejected or unverified install preserves
-the current service and pins instead of attempting rollback.
-**Restore previous Node runtime…** verifies the retained Node Gateway and removes
-app ownership, so subsequent startup does not undo the rollback.
-
-If the app exits during a runtime transition after installation, it preserves
-the running service, runtime pins, and verified Node backup but stops managing
-the installation. A notice asks you to choose **Use bundled runtime…** to adopt
-it again or **Restore previous Node runtime…** to return to Node. Recovery only
-resumes automatically while the binding still matches the recorded pre-install
-state; it never claims or rolls back an unproven post-install binding.
-
-Ordinary startup and desktop updates preserve unmarked installations and saved
-operator runtime pins. Historical Tauri and terminal installs used identical
-launchers, so the app cannot safely infer ownership. This is the difference from
-the native macOS app's automatic migration of installations with known app
-ownership. After explicit adoption, Tauri follows the same updater-first,
-same-version switch and rollback pattern automatically on app updates. A stopped
-Gateway remains stopped; use **Start Gateway** before migration. Changing the
-service's runtime selection independently revokes the app's migration authority.
-Each runtime install carries the observed service definition and pin revision to
-the CLI, so an intervening operator selection is preserved before installation.
 
 The companion checks the latest GitHub release shortly after launch and from **Check for Updates** in the tray menu. AppImage installs download and verify the signed update in place, then wait for **Restart to update**. Package-managed installs such as `.deb` stay owned by the system package manager and link to the release download page instead of replacing installed files. The macOS and Windows test builds use a separate opt-in desktop-test update channel; macOS self-updates like the AppImage build, while Windows downloads the update first and runs its installer only after **Restart to update**.
 
@@ -488,14 +485,14 @@ Quick Chat pins its native request identity before sending, so activity from oth
 The Rust build assembles the repository's `scripts/install-cli.sh` and shared `scripts/install-policy.sh` into the standalone `install-cli.sh` resource. The app never keeps a forked copy. Fresh release installs select the app version. Existing unmarked stable installs, beta installs, and development installs retain `latest`, `beta`, and the managed Git `main` checkout respectively, under `~/.openclaw`.
 
 Tauri build/dev hooks stage the runtime through `scripts/stage-openclaw-bun.sh`
-and the shared `scripts/lib/openclaw-bun.json` pin. Linux x64/arm64 and macOS use
-the same admitted fork release as the native Mac app and CI. Build-time downloads
+and the shared `scripts/lib/openclaw-bun.json` pin. Linux x64/arm64 use the same
+admitted fork release as the native macOS app and CI. Build-time downloads
 verify the release checksums, committed hashes, executable architecture, and fork
-revision. macOS includes the same pinned SQLite library owner as the native app.
-The app copies verified resource bytes to an immutable directory under
+revision. The app copies verified resource bytes to an immutable directory under
 `~/.openclaw/tools/desktop-runtime`; services never reference a temporary AppImage
-mount. Node remains installation/build tooling and the retained rollback runtime.
-The managed CLI, Gateway, and desktop-sharing node use the selected Bun launcher.
+mount. Immutable runtime directories are retained, including every directory
+referenced by an existing service. Node remains installation/build tooling.
+Fresh local setup also selects bundled Bun for the app-installed CLI launcher.
 
 Linux resources carry a fixed `OPENCLAW-BUN-RUNTIME-V1` header so linuxdeploy
 cannot rewrite the pinned ELF executable. Installation strips that header and
@@ -503,8 +500,10 @@ verifies the original executable hash. The packaged ABI scanner also decodes
 the resource and checks its architecture and symbol versions against the
 AppImage's existing compatibility floor.
 
-Windows retains its existing runtime behavior and unavailable CLI auto-install
-in test builds. No Windows Bun payload ships until a signed fork build exists;
+macOS Tauri keeps its existing runtime behavior; its native macOS sibling owns
+the Mac's bundled runtime. Windows retains its existing runtime behavior and
+unavailable CLI auto-install in test builds. No Windows Bun payload ships until
+a signed fork build exists;
 the unsigned dry-run is not eligible. See
 [Bun compatibility](https://docs.openclaw.ai/install/bun-compatibility) for runtime
 admission and the shared pin's repin gates.

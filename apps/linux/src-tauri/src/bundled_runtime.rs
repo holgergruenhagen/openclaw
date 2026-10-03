@@ -1,4 +1,4 @@
-use crate::runtime_migration::BundledRuntime;
+use crate::runtime_action::BundledRuntime;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -20,6 +20,24 @@ struct Manifest {
     platform: String,
     arch: String,
     files: BTreeMap<String, String>,
+}
+
+pub(crate) fn expected_bun_path() -> Result<PathBuf, String> {
+    let manifest: Manifest = serde_json::from_str(MANIFEST)
+        .map_err(|_| "This build has no embedded runtime.".to_string())?;
+    validate_manifest(&manifest)?;
+    let prefix = crate::cli::openclaw_home().map_err(|error| error.to_string())?;
+    Ok(runtime_directory(&prefix, MANIFEST, &manifest).join("bin/bun"))
+}
+
+fn runtime_directory(prefix: &Path, bytes: &str, manifest: &Manifest) -> PathBuf {
+    let digest: String = Sha256::digest(bytes.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    prefix
+        .join("tools/desktop-runtime")
+        .join(format!("{}-{digest}", manifest.tag))
 }
 
 pub(crate) fn seed(app: &AppHandle) -> Result<BundledRuntime, String> {
@@ -49,13 +67,9 @@ fn seed_at(
     })?;
     validate_manifest(&manifest)?;
     verify_payload(source, manifest_bytes, &manifest, true)?;
-    let digest: String = Sha256::digest(manifest_bytes.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
     let store = prefix.join("tools/desktop-runtime");
     ensure_directory(&store)?;
-    let destination = store.join(format!("{}-{digest}", manifest.tag));
+    let destination = runtime_directory(prefix, manifest_bytes, &manifest);
     if fs::symlink_metadata(&destination).is_ok() {
         verify_payload(&destination, manifest_bytes, &manifest, false)?;
     } else {
@@ -107,7 +121,7 @@ fn seed_at(
                     .map_err(|error| error.to_string())?;
             }
             // Never repair or overwrite a previously published runtime in place:
-            // a running Gateway or rollback may still own those exact bytes.
+            // a service or CLI launcher may still reference those exact bytes.
             if fs::symlink_metadata(&destination).is_ok() {
                 verify_payload(&destination, manifest_bytes, &manifest, false)?;
             } else {
@@ -372,6 +386,29 @@ mod tests {
             runtime.bun.is_file(),
             "the service must survive an AppImage unmount"
         );
+    }
+
+    #[test]
+    fn staging_an_update_retains_the_runtime_referenced_by_an_existing_service() {
+        let fixture = Fixture::new();
+        let previous = fixture.seed().unwrap();
+        let service =
+            serde_json::json!({ "programArguments": [previous.bun, "/app/entry.js", "gateway"] });
+        let mut next: serde_json::Value = serde_json::from_str(&fixture.manifest).unwrap();
+        next["tag"] = "newer-bundle".into();
+        let next = next.to_string();
+        fs::write(fixture.source.join("manifest.json"), &next).unwrap();
+        let current = seed_at(&fixture.source, &fixture.prefix, &next, &|_, _| Ok(())).unwrap();
+        assert_ne!(previous.bun, current.bun);
+        let referenced = Path::new(service["programArguments"][0].as_str().unwrap());
+        assert_eq!(fs::read(referenced).unwrap(), b"synthetic runtime");
+        assert!(referenced
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("manifest.json")
+            .is_file());
     }
 
     #[test]

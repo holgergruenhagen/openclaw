@@ -12,9 +12,11 @@ Node remains OpenClaw's primary, default, and recommended runtime. Bun 1.4+ buil
 </Warning>
 
 Desktop apps manage their own runtime: the native macOS app and fresh local
-Tauri installations on Linux/macOS use the same pinned OpenClaw Bun fork.
-Existing unmarked Tauri installations retain their runtime until you explicitly
-choose **Use bundled runtime…**. See [Linux companion](/platforms/linux#adopt-the-bundled-runtime).
+Tauri installations on Linux use the same pinned OpenClaw Bun fork. Existing
+Linux Tauri installations retain their runtime across startup and app updates
+until you explicitly choose **Use bundled runtime…**. macOS Tauri keeps its
+existing behavior, separate from the native macOS app. See
+[Linux companion](/platforms/linux#adopt-the-bundled-runtime).
 
 Bun remains usable as an optional package-script runner. The default package manager remains `pnpm`, which is fully supported and used by docs tooling. Bun cannot use `pnpm-lock.yaml` and ignores it, and current Bun versions fail to resolve this repo's `pnpm-workspace.yaml` layout during `bun install`, so dependency installs should use `pnpm install`.
 

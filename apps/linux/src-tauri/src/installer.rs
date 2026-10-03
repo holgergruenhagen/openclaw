@@ -167,13 +167,13 @@ pub(crate) fn browser_runtime(
     if !is_current() {
         return Err("The native browser document changed.".into());
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
         let runtime = crate::bundled_runtime::seed(app)?;
-        crate::runtime_migration::bind_runtime(
+        crate::runtime_action::bind_runtime(
             &cli,
             &runtime,
-            crate::runtime_migration::Purpose::Browser,
+            crate::runtime_action::Purpose::Browser,
         )?;
     }
     Ok(cli)

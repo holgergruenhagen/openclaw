@@ -240,7 +240,7 @@ impl OpenClawCli {
         (self.allow_runtime_management && self.executable == managed).then_some(managed)
     }
 
-    pub(crate) fn command_path(&self) -> Result<OsString, CliError> {
+    fn command_path(&self) -> Result<OsString, CliError> {
         let mut paths = vec![
             self.openclaw_home.join("bin"),
             self.openclaw_home.join("tools/node/bin"),

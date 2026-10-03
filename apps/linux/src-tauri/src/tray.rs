@@ -27,10 +27,8 @@ const QUICKCHAT_SHORTCUT_ID: &str = "quickchat-shortcut";
 const START_ID: &str = "start-gateway";
 const STOP_ID: &str = "stop-gateway";
 const RESTART_ID: &str = "restart-gateway";
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 const ADOPT_RUNTIME_ID: &str = "adopt-bundled-runtime";
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const RESTORE_RUNTIME_ID: &str = "restore-node-runtime";
 const QUIT_ID: &str = "quit";
 
 pub struct TrayHandles {
@@ -46,6 +44,8 @@ pub struct TrayHandles {
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
+    #[cfg(target_os = "linux")]
+    runtime_action: MenuItem<tauri::Wry>,
 }
 
 struct StatusLine {
@@ -118,6 +118,16 @@ impl TrayHandles {
         }
         drop(status_line);
         self.refresh_status(self._tray.app_handle());
+        #[cfg(target_os = "linux")]
+        {
+            let current = crate::bundled_runtime::expected_bun_path().ok();
+            let enabled =
+                snapshot.installed && current.is_some() && snapshot.runtime_path != current;
+            let item = self.runtime_action.clone();
+            let _ = self._tray.app_handle().run_on_main_thread(move || {
+                let _ = item.set_enabled(enabled);
+            });
+        }
     }
 
     pub fn update_pending_count(&self, count: usize) {
@@ -251,10 +261,16 @@ pub fn build(
         menu_builder
     };
     let menu_builder = menu_builder.separator().items(&[&start, &stop, &restart]);
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let menu_builder = menu_builder
-        .text(ADOPT_RUNTIME_ID, "Use bundled runtime…")
-        .text(RESTORE_RUNTIME_ID, "Restore previous Node runtime…");
+    #[cfg(target_os = "linux")]
+    let runtime_action = MenuItem::with_id(
+        app,
+        ADOPT_RUNTIME_ID,
+        "Use bundled runtime…",
+        false,
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "linux")]
+    let menu_builder = menu_builder.item(&runtime_action);
     let menu = menu_builder
         .separator()
         .text(QUIT_ID, "Quit OpenClaw")
@@ -341,6 +357,8 @@ pub fn build(
         start,
         stop,
         restart,
+        #[cfg(target_os = "linux")]
+        runtime_action,
     })
 }
 
@@ -455,47 +473,60 @@ fn handle_menu(
             app.state::<GatewayOperationQueue>()
                 .submit_action(GatewayAction::Restart);
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        ADOPT_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::Adopt),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        RESTORE_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::RestoreNode),
+        #[cfg(target_os = "linux")]
+        ADOPT_RUNTIME_ID => confirm_runtime_action(app),
         _ => {}
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn confirm_runtime_action(app: &AppHandle, action: crate::RuntimeAction) {
+#[cfg(target_os = "linux")]
+fn confirm_runtime_action(app: &AppHandle) {
     use tauri_plugin_dialog::MessageDialogButtons;
-    if app.state::<DesktopState>().is_quitting() {
-        return;
-    }
-    let (title, message, button) = match action {
-        crate::RuntimeAction::Adopt => (
-            "Use bundled runtime",
-            "Update the CLI to this app's version, then use bundled Bun for this Gateway? The update keeps backups and may restart the Gateway. Saved runtime pins are preserved and can block the switch after the CLI update. Adoption retains Node for recovery and lets future app updates manage this installation.",
-            "Use bundled runtime",
-        ),
-        crate::RuntimeAction::RestoreNode => (
-            "Restore previous Node runtime",
-            "Restore and verify the retained Node Gateway? This installation will stop following the app's bundled runtime until you choose Use bundled runtime again.",
-            "Restore Node",
-        ),
-    };
     let current_app = app.clone();
-    app.dialog()
-        .message(message)
-        .title(title)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            button.into(),
-            "Cancel".into(),
-        ))
-        .show(move |accepted| {
-            if accepted && !current_app.state::<DesktopState>().is_quitting() {
-                current_app
-                    .state::<GatewayOperationQueue>()
-                    .submit_runtime(action);
+    std::thread::spawn(move || {
+        let state = current_app.state::<DesktopState>();
+        if state.is_quitting() {
+            return;
+        }
+        let observed = (|| {
+            if crate::remote_gateway::saved_settings()?.is_some() {
+                return Err("Select the local Gateway before changing its runtime.".to_string());
             }
+            let cli = state.resolve_cli().map_err(|error| error.to_string())?;
+            let observation = crate::runtime_action::inspect(&cli)?;
+            Ok(crate::RuntimeAction { cli, observation })
+        })();
+        let action = match observed {
+            Ok(action) => action,
+            Err(error) => {
+                state.show_error(&current_app, &error);
+                return;
+            }
+        };
+        let message = format!(
+            "Current runtime: {}\n\nUse this app's bundled Bun runtime for the Gateway? This reinstalls and restarts the service. Future app updates will ask you to choose this action again.",
+            action.observation.current_runtime(),
+        );
+        let dialog_app = current_app.clone();
+        let _ = current_app.run_on_main_thread(move || {
+            let accepted_app = dialog_app.clone();
+            dialog_app
+                .dialog()
+                .message(message)
+                .title("Use bundled runtime")
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Use bundled runtime".into(),
+                    "Cancel".into(),
+                ))
+                .show(move |accepted| {
+                    if accepted && !accepted_app.state::<DesktopState>().is_quitting() {
+                        accepted_app
+                            .state::<GatewayOperationQueue>()
+                            .submit_runtime(action);
+                    }
+                });
         });
+    });
 }
 
 pub fn publish_keep_awake(app: &AppHandle, status: KeepAwakeStatus) {

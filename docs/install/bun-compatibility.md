@@ -6,7 +6,7 @@ read_when:
   - You need to select a SQLite library for Bun on macOS
 ---
 
-Bun is an explicit opt-in runtime for standalone OpenClaw CLI, Gateway, and managed node host installations. Node remains their primary and recommended runtime. The native macOS app and fresh local Tauri installations on Linux/macOS use the OpenClaw Bun fork for their app-managed runtime. This reference covers Bun requirements and compatibility; see [Bun](/install/bun) for standalone installation and opt-in steps, or [Node.js compatibility](/install/node-compatibility) for Node requirements.
+Bun is an explicit opt-in runtime for standalone OpenClaw CLI, Gateway, and managed node host installations. Node remains their primary and recommended runtime. The native macOS app and fresh local Tauri installations on Linux use the OpenClaw Bun fork for their app-managed runtime. This reference covers Bun requirements and compatibility; see [Bun](/install/bun) for standalone installation and opt-in steps, or [Node.js compatibility](/install/node-compatibility) for Node requirements.
 
 Plugin resolution stays with Bun's native/Jiti loader and `Bun.plugin` on Bun, even when `Module.registerHooks` is available; Node uses `Module.registerHooks`.
 
@@ -28,9 +28,12 @@ Both desktop apps and CI consume the single `scripts/lib/openclaw-bun.json` pin.
 Every repin requires both CI's paired Bun replay and Bun-only smoke, and the
 native macOS app's probes and two-binary test set; a failure in either blocks the
 pin for all consumers. See [shared runtime pin](/platforms/mac/dev-setup#shared-bun-pin-and-repin-gate).
-The Tauri app retains unmarked legacy installations until explicit adoption;
-see [adoption and rollback](/platforms/linux#adopt-the-bundled-runtime). Windows
-Tauri retains its existing runtime until a signed fork Windows build is available.
+The Linux Tauri app leaves existing Gateway services unchanged on startup and
+updates. Switching to its current bundled Bun requires **Use bundled runtime…**;
+see [explicit runtime selection](/platforms/linux#adopt-the-bundled-runtime).
+macOS Tauri keeps its existing runtime behavior, separate from the native macOS
+app. Windows Tauri retains its existing runtime until a signed fork Windows build
+is available; an unsigned dry-run is not shippable.
 
 OpenClaw.app bundles a pinned [OpenClaw Bun fork](https://github.com/openclaw/bun),
 the full matching OpenClaw package, and a signed SQLite library that meets the

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { DtsOptions, TsdownPlugin, UserConfig } from "tsdown";
 import {
   collectBundledPluginBuildEntries,
-  collectChannelConfigDoctorBuildEntries,
+  collectRetainedDoctorBuildEntries,
   collectPluginDeclarationSourceEntries,
   collectSourceCheckoutPluginBuildEntries,
   createBundledPluginBuildInventory,
@@ -998,16 +998,18 @@ const configs: UserConfig[] = [
   ...createManagedHandoffBuildConfigs().map((config) =>
     Object.assign(config, { name: TSDOWN_UNIFIED_CONFIG_GROUP, env }),
   ),
-  nodeBuildConfig(
-    {
-      name: TSDOWN_UNIFIED_CONFIG_GROUP,
-      // Keep retained config repairs in their own graph: shared public SDK chunks
-      // otherwise pull state-migration exports into these pre-install artifacts.
-      entry: collectChannelConfigDoctorBuildEntries(bundledPluginBuildInventory),
-      outDir: "dist/config-doctor",
-      deps: unifiedDeps,
-    },
-    false,
+  ...["config-doctor", "state-retention"].map((surface) =>
+    nodeBuildConfig(
+      {
+        name: TSDOWN_UNIFIED_CONFIG_GROUP,
+        // Keep retained config repairs in their own graph: shared public SDK chunks
+        // otherwise pull state-migration exports into these pre-install artifacts.
+        entry: collectRetainedDoctorBuildEntries({ ...bundledPluginBuildInventory, surface }),
+        outDir: `dist/${surface}`,
+        deps: unifiedDeps,
+      },
+      false,
+    ),
   ),
   workerHelperBuildConfig({
     "worker/workspace-rsync-receiver": "src/worker/workspace-rsync-receiver.ts",

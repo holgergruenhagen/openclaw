@@ -35,6 +35,7 @@ import {
   collectRelevantDoctorPluginIdsForTouchedPaths,
 } from "./doctor-contract-relevance.js";
 import type { PluginDoctorMigrationResourceCollectionParams } from "./doctor-migration-resources.js";
+import type { PluginStateRetentionContract } from "./doctor-retired-state.js";
 import type { DoctorSessionRouteStateOwner } from "./doctor-session-route-state-owner-types.js";
 import { isActivatedManifestOwner } from "./manifest-owner-policy.js";
 import { loadBundledPluginManifestRegistry } from "./manifest-registry-build.js";
@@ -778,4 +779,39 @@ export async function preparePluginDoctorMigrationBackupResources(
   );
   const { preparePluginDoctorMigrationResources } = await import("./doctor-migration-resources.js");
   return await preparePluginDoctorMigrationResources(entries, params);
+}
+
+/** Inspect original sources before an installed updater replaces the service. */
+export async function assertPluginStateRetention(
+  params: PluginDoctorRegistryParams & { candidateRoot: string } & Parameters<
+      PluginStateRetentionContract["stateMigrations"][number]["assertSupportedState"]
+    >[0],
+): Promise<void> {
+  const records = resolvePluginDoctorStateMigrationRecords({
+    ...params,
+    artifactPreservingReadOnly: true,
+  });
+  for (const record of records) {
+    if (!isTrustedForDurableStores(record)) {
+      continue;
+    }
+    const declared = record.doctorContract?.stateMigrations;
+    if (!Array.isArray(declared)) {
+      continue;
+    }
+    const retained =
+      loadBundledPluginPublicArtifactModuleFromCandidatesSync<PluginStateRetentionContract>({
+        dirName: record.id,
+        artifactCandidates: ["state-retention-api.js"],
+        retainedAt: params.candidateRoot,
+      });
+    if (!retained || retained.packageName !== record.packageName) {
+      continue;
+    }
+    for (const migration of retained.stateMigrations) {
+      if (declared.some(({ id }) => id === migration.id)) {
+        await migration.assertSupportedState(params);
+      }
+    }
+  }
 }

@@ -77,6 +77,13 @@ export function withAuthoredAgentRoster(
 }
 
 export function validateAgentConfigKeys(agent: AgentConfig): void {
+  if (agent.heartbeat) {
+    throw new ClawMigrationError(
+      "heartbeat_migration_required",
+      "Run openclaw doctor --fix to convert heartbeat configuration before migrating this agent to a Claw.",
+      "$.agents",
+    );
+  }
   const representable = new Set([
     "id",
     "name",
@@ -88,7 +95,6 @@ export function validateAgentConfigKeys(agent: AgentConfig): void {
     "sandbox",
     "tools",
     "memory",
-    "heartbeat",
     "humanDelay",
     "workspace",
   ]);
@@ -171,6 +177,13 @@ export function resolveMigrationAgentSettings(
   config: OpenClawConfig,
   agent: AgentConfig,
 ): AgentConfig {
+  if (agent.heartbeat || config.agents?.defaults?.heartbeat) {
+    throw new ClawMigrationError(
+      "heartbeat_migration_required",
+      "Run openclaw doctor --fix to convert heartbeat configuration before migrating this agent to a Claw.",
+      "$.agents",
+    );
+  }
   const defaults = config.agents?.defaults;
   if (!defaults) {
     return agent;
@@ -183,7 +196,7 @@ export function resolveMigrationAgentSettings(
     "sessionStore",
     "maxConcurrent",
   ]);
-  const portableDefaults = new Set(["model", "subagents", "heartbeat", "sandbox", "humanDelay"]);
+  const portableDefaults = new Set(["model", "subagents", "sandbox", "humanDelay"]);
   const unsupportedDefaults = Object.keys(defaults).flatMap((key) => {
     const compaction = record(defaults.compaction);
     // Config materialization injects this effective default even when the user
@@ -202,16 +215,6 @@ export function resolveMigrationAgentSettings(
   });
   unsupportedDefaults.push(
     ...unsupportedSubagentDefaultFields(defaults.subagents),
-    ...unsupportedFields(
-      defaults.heartbeat,
-      ["agentId", "every", "activeHours", "lightContext", "isolatedSession", "timeoutSeconds"],
-      "agents.defaults.heartbeat",
-    ),
-    ...unsupportedFields(
-      record(defaults.heartbeat)?.activeHours,
-      ["start", "end", "timezone"],
-      "agents.defaults.heartbeat.activeHours",
-    ),
     ...unsupportedFields(
       defaults.sandbox,
       ["mode", "scope", "workspaceAccess"],
@@ -235,13 +238,6 @@ export function resolveMigrationAgentSettings(
     "allowAgents",
     "delegationMode",
   ]);
-  const inheritedHeartbeat = inheritPortableSettings(agent.heartbeat, defaults.heartbeat, [
-    "every",
-    "activeHours",
-    "lightContext",
-    "isolatedSession",
-    "timeoutSeconds",
-  ]);
   const inheritedSandbox = inheritPortableSettings(agent.sandbox, defaults.sandbox, [
     "mode",
     "scope",
@@ -255,7 +251,6 @@ export function resolveMigrationAgentSettings(
   const inheritedAgent = {
     ...agent,
     ...(Object.keys(inheritedSubagents).length > 0 ? { subagents: inheritedSubagents } : {}),
-    ...(Object.keys(inheritedHeartbeat).length > 0 ? { heartbeat: inheritedHeartbeat } : {}),
     ...(Object.keys(inheritedSandbox).length > 0 ? { sandbox: inheritedSandbox } : {}),
     ...(Object.keys(inheritedHumanDelay).length > 0 ? { humanDelay: inheritedHumanDelay } : {}),
   };

@@ -30,7 +30,7 @@ export const OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE = "openclaw.runtime-context";
 
 /** Provenance assigned by the context producer, never inferred from its text. */
 export type RuntimeContextFragment = {
-  kind: "runtime-instruction" | "conversation-data" | "heartbeat-outcome";
+  kind: "runtime-instruction" | "conversation-data";
   text: string;
 };
 

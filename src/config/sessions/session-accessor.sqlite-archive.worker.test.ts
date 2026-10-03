@@ -459,7 +459,7 @@ describe("SQLite transcript archive worker", () => {
     ]);
     appendSqliteTrajectoryRuntimeEvents(target, [trajectory(target.sessionId)]);
     const db = database();
-    recordAcpParentStreamEvents({
+    await recordAcpParentStreamEvents({
       agentId: db.agentId,
       path: db.path,
       sessionId: target.sessionId,
@@ -602,7 +602,7 @@ describe("SQLite transcript archive worker", () => {
         appendSqliteTrajectoryRuntimeEvents(target, [trajectory(sessionId)]);
         break;
       case "ACP parent-stream":
-        recordAcpParentStreamEvents({
+        await recordAcpParentStreamEvents({
           agentId: db.agentId,
           path: db.path,
           sessionId,

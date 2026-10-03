@@ -5,7 +5,7 @@ import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { resolveSkillCollectionReviewMonitorSpecs } from "./skill-collection-review-monitor.js";
 
 describe("resolveSkillCollectionReviewMonitorSpecs", () => {
-  it("creates one stable seven-day job for every agent", () => {
+  it("creates one stable seven-day job for every agent", async () => {
     const cfg = {
       agents: {
         list: [
@@ -18,9 +18,9 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       skills: { workshop: { autonomous: { mode: "auto" } } },
     } as OpenClawConfig;
 
-    const specs = Array.from(
-      resolveSkillCollectionReviewMonitorSpecs(cfg, [], { schedulerSeed: "test-seed" }),
-    );
+    const specs = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
+      schedulerSeed: "test-seed",
+    });
 
     expect(specs.map(({ agentId }) => agentId)).toEqual(["main", "ops", "solo"]);
     expect(specs.map(({ input }) => input.declarationKey)).toEqual([
@@ -44,26 +44,27 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       },
       sessionTarget: "isolated",
       delivery: { mode: "none" },
-      wakeMode: "next-heartbeat",
+      wakeMode: "now",
     });
     expect(specs[0]?.input.payload).not.toHaveProperty("toolsAllowIsDefault");
-    const repeated = Array.from(
-      resolveSkillCollectionReviewMonitorSpecs(cfg, [], { schedulerSeed: "test-seed" }),
-    );
+    const repeated = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
+      schedulerSeed: "test-seed",
+    });
     expect(repeated.map(({ input }) => input.schedule)).toEqual(
       specs.map(({ input }) => input.schedule),
     );
   });
 
-  it("creates jobs for every agent in an explicit fleet", () => {
+  it("creates jobs for every agent in an explicit fleet", async () => {
     const explicitFleet = {
       agents: { ownership: "explicit", entries: { ops: {}, research: {} } },
     } as unknown as OpenClawConfig;
     expect(
-      Array.from(
-        resolveSkillCollectionReviewMonitorSpecs(explicitFleet, []),
-        ({ agentId }) => agentId,
-      ),
+      (
+        await resolveSkillCollectionReviewMonitorSpecs(explicitFleet, [], {
+          schedulerSeed: "test-seed",
+        })
+      ).map(({ agentId }) => agentId),
     ).toEqual(["ops", "research"]);
 
     const systemAgentFleet = {
@@ -74,27 +75,28 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       },
     } as unknown as OpenClawConfig;
     expect(
-      Array.from(
-        resolveSkillCollectionReviewMonitorSpecs(systemAgentFleet, []),
-        ({ agentId }) => agentId,
-      ),
+      (
+        await resolveSkillCollectionReviewMonitorSpecs(systemAgentFleet, [], {
+          schedulerSeed: "test-seed",
+        })
+      ).map(({ agentId }) => agentId),
     ).toEqual(["ops", "research"]);
   });
 
-  it("retains monitor rows while autonomous review is disabled", () => {
+  it("retains monitor rows while autonomous review is disabled", async () => {
     const cfg = {
       agents: { list: [{ id: "main", workspace: "/tmp/openclaw-disabled" }] },
       skills: { workshop: { autonomous: { mode: "propose" } } },
     } as OpenClawConfig;
 
-    const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
+    const [spec] = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
       schedulerSeed: "test-seed",
     });
     expect(spec?.input.enabled).toBe(false);
     expect(spec?.input.displayName).not.toContain("no-rooted-runtime");
   });
 
-  it("disables only agents whose complete configured chain cannot enforce the review root", () => {
+  it("disables only agents whose complete configured chain cannot enforce the review root", async () => {
     const cfg = {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
@@ -134,10 +136,9 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     } as OpenClawConfig;
 
     const byAgent = new Map(
-      Array.from(resolveSkillCollectionReviewMonitorSpecs(cfg, []), (spec) => [
-        spec.agentId,
-        spec.input,
-      ]),
+      (await resolveSkillCollectionReviewMonitorSpecs(cfg, [], { schedulerSeed: "test-seed" })).map(
+        (spec) => [spec.agentId, spec.input],
+      ),
     );
 
     expect(byAgent.get("blocked")).toMatchObject({
@@ -165,8 +166,8 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
         skills: { workshop: { autonomous: { mode: "auto" } } },
       };
       const options = { schedulerSeed: "test-seed" };
-      const [initial] = resolveSkillCollectionReviewMonitorSpecs(cfg, [], options);
-      const [projected] = resolveSkillCollectionReviewMonitorSpecs(
+      const [initial] = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], options);
+      const [projected] = await resolveSkillCollectionReviewMonitorSpecs(
         cfg,
         [
           {
@@ -187,7 +188,7 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     }
   });
 
-  it("keeps an executable agent-scoped review alias enabled", () => {
+  it("keeps an executable agent-scoped review alias enabled", async () => {
     const cfg = {
       agents: {
         defaults: { model: "openai/gpt-blocked" },
@@ -205,12 +206,14 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       },
       skills: { workshop: { autonomous: { mode: "auto" } } },
     } as OpenClawConfig;
-    const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
+    const [spec] = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
+      schedulerSeed: "test-seed",
+    });
     expect(spec?.input.enabled).toBe(true);
     expect(spec?.input.displayName).not.toContain("no-rooted-runtime");
   });
 
-  it("does not disable a runnable default when an advisory subagent model can be rejected", () => {
+  it("does not disable a runnable default when an advisory subagent model can be rejected", async () => {
     const cfg = {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
@@ -225,7 +228,9 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       },
       skills: { workshop: { autonomous: { mode: "auto" } } },
     } as OpenClawConfig;
-    const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
+    const [spec] = await resolveSkillCollectionReviewMonitorSpecs(cfg, [], {
+      schedulerSeed: "test-seed",
+    });
     expect(spec?.input.enabled).toBe(true);
     expect(spec?.input.displayName).not.toContain("no-rooted-runtime");
   });

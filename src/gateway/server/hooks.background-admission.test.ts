@@ -11,9 +11,13 @@ import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-c
 import { resolveHooksConfig } from "../hooks.js";
 
 const mocks = vi.hoisted(() => ({
-  enqueueSystemEvent: vi.fn(),
+  enqueueSessionEvent: vi.fn(() => ({ settled: Promise.resolve({ status: "completed" }) })),
+  captureSessionEventTarget: vi.fn(async (agentId: string, sessionKey: string) => ({
+    agentId,
+    sessionKey,
+    sessionId: "accepted-session",
+  })),
   getRuntimeConfig: vi.fn<() => OpenClawConfig>(),
-  requestHeartbeat: vi.fn(),
   runCronIsolatedAgentTurn: vi.fn(),
 }));
 
@@ -23,12 +27,11 @@ vi.mock("../../config/io.js", () => ({
 vi.mock("../../cron/isolated-agent.js", () => ({
   runCronIsolatedAgentTurn: mocks.runCronIsolatedAgentTurn,
 }));
-vi.mock("../../infra/heartbeat-wake.js", () => ({
-  requestHeartbeat: mocks.requestHeartbeat,
+vi.mock("../../auto-reply/reply/session-event-handoff.js", () => ({
+  captureSessionEventTargetForHost: mocks.captureSessionEventTarget,
+  enqueueSessionEventForHost: mocks.enqueueSessionEvent,
 }));
-vi.mock("../../infra/system-events.js", () => ({
-  enqueueSystemEvent: mocks.enqueueSystemEvent,
-}));
+vi.mock("../../infra/system-events.js", () => ({ enqueueSystemEvent: vi.fn() }));
 
 const { createGatewayHooksRequestHandler } = await import("./hooks.js");
 
@@ -147,7 +150,6 @@ describe("hook background admission", () => {
   it.each([
     { deliverySuppressionReason: "empty", replyDisposition: "empty" },
     { deliverySuppressionReason: "silent", replyDisposition: "silent" },
-    { deliverySuppressionReason: "heartbeat", replyDisposition: "empty" },
     { deliverySuppressionReason: "channel_transform", replyDisposition: "visible" },
   ] as const)(
     "returns the $deliverySuppressionReason terminal suppression reason to an explicit waiter",

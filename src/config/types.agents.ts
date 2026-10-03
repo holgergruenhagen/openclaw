@@ -20,6 +20,8 @@ export type AgentConfig = Omit<
   z.input<typeof AgentEntrySchema>,
   "memory" | "tts" | "sandbox" | "tools"
 > & {
+  /** @deprecated Doctor input only; per-agent checks are ordinary automation jobs. */
+  heartbeat?: Omit<NonNullable<AgentDefaultsConfig["heartbeat"]>, "agentId">;
   /** @deprecated Raw legacy list compatibility only; canonical agents.entries rejects this key. */
   default?: boolean;
   /**

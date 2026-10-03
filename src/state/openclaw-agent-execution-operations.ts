@@ -225,6 +225,21 @@ export async function loadAgentAcpOperations() {
   } satisfies Handlers;
 }
 
+export async function loadAgentAcpParentStreamOperations() {
+  const kernel = await import("../agents/subagents/spawn/acp-parent-stream-store.kernel.js");
+  return {
+    "acp.parentStream.record": (
+      input: Parameters<typeof kernel.recordAcpParentStreamEventsInDatabase>[1],
+      { writeTransaction, admit },
+    ) =>
+      writeTransaction("acp.parent-stream.record", "ACP parent stream", (current) => {
+        kernel.recordAcpParentStreamEventsInDatabase(current, input);
+        deferSqliteWorkerCommitReceipt(current.db, { kind: "acp-parent-stream-recorded" });
+        admit("commit");
+      }),
+  } satisfies Handlers;
+}
+
 export async function loadAgentProviderReviewOperations() {
   const kernel = await import("../config/sessions/provider-review-store.worker.js");
   return {
@@ -387,6 +402,7 @@ export type RegisteredAgentWorkerOperations = WorkerOperations<
     Awaited<ReturnType<typeof loadAgentTrajectoryOperations>> &
     Awaited<ReturnType<typeof loadAgentArchiveOperations>> &
     Awaited<ReturnType<typeof loadAgentAcpOperations>> &
+    Awaited<ReturnType<typeof loadAgentAcpParentStreamOperations>> &
     Awaited<ReturnType<typeof loadAgentProviderReviewOperations>> &
     Awaited<ReturnType<typeof loadAgentReactionOperations>> &
     Awaited<ReturnType<typeof loadAgentPendingInputOperations>> &

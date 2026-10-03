@@ -36,8 +36,6 @@ describe("prepared provider auth reload invalidation", () => {
     "agents.list",
     "agents.defaults",
     "agents.defaults.model",
-    "agents.defaults.heartbeat",
-    "agents.defaults.heartbeat.model",
     "agents.defaults.compaction",
     "agents.defaults.compaction.model",
     "agents.defaults.compaction.provider",
@@ -47,7 +45,6 @@ describe("prepared provider auth reload invalidation", () => {
     "agents.defaults.subagents.model.primary",
     "agents.entries",
     "agents.entries.main.model",
-    "agents.entries.main.heartbeat.model",
   ])("invalidates prepared auth for config path %s", (changedPath) => {
     expect(
       doesReloadAffectProviderAuth(createHotTailPlan({ changedPaths: [changedPath] }), {}, {}),
@@ -55,8 +52,6 @@ describe("prepared provider auth reload invalidation", () => {
   });
 
   it.each([
-    "agents.defaults.heartbeat.target",
-    "agents.entries.main.heartbeat.every",
     "agents.defaults.compaction.enabled",
     "agents.defaults.compaction.memoryFlush.enabled",
     "agents.entries.main.tools",

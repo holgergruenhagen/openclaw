@@ -131,6 +131,8 @@ export async function ensureOnboardingAgent(params: {
     };
   }
   const firstAgentName = params.firstAgent ? params.firstAgent.name.trim() : "main";
+  const agentId = normalizeAgentId(firstAgentName);
+  const { resolveDefaultProactiveCadenceMs } = await import("../cron/default-proactive-job.js");
   const createOptions = {
     bootstrapFirstAgent: true,
     ...(hasExpectedConfigHash ? { expectedConfigHash: params.expectedConfigHash } : {}),
@@ -146,8 +148,9 @@ export async function ensureOnboardingAgent(params: {
       })
     : await createAgent({
         ...createOptions,
+        proactiveCadenceMs: resolveDefaultProactiveCadenceMs(params.config, agentId),
         entry: {
-          id: normalizeAgentId(firstAgentName),
+          id: agentId,
           name: firstAgentName,
           workspace: params.workspace,
         },

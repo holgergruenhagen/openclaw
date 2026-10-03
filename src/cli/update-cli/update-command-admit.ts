@@ -5,6 +5,7 @@ import {
   assertNoRetiredOAuthSidecarsBeforeConfigRecovery,
   listLegacyOAuthSidecarPaths,
 } from "../../commands/doctor-auth-legacy-paths.js";
+import { projectHeartbeatConfigForUpdateAdmission } from "../../commands/doctor-automatic-heartbeat-repair.js";
 import { planLegacyConfigForUpdateChannel } from "../../commands/doctor/legacy-config-repair.js";
 import { cloneEnvWithPlatformSemantics } from "../../config/env-vars.js";
 import { createConfigIO } from "../../config/io.js";
@@ -43,7 +44,6 @@ import {
   hasSchemaRefusal,
 } from "./schema-preflight.js";
 import { resolveUpdateRoot, UpdatePreMutationError } from "./shared.js";
-import { createUpdateConfigFailure } from "./update-command-config-failure.js";
 import { preflightConfiguredNpmPluginTargets } from "./update-command-plugin-preflight.js";
 import { withOwnedManagedUpdateEnv } from "./update-command-service-env.js";
 
@@ -114,8 +114,12 @@ async function inspectUpdateAdmission(
           !snapshot.valid && snapshot.legacyIssues.length
             ? planLegacyConfigForUpdateChannel(snapshot, writeOptions)
             : undefined;
-        databaseContext = await captureTargetDatabaseSchemaContext(env, { legacyConfigPlan });
-        if (legacyConfigPlan) {
+        databaseContext = await captureTargetDatabaseSchemaContext(env, {
+          legacyConfigPlan,
+          validateConfigForAdmission: (current) =>
+            projectHeartbeatConfigForUpdateAdmission(current, env, false),
+        });
+        if (legacyConfigPlan || databaseContext.configProjectedForAdmission) {
           warnings.push(legacyConfigWarning);
         }
         checks.set("config", { status: warnings.length ? "warn" : "ok" });
@@ -215,13 +219,16 @@ async function inspectUpdateAdmission(
             const legacyConfigPlan = !snapshot.readError
               ? planLegacyConfigForUpdateChannel(snapshot, writeOptions)
               : undefined;
-            if (!legacyConfigPlan) {
-              throw createUpdateConfigFailure(snapshot);
-            }
-            databaseContext = await captureTargetDatabaseSchemaContext(env, { legacyConfigPlan });
+            databaseContext = await captureTargetDatabaseSchemaContext(env, {
+              legacyConfigPlan,
+              validateConfigForAdmission: (current) =>
+                projectHeartbeatConfigForUpdateAdmission(current, env, true),
+            });
             // Plugin repairs can change configured stores; validate the source-bound projection too.
             schemasAccepted = await checkDatabaseSchemas(databaseContext);
-            warnings.push(legacyConfigWarning);
+            if (!warnings.includes(legacyConfigWarning)) {
+              warnings.push(legacyConfigWarning);
+            }
           }
           pluginInstallRecords = writeOptions.basePluginMetadataSnapshot?.index.installRecords;
           warnings.push(
@@ -230,7 +237,11 @@ async function inspectUpdateAdmission(
               message: `${warning.path}: ${warning.message}`,
             })),
           );
-          if (snapshot.warnings.length || databaseContext.legacyConfigPlan) {
+          if (
+            snapshot.warnings.length ||
+            databaseContext.legacyConfigPlan ||
+            databaseContext.configProjectedForAdmission
+          ) {
             checks.set("config", { status: "warn" });
           }
         } catch (error) {

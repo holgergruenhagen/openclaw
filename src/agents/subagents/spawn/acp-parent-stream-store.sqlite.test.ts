@@ -1,11 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import "../../../test-utils/prepare-compiled-subprocesses.js";
+import { describe, expect, it } from "vitest";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../../infra/kysely-sync.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../../state/openclaw-agent-db.generated.js";
-import {
-  closeOpenClawAgentDatabasesForTest,
-  runOpenClawAgentWriteTransaction,
-} from "../../../state/openclaw-agent-db.js";
+import { runOpenClawAgentWriteTransaction } from "../../../state/openclaw-agent-db.js";
 import { withTestDir } from "../../../test-helpers/temp-dir.js";
+import { closeStateDatabaseForTest } from "../../../test-utils/database-cleanup.js";
 import { recordAcpParentStreamEvents } from "./acp-parent-stream-store.sqlite.js";
 import { listAcpParentStreamEventsForTest } from "./acp-parent-stream-store.sqlite.test-support.js";
 
@@ -37,74 +36,82 @@ function seedSession(options: { agentId: string; env: NodeJS.ProcessEnv }, sessi
 }
 
 describe("ACP parent stream SQLite store", () => {
-  afterEach(() => {
-    closeOpenClawAgentDatabasesForTest();
-  });
-
   it("orders run events and removes them with the child session", async () => {
     await withTestDir({ prefix: "openclaw-acp-parent-stream-" }, async (stateDir) => {
-      const options = {
-        agentId: "codex",
-        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
-      };
-      seedSession(options, "agent:codex:acp:child");
+      try {
+        const options = {
+          agentId: "codex",
+          env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+        };
+        seedSession(options, "agent:codex:acp:child");
 
-      recordAcpParentStreamEvents({
-        ...options,
-        sessionId: "session-1",
-        runId: "run-1",
-        events: [
-          { createdAt: 10, event: { kind: "assistant_delta", delta: "one" } },
-          { createdAt: 11, event: { kind: "lifecycle", phase: "end" } },
-        ],
-      });
+        const first = recordAcpParentStreamEvents({
+          ...options,
+          sessionId: "session-1",
+          runId: "run-1",
+          events: [{ createdAt: 10, event: { kind: "assistant_delta", delta: "one" } }],
+        });
+        const second = recordAcpParentStreamEvents({
+          ...options,
+          sessionId: "session-1",
+          runId: "run-1",
+          events: [{ createdAt: 11, event: { kind: "lifecycle", phase: "end" } }],
+        });
+        await Promise.all([first, second]);
 
-      expect(
-        listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
-      ).toEqual([
-        { kind: "assistant_delta", delta: "one" },
-        { kind: "lifecycle", phase: "end" },
-      ]);
+        expect(
+          listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
+        ).toEqual([
+          { kind: "assistant_delta", delta: "one" },
+          { kind: "lifecycle", phase: "end" },
+        ]);
 
-      runOpenClawAgentWriteTransaction((database) => {
-        const db = getNodeSqliteKysely<Pick<OpenClawAgentKyselyDatabase, "session_windows">>(
-          database.db,
-        );
-        executeSqliteQuerySync(
-          database.db,
-          db.deleteFrom("session_windows").where("session_id", "=", "session-1"),
-        );
-      }, options);
-      expect(
-        listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
-      ).toEqual([]);
+        runOpenClawAgentWriteTransaction((database) => {
+          const db = getNodeSqliteKysely<Pick<OpenClawAgentKyselyDatabase, "session_windows">>(
+            database.db,
+          );
+          executeSqliteQuerySync(
+            database.db,
+            db.deleteFrom("session_windows").where("session_id", "=", "session-1"),
+          );
+        }, options);
+        expect(
+          listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
+        ).toEqual([]);
+      } finally {
+        await closeStateDatabaseForTest();
+      }
     });
   });
 
   it("drops unserializable events without blocking later diagnostics", async () => {
     await withTestDir({ prefix: "openclaw-acp-parent-stream-invalid-" }, async (stateDir) => {
-      const options = {
-        agentId: "codex",
-        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
-      };
-      seedSession(options, "agent:codex:acp:invalid");
-      const circular: Record<string, unknown> = { kind: "circular" };
-      circular.self = circular;
+      try {
+        const options = {
+          agentId: "codex",
+          env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+        };
+        seedSession(options, "agent:codex:acp:invalid");
+        const circular: Record<string, unknown> = { kind: "circular" };
+        circular.self = circular;
 
-      recordAcpParentStreamEvents({
-        ...options,
-        sessionId: "session-1",
-        runId: "run-1",
-        events: [
-          { createdAt: 10, event: { toJSON: () => undefined } },
-          { createdAt: 11, event: circular },
-          { createdAt: 12, event: { kind: "lifecycle", phase: "end" } },
-        ],
-      });
+        await recordAcpParentStreamEvents({
+          ...options,
+          sessionId: "session-1",
+          runId: "run-1",
+          events: [
+            { createdAt: 10, event: { toJSON: () => undefined } },
+            { createdAt: 11, event: circular },
+            { createdAt: 12, event: { kind: "lifecycle", phase: "end" } },
+          ],
+        });
 
-      expect(
-        listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
-      ).toEqual([{ kind: "lifecycle", phase: "end" }]);
+        expect(
+          listAcpParentStreamEventsForTest({ ...options, sessionId: "session-1", runId: "run-1" }),
+        ).toEqual([{ kind: "lifecycle", phase: "end" }]);
+      } finally {
+        await closeStateDatabaseForTest();
+      }
     });
   });
 });

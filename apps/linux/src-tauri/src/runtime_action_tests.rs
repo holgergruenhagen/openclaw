@@ -29,6 +29,7 @@ case "$*" in
     printf '%s\n' "$@" > {root}/args
     if test -f {root}/reject; then printf 'changed pin or definition\n' >&2; exit 1; fi
     /bin/cp {root}/healthy.json {root}/state.json
+    if test -f {root}/replacement-launcher; then /bin/cp {root}/replacement-launcher {root}/bin/openclaw; fi
     printf '{{"ok":true}}\n' ;;
   *) printf 'unexpected command\n' >&2; exit 8 ;;
 esac
@@ -42,6 +43,20 @@ esac
     fn executable(&self, path: &Path, text: &str) {
         fs::write(path, text).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn canonical_launcher(&self) -> PathBuf {
+        let wrapper = self.0.join("bin/openclaw");
+        let script = fs::read_to_string(&wrapper).unwrap();
+        let node = self.0.join("tools/node/bin/node");
+        fs::create_dir_all(node.parent().unwrap()).unwrap();
+        self.executable(&node, &script);
+        self.executable(&self.runtime().bun, &script);
+        let entry = self.0.join("package/dist/entry.js");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        fs::write(&entry, "fixture").unwrap();
+        fs::write(&wrapper, format!("#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"{}\" \"$@\"\n", self.0.display(), entry.display())).unwrap();
+        wrapper
     }
 
     fn cli(&self) -> OpenClawCli {
@@ -136,6 +151,78 @@ fn fresh_install_carries_null_definition_and_bundled_path() {
         fixture.argument("--runtime-path"),
         fixture.runtime().bun.to_string_lossy()
     );
+}
+
+#[test]
+fn fresh_install_marks_a_preexisting_canonical_launcher_after_health() {
+    let fixture = Fixture::new();
+    let wrapper = fixture.canonical_launcher();
+    fixture.write_state(&fixture.absent());
+    let cli = fixture.cli();
+    fresh(&cli, &fixture.runtime(), &|| true).unwrap();
+    let text = fs::read_to_string(wrapper).unwrap();
+    let launcher: Launcher =
+        serde_json::from_str(text.lines().nth(1).unwrap().strip_prefix(MARKER).unwrap()).unwrap();
+    assert_eq!(launcher.purpose, Purpose::Gateway);
+    assert_eq!(launcher.runtime, fixture.runtime());
+    assert!(inspect(&cli).unwrap().healthy_for(&fixture.runtime()));
+    assert_eq!(fixture.installs(), 1);
+}
+
+#[test]
+fn fresh_install_does_not_mark_an_existing_launcher_after_health_failure() {
+    let fixture = Fixture::new();
+    let wrapper = fixture.canonical_launcher();
+    let original = fs::read(&wrapper).unwrap();
+    let mut failed = fixture.healthy();
+    failed["service"]["runtime"]["status"] = "stopped".into();
+    fs::write(
+        fixture.0.join("healthy.json"),
+        serde_json::to_vec(&failed).unwrap(),
+    )
+    .unwrap();
+    fixture.write_state(&fixture.absent());
+    assert!(fresh(&fixture.cli(), &fixture.runtime(), &|| true).is_err());
+    assert_eq!(fs::read(wrapper).unwrap(), original);
+    assert_eq!(fixture.installs(), 1);
+}
+
+#[test]
+fn fresh_install_preserves_an_independent_launcher_and_its_symlink() {
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let wrapper = fixture.0.join("bin/openclaw");
+        let original = fs::read(&wrapper).unwrap();
+        if linked {
+            let target = fixture.0.join("operator-cli");
+            fs::rename(&wrapper, &target).unwrap();
+            symlink(target, &wrapper).unwrap();
+        }
+        fixture.write_state(&fixture.absent());
+        fresh(&fixture.cli(), &fixture.runtime(), &|| true).unwrap();
+        assert_eq!(fs::read(&wrapper).unwrap(), original);
+        assert_eq!(fs::symlink_metadata(&wrapper).unwrap().is_symlink(), linked);
+        assert_eq!(fixture.installs(), 1);
+    }
+}
+
+#[test]
+fn fresh_install_preserves_a_canonical_launcher_replaced_during_installation() {
+    let fixture = Fixture::new();
+    let wrapper = fixture.canonical_launcher();
+    let replacement = fs::read_to_string(&wrapper)
+        .unwrap()
+        .replace("/package/", "/replacement-package/");
+    let entry = fixture.0.join("replacement-package/dist/entry.js");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(entry, "fixture").unwrap();
+    fs::write(fixture.0.join("replacement-launcher"), &replacement).unwrap();
+    fixture.write_state(&fixture.absent());
+    let error = fresh(&fixture.cli(), &fixture.runtime(), &|| true).unwrap_err();
+    assert!(error.contains("Gateway was installed"));
+    assert!(error.contains("marker failed"));
+    assert_eq!(fs::read_to_string(wrapper).unwrap(), replacement);
+    assert_eq!(fixture.installs(), 1);
 }
 
 #[test]
@@ -363,11 +450,7 @@ fn explicit_selection_cannot_continue_after_being_superseded() {
 fn binding_a_fresh_launcher_needs_no_node_backup_or_service_mutation() {
     let fixture = Fixture::new();
     let cli = fixture.cli();
-    let entry = fixture.0.join("package/dist/entry.js");
-    fs::create_dir_all(entry.parent().unwrap()).unwrap();
-    fs::write(&entry, "fixture").unwrap();
-    let wrapper = fixture.0.join("bin/openclaw");
-    fs::write(&wrapper, format!("#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"{}\" \"$@\"\n", fixture.0.display(), entry.display())).unwrap();
+    let wrapper = fixture.canonical_launcher();
     bind_runtime(&cli, &fixture.runtime(), Purpose::Gateway).unwrap();
     let bytes = fs::read(&wrapper).unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();

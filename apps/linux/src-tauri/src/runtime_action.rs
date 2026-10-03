@@ -35,6 +35,12 @@ struct Launcher {
     entry: PathBuf,
 }
 
+struct LauncherFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    entry: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct ExpectedPin {
     revision: String,
@@ -233,12 +239,13 @@ pub(crate) fn inspect(cli: &OpenClawCli) -> Result<Observation, String> {
     capture(cli, false)
 }
 
-/// Called only by explicit first-run setup, after binding its newly installed CLI launcher.
+/// Explicit first-run setup records an existing managed launcher only after successful health checks.
 pub(crate) fn fresh(
     cli: &OpenClawCli,
     runtime: &BundledRuntime,
     is_current: &dyn Fn() -> bool,
 ) -> Result<(), String> {
+    let launcher = read_launcher(cli)?;
     let confirmed = inspect(cli)?;
     perform(
         cli,
@@ -247,7 +254,14 @@ pub(crate) fn fresh(
         true,
         is_current,
         Duration::from_secs(600),
-    )
+    )?;
+    if let Some(launcher) = launcher {
+        check_current(is_current)?;
+        publish_launcher(&launcher, runtime, Purpose::Gateway).map_err(|error| {
+            format!("The Gateway was installed, but recording its launcher marker failed: {error}")
+        })?;
+    }
+    Ok(())
 }
 
 /// An explicit confirmation is the only admission path for an existing service.
@@ -389,20 +403,33 @@ pub(crate) fn bind_runtime(
     purpose: Purpose,
 ) -> Result<(), String> {
     validate_runtime(runtime)?;
-    let path = cli
-        .managed_wrapper()
-        .ok_or("This CLI launcher is independently managed.")?;
+    let launcher =
+        read_launcher(cli)?.ok_or("The CLI launcher is not a canonical managed installation.")?;
+    publish_launcher(&launcher, runtime, purpose)
+}
+
+fn read_launcher(cli: &OpenClawCli) -> Result<Option<LauncherFile>, String> {
+    let Some(path) = cli.managed_wrapper() else {
+        return Ok(None);
+    };
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > 65536 {
+        return Ok(None);
+    }
     let bytes = read_regular(&path)?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| "The CLI launcher is not UTF-8.")?;
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
     let entry = if let Some(marker) = text
         .lines()
         .nth(1)
         .and_then(|line| line.strip_prefix(MARKER))
     {
-        let launcher: Launcher =
-            serde_json::from_str(marker).map_err(|_| "Invalid launcher marker.")?;
-        if render(&launcher)? != bytes {
-            return Err(CHANGED.into());
+        let Ok(launcher) = serde_json::from_str::<Launcher>(marker) else {
+            return Ok(None);
+        };
+        if render(&launcher).ok().as_deref() != Some(bytes.as_slice()) {
+            return Ok(None);
         }
         launcher.entry
     } else {
@@ -411,24 +438,43 @@ pub(crate) fn bind_runtime(
             "#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"",
             prefix.display()
         );
-        let entry = text
+        let Some(entry) = text
             .strip_prefix(&start)
             .and_then(|text| text.strip_suffix("\" \"$@\"\n"))
-            .ok_or("The CLI launcher is not a canonical managed installation.")?;
+        else {
+            return Ok(None);
+        };
         if entry.contains(['\n', '\r', '$', '`', '"', '\\']) || !entry.ends_with("/dist/entry.js") {
-            return Err(CHANGED.into());
+            return Ok(None);
         }
         let entry = fs::canonicalize(entry).map_err(|error| error.to_string())?;
         if !entry.starts_with(fs::canonicalize(prefix).map_err(|error| error.to_string())?) {
-            return Err(CHANGED.into());
+            return Ok(None);
         }
         entry
     };
+    Ok(Some(LauncherFile { path, bytes, entry }))
+}
+
+fn publish_launcher(
+    original: &LauncherFile,
+    runtime: &BundledRuntime,
+    purpose: Purpose,
+) -> Result<(), String> {
+    let path = &original.path;
     let launcher = Launcher {
         purpose,
         runtime: runtime.clone(),
-        entry,
+        entry: original.entry.clone(),
     };
+    let replacement = render(&launcher)?;
+    if replacement == original.bytes {
+        return if read_regular(path)? == original.bytes {
+            Ok(())
+        } else {
+            Err(CHANGED.into())
+        };
+    }
     let temporary =
         path.with_file_name(format!(".openclaw-tauri-launcher-{}", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -438,13 +484,13 @@ pub(crate) fn bind_runtime(
             .mode(0o700)
             .open(&temporary)
             .map_err(|error| error.to_string())?;
-        file.write_all(&render(&launcher)?)
+        file.write_all(&replacement)
             .and_then(|()| file.sync_all())
             .map_err(|error| error.to_string())?;
-        if read_regular(&path)? != bytes {
+        if read_regular(path)? != original.bytes {
             return Err(CHANGED.into());
         }
-        fs::rename(&temporary, &path).map_err(|error| error.to_string())
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
     })();
     let _ = fs::remove_file(temporary);
     result

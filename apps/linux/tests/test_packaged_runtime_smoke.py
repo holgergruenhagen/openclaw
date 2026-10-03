@@ -98,7 +98,24 @@ class PackagedRuntimeAbiTest(unittest.TestCase):
                 appimage,
                 self.appdir,
                 readelf=str(self.readelf),
+                # Generic ABI fixtures model historical packages without Bun.
+                allow_legacy_runtime=True,
             )
+
+    def test_missing_bundled_runtime_requires_explicit_historical_opt_in(self):
+        appimage = self.write_elf(self.root / "OpenClaw.AppImage", version_output())
+        with mock.patch.object(smoke.platform, "machine", return_value="x86_64"):
+            with self.assertRaisesRegex(RuntimeError, "Missing required bundled runtime"):
+                smoke.collect_abi_report(appimage, self.appdir, readelf=str(self.readelf))
+            report = smoke.collect_abi_report(
+                appimage, self.appdir, readelf=str(self.readelf), allow_legacy_runtime=True
+            )
+        self.assertEqual([entry["path"] for entry in report["files"]], [appimage.name])
+
+    def test_historical_opt_in_still_rejects_an_incomplete_bundled_runtime(self):
+        (self.appdir / smoke.BUNDLED_BUN_PATH).parent.mkdir(parents=True)
+        with self.assertRaisesRegex(RuntimeError, "invalid runtime manifest"):
+            self.collect(version_output())
 
     def test_exact_limits_pass(self):
         report = self.collect(
@@ -260,7 +277,7 @@ class PackagedRuntimeAbiTest(unittest.TestCase):
         (self.appdir / "usr/lib/z-link.so").symlink_to("z.so")
         with mock.patch.object(smoke.platform, "machine", return_value="x86_64"):
             report = smoke.collect_abi_report(
-                appimage, self.appdir, readelf=str(self.readelf)
+                appimage, self.appdir, readelf=str(self.readelf), allow_legacy_runtime=True
             )
 
         self.assertEqual(

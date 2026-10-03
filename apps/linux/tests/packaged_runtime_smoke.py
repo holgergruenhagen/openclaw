@@ -244,7 +244,7 @@ def read_bundled_bun_requirements(path, source, readelf, architecture):
         return read_abi_requirements(decoded, source, readelf, architecture)
 
 
-def collect_abi_report(appimage, appdir, readelf=None):
+def collect_abi_report(appimage, appdir, readelf=None, *, allow_legacy_runtime=False):
     readelf = readelf or shutil.which("readelf")
     if readelf is None:
         raise RuntimeError("readelf is required for AppImage ABI inspection")
@@ -285,6 +285,8 @@ def collect_abi_report(appimage, appdir, readelf=None):
             "reportPath": BUNDLED_BUN_PATH.as_posix(),
             "source": "appdir",
         })
+    elif not allow_legacy_runtime:
+        raise RuntimeError(f"Missing required bundled runtime: {BUNDLED_BUN_PATH.as_posix()}")
     files = []
     for candidate in sorted(
         candidates,
@@ -683,6 +685,10 @@ def main():
     parser.add_argument("--require-fuse", action="store_true")
     parser.add_argument("--shell-container")
     parser.add_argument("--skip-ui", action="store_true")
+    parser.add_argument(
+        "--allow-legacy-runtime", action="store_true",
+        help="Allow historical pre-Bun packages without a desktop-runtime directory",
+    )
     args = parser.parse_args()
 
     if sys.platform != "linux" or os.geteuid() == 0:
@@ -750,7 +756,9 @@ def main():
             if not required.is_file():
                 raise RuntimeError(f"Missing packaged runtime file: {required.relative_to(appdir)}")
 
-        abi_report = collect_abi_report(appimage, appdir)
+        abi_report = collect_abi_report(
+            appimage, appdir, allow_legacy_runtime=args.allow_legacy_runtime
+        )
         write_abi_report(output, abi_report)
         enforce_abi_limits(abi_report)
 
@@ -878,6 +886,7 @@ def main():
 
         summary = {
             "artifact": appimage.name,
+            "legacyRuntimeAllowed": args.allow_legacy_runtime,
             "sha256": artifact_sha,
             "fuse": fuse,
             "extracted": extracted,

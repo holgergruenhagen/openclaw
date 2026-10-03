@@ -226,7 +226,7 @@ fn retained_node_admission_rejects_diagnostics_and_recovery_to_another_executabl
 }
 
 #[test]
-fn owned_update_uses_retained_node_and_qualifies_it_before_runtime_mutation() {
+fn partial_owned_update_qualifies_node_and_restores_the_current_package() {
     let fixture = Fixture::new();
     let wrapper = fixture.wrapper();
     let bun = fixture.0.join("tools/bun/bin/bun");
@@ -237,9 +237,10 @@ fn owned_update_uses_retained_node_and_qualifies_it_before_runtime_mutation() {
     let node_status = fixture.0.join("node-status.json");
     let blocked_status = fixture.0.join("blocked-status.json");
     let bun_status = fixture.0.join("bun-status.json");
+    let restored_status = fixture.0.join("restored-status.json");
     fs::write(&version_file, "2026.10.1\n").unwrap();
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
-    let node_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) if test -e {}; then exec /bin/cat {}; else exec /bin/cat {}; fi ;;\n *'update --yes'*) printf 'update\\n' >> {}; printf '2026.10.2\\n' > {} ;;\n *'update repair'*) printf 'repair\\n' >> {}; : > {} ;;\n *) printf 'unexpected-node-mutation\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&blocked), quote(&blocked_status), quote(&node_status), quote(&calls), quote(&version_file), quote(&calls), quote(&blocked), quote(&calls));
+    let node_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) if test -e {}; then exec /bin/cat {}; else exec /bin/cat {}; fi ;;\n *'update --yes'*) printf 'update\\n' >> {}; printf '2026.10.2\\n' > {} ;;\n *'update repair'*) printf 'repair\\n' >> {}; : > {} ;;\n *'gateway install --force --json --runtime node --port 18789') printf 'install-node\\n' >> {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-node-mutation\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&blocked), quote(&blocked_status), quote(&node_status), quote(&calls), quote(&version_file), quote(&calls), quote(&blocked), quote(&calls), quote(&restored_status), quote(&node_status), quote(&calls));
     let bun_script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) exec /bin/cat {} ;;\n *) printf 'unexpected-bun-maintenance\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&bun_status), quote(&calls));
     for (path, script) in [(&wrapper.node.runtime, node_script), (&bun, bun_script)] {
         fs::write(path, script).unwrap();
@@ -247,6 +248,9 @@ fn owned_update_uses_retained_node_and_qualifies_it_before_runtime_mutation() {
     }
     let mut state = fixture.state_json(&wrapper);
     state["cli"]["version"] = Value::String("2026.10.2".into());
+    let mut restored = state.clone();
+    restored["service"]["revision"] = Value::String("restored-node-service".into());
+    fs::write(&restored_status, serde_json::to_vec(&restored).unwrap()).unwrap();
     state["service"]["command"]["programArguments"][0] = serde_json::to_value(&bun).unwrap();
     state["service"]["runtimeIntent"] = serde_json::json!({
         "status": "known", "revision": "bun-pin", "stored": true,
@@ -278,20 +282,38 @@ fn owned_update_uses_retained_node_and_qualifies_it_before_runtime_mutation() {
         error.contains("retained Node"),
         "unexpected refusal: {error}"
     );
-    assert_eq!(fs::read_to_string(calls).unwrap(), "update\nrepair\n");
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "update\nrepair\n");
     assert_eq!(
         fs::read(&wrapper.path).unwrap(),
         original,
         "no pending intent or runtime replacement may publish without a qualified rollback Node"
     );
+    assert!(restore_retained_node(&cli, &|| true)
+        .unwrap_err()
+        .contains("retained Node"));
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "update\nrepair\n");
+    fs::remove_file(blocked).unwrap();
+    restore_retained_node(&cli, &|| true).unwrap();
+    assert_eq!(
+        fs::read_to_string(calls).unwrap(),
+        "update\nrepair\ninstall-node\n"
+    );
+    assert_eq!(version(&cli, Some(&wrapper.node)).unwrap(), "2026.10.2");
+    assert_eq!(fs::read(&wrapper.path).unwrap(), wrapper.bytes);
+    assert!(!is_app_managed(&cli).unwrap());
+    let final_state = capture(&cli, Some(&wrapper.node), true).unwrap();
+    assert!(final_state.unpinned() && final_state.healthy_for(&wrapper.node));
 }
 
 #[test]
-fn legacy_adoption_reports_completed_package_update_before_pin_refusal() {
-    for (case, loaded, inspectable) in [
-        ("loaded", true, true),
-        ("absent", false, true),
-        ("unknown", true, false),
+fn explicit_adoption_updates_package_before_pin_refusal() {
+    for (case, loaded, inspectable, known_before, update) in [
+        ("legacy-loaded", true, true, false, true),
+        ("legacy-absent", false, true, false, true),
+        ("legacy-unknown", true, false, false, true),
+        ("known-loaded", true, true, true, true),
+        ("known-absent", false, true, true, true),
+        ("known-current", true, true, true, false),
     ] {
         let fixture = Fixture::new();
         let wrapper = fixture.wrapper();
@@ -301,10 +323,13 @@ fn legacy_adoption_reports_completed_package_update_before_pin_refusal() {
         let version_file = fixture.0.join("version");
         let calls = fixture.0.join("calls");
         let mut before = fixture.state_json(&wrapper);
-        before["cli"]["version"] = Value::String("2026.9.5".into());
-        before["cli"].as_object_mut().unwrap().remove("runtime");
-        for key in ["runtimeIntent", "revision", "definitionMutation"] {
-            before["service"].as_object_mut().unwrap().remove(key);
+        let installed = if update { "2026.9.5" } else { "2026.10.2" };
+        before["cli"]["version"] = Value::String(installed.into());
+        if !known_before {
+            before["cli"].as_object_mut().unwrap().remove("runtime");
+            for key in ["runtimeIntent", "revision", "definitionMutation"] {
+                before["service"].as_object_mut().unwrap().remove(key);
+            }
         }
         let mut after = fixture.state_json(&wrapper);
         after["cli"]["version"] = Value::String("2026.10.2".into());
@@ -329,9 +354,12 @@ fn legacy_adoption_reports_completed_package_update_before_pin_refusal() {
                 after["service"].as_object_mut().unwrap().remove(key);
             }
         }
+        if known_before {
+            before["service"]["runtimeIntent"] = after["service"]["runtimeIntent"].clone();
+        }
         fs::write(&status_file, serde_json::to_vec(&before).unwrap()).unwrap();
         fs::write(&candidate_file, serde_json::to_vec(&after).unwrap()).unwrap();
-        fs::write(&version_file, "2026.9.5\n").unwrap();
+        fs::write(&version_file, format!("{installed}\n")).unwrap();
         let quote =
             |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
         let script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw '; exec /bin/cat {} ;;\n *'gateway status'*) exec /bin/cat {} ;;\n *'update --yes'*) printf 'update\\n' >> {}; /bin/cp {} {}; printf '2026.10.2\\n' > {} ;;\n *) printf 'unexpected-mutation\\n' >> {}; exit 9 ;;\nesac\n", quote(&version_file), quote(&status_file), quote(&calls), quote(&candidate_file), quote(&status_file), quote(&version_file), quote(&calls));
@@ -349,14 +377,17 @@ fn legacy_adoption_reports_completed_package_update_before_pin_refusal() {
             &|| true,
         )
         .unwrap_err();
-        assert!(
+        assert_eq!(
             error.contains("CLI package reached 2026.10.2"),
+            update,
             "{case}: {error}"
         );
-        assert!(
-            error.contains("bundled Bun was not activated"),
-            "{case}: {error}"
-        );
+        if update {
+            assert!(
+                error.contains("bundled Bun was not activated"),
+                "{case}: {error}"
+            );
+        }
         if inspectable {
             assert!(error.contains("existing runtime pin"), "{case}: {error}");
         } else {
@@ -366,7 +397,11 @@ fn legacy_adoption_reports_completed_package_update_before_pin_refusal() {
                 "unknown inspection must not claim pin preservation: {error}"
             );
         }
-        assert_eq!(fs::read_to_string(calls).unwrap(), "update\n", "{case}");
+        assert_eq!(
+            fs::read_to_string(calls).unwrap_or_default(),
+            if update { "update\n" } else { "" },
+            "{case}"
+        );
         assert_eq!(fs::read(&wrapper.path).unwrap(), wrapper.bytes, "{case}");
         assert!(!is_app_managed(&cli).unwrap(), "{case}");
         let observed: Value = serde_json::from_slice(&fs::read(status_file).unwrap()).unwrap();

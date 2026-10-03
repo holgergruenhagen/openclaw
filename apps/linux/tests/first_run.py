@@ -32,12 +32,22 @@ import time
 START_FAILURE = "Fixture: systemd user service is unavailable."
 
 
-def role_matches(actual_role, expected_role):
+def role_matches(actual_role, expected_role, attributes=None):
     roles = expected_role if isinstance(expected_role, tuple) else (expected_role,)
     # WebKitGTK versions expose the same button as either AT-SPI role name.
     buttons = ("button", "push button")
-    return actual_role in roles or (
+    if actual_role in roles or (
         actual_role in buttons and any(role in buttons for role in roles)
+    ):
+        return True
+    # Some WebKitGTK builds shift AT-SPI roles but retain HTML semantics.
+    attributes = attributes or {}
+    tag = attributes.get("tag", "")
+    return (
+        "heading" in roles
+        and attributes.get("computed-role") == "heading"
+        and tag in ("h1", "h2", "h3", "h4", "h5", "h6")
+        and attributes.get("level") == tag[1:]
     )
 
 
@@ -106,9 +116,11 @@ def exercise(app, Atspi, GLib, *, remote_only, local_start_failure, inline_fixtu
                             content.startswith(label) if prefix else content == label
                         )
                     else:
-                        matches = role_matches(actual_role, role) and (
-                            name.startswith(label) if prefix else name == label
-                        )
+                        named = name.startswith(label) if prefix else name == label
+                        matches = named and role_matches(actual_role, role)
+                        roles = role if isinstance(role, tuple) else (role,)
+                        if named and not matches and "heading" in roles:
+                            matches = role_matches(actual_role, role, node.get_attributes())
                     # Application-root state queries can block in GTK; only
                     # inspect visibility on the semantic control being asserted.
                     if (

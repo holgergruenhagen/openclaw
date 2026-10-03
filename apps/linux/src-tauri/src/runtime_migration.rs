@@ -500,10 +500,17 @@ pub(crate) fn migrate(
     {
         return Err("The Gateway runtime state is unknown. Its installation was preserved; retry after checking Gateway status.".into());
     }
-    // Published CLIs may lack the new projection. Explicit adoption may update their package,
-    // but only the candidate's canonical pin inspection may authorize a runtime change.
+    // Explicit adoption authorizes the package update even with a saved pin. Pin inspection
+    // still gates the later runtime switch; older published CLIs may lack that projection.
     if state.service.runtime_intent.is_some() {
-        admit(&wrapper, &state, mode)?;
+        if mode == Mode::Adopt && wrapper.managed.is_none() {
+            state.binding()?;
+            if !state.absent() && !state.matches_target(&wrapper.node) {
+                return Err(CHANGED.into());
+            }
+        } else {
+            admit(&wrapper, &state, mode)?;
+        }
     } else if mode == Mode::OwnedUpdate || (!state.absent() && !state.matches_target(&wrapper.node))
     {
         return Err(CHANGED.into());
@@ -551,9 +558,9 @@ pub(crate) fn migrate(
     if package_updated {
         wrapper = read_wrapper(cli).map_err(refusal)?;
         state = capture(cli, None, false).map_err(refusal)?;
-        // Core may refresh the service's definition and pin binding while preserving runtime intent.
-        admit(&wrapper, &state, mode).map_err(refusal)?;
     }
+    // Core may refresh the service's definition and pin binding while preserving runtime intent.
+    admit(&wrapper, &state, mode).map_err(refusal)?;
     let qualified = capture(cli, Some(&wrapper.node), false).map_err(refusal)?;
     require_retained_node(&qualified, &wrapper.node, app_version).map_err(refusal)?;
     if qualified.binding().map_err(refusal)? != state.binding().map_err(refusal)? {
@@ -729,7 +736,14 @@ pub(crate) fn restore_retained_node(
         );
     }
     let original = retained_bytes(&wrapper)?;
-    require_retained_node(&state, &wrapper.node, &metadata.package_version)?;
+    // A package update may succeed before runtime maintenance fails. Restore that current
+    // package with Node; the last completed Bun activation's version may now be stale.
+    let package_version = if metadata.pending.is_some() {
+        metadata.package_version.clone()
+    } else {
+        version(cli, Some(&wrapper.node))?
+    };
+    require_retained_node(&state, &wrapper.node, &package_version)?;
     recheck(cli, &wrapper, &state, is_current, true)?;
     install(cli, &wrapper.node, &state, false)?;
     let restored = capture(cli, Some(&wrapper.node), false)?;

@@ -19,6 +19,28 @@ class RoleMatchingTests(unittest.TestCase):
                 self.assertFalse(role_matches("button", actual))
         self.assertFalse(role_matches("entry", ("heading", "toggle button")))
 
+    def test_shifted_heading_requires_matching_html_semantics(self):
+        for level in range(1, 7):
+            attributes = {"computed-role": "heading", "tag": f"h{level}", "level": str(level)}
+            with self.subTest(level=level):
+                self.assertTrue(role_matches("document frame", "heading", attributes))
+                self.assertTrue(role_matches("document frame", ("entry", "heading"), attributes))
+                self.assertFalse(role_matches("document frame", "button", attributes))
+
+    def test_regions_and_incomplete_heading_semantics_are_rejected(self):
+        for attributes in (
+            {"computed-role": "region", "tag": "section"},
+            {"computed-role": "heading", "tag": "section", "level": "1"},
+            {"computed-role": "heading", "tag": "h1", "level": "2"},
+            {"computed-role": "heading", "tag": "h0", "level": "0"},
+            {"computed-role": "heading", "tag": "h7", "level": "7"},
+            {"computed-role": "heading", "tag": "h1"},
+            {"tag": "h1", "level": "1"},
+            {},
+        ):
+            with self.subTest(attributes=attributes):
+                self.assertFalse(role_matches("article", "heading", attributes))
+
 
 if __name__ == "__main__":
     unittest.main()

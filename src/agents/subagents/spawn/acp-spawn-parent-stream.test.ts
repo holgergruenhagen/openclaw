@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { SqliteWorkerError } from "../../../infra/sqlite-worker-contract.js";
+import { createDeferredCore } from "../../../shared/deferred.js";
 import { startAcpSpawnParentStreamRelay } from "./acp-spawn-parent-stream.js";
 
 const { enqueueSystemEventMock, requestHeartbeatMock, recordAcpParentStreamEventsMock } =
@@ -23,15 +25,12 @@ vi.mock("../../../infra/heartbeat-wake.js", async () => {
   } satisfies typeof actual;
 });
 
-vi.mock("./acp-parent-stream-store.sqlite.js", async () => {
-  const actual = await vi.importActual<typeof import("./acp-parent-stream-store.sqlite.js")>(
-    "./acp-parent-stream-store.sqlite.js",
-  );
-  return {
-    ...actual,
-    recordAcpParentStreamEvents: (...args: unknown[]) => recordAcpParentStreamEventsMock(...args),
-  } satisfies typeof actual;
-});
+vi.mock("./acp-parent-stream-store.sqlite.js", () => ({
+  createAcpParentStreamRecorder: () => ({
+    record: recordAcpParentStreamEventsMock,
+    close: async () => {},
+  }),
+}));
 
 let emitAgentEvent: typeof import("../../../infra/agent-events.js").emitAgentEvent;
 
@@ -92,7 +91,7 @@ describe("startAcpSpawnParentStreamRelay", () => {
     enqueueSystemEventMock.mockClear();
     requestHeartbeatMock.mockClear();
     recordAcpParentStreamEventsMock.mockReset();
-    recordAcpParentStreamEventsMock.mockImplementation(() => undefined);
+    recordAcpParentStreamEventsMock.mockResolvedValue({ ok: true, value: undefined });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-04T01:00:00.000Z"));
   });
@@ -196,12 +195,10 @@ describe("startAcpSpawnParentStreamRelay", () => {
     relay.dispose();
   });
 
-  it("backs off and caps SQLite diagnostic retries", () => {
+  it("backs off and caps confirmed rollback retries", async () => {
     recordAcpParentStreamEventsMock
-      .mockImplementationOnce(() => {
-        throw new Error("database unavailable");
-      })
-      .mockImplementation(() => undefined);
+      .mockResolvedValueOnce({ ok: false, error: new Error("database unavailable") })
+      .mockResolvedValue({ ok: true, value: undefined });
     const relay = startAcpSpawnParentStreamRelay({
       runId: "run-diagnostic-retry",
       parentSessionKey: "agent:main:main",
@@ -216,7 +213,7 @@ describe("startAcpSpawnParentStreamRelay", () => {
       stream: "assistant",
       data: { delta: "first" },
     });
-    vi.advanceTimersByTime(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 300; index += 1) {
@@ -227,16 +224,67 @@ describe("startAcpSpawnParentStreamRelay", () => {
       });
     }
     expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(1_999);
+    await vi.advanceTimersByTimeAsync(1_999);
     expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(1);
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(2);
-    const retried = recordAcpParentStreamEventsMock.mock.calls[1]?.[0] as
-      | { events?: unknown[] }
-      | undefined;
-    expect(retried?.events).toHaveLength(256);
-    relay.dispose();
+    expect(recordAcpParentStreamEventsMock.mock.calls[1]?.[0]).toHaveLength(256);
+    await relay.dispose();
+  });
+
+  it.each(["overloaded", "outcome-unknown"] as const)(
+    "retries only proven pre-execution refusal (%s)",
+    async (code) => {
+      const failure = new SqliteWorkerError("controlled worker failure", code);
+      recordAcpParentStreamEventsMock.mockRejectedValueOnce(failure);
+      const relay = startAcpSpawnParentStreamRelay({
+        runId: "outcome",
+        parentSessionKey: "agent:main:main",
+        eventRouting: {},
+        childSessionKey: "agent:main:acp:child",
+        childSessionId: "child",
+        agentId: "main",
+      });
+      emitAgentEvent({ runId: "outcome", stream: "acp", data: { phase: "runtime_event" } });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await relay.dispose();
+      expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(code === "overloaded" ? 2 : 1);
+      await expect(recordAcpParentStreamEventsMock.mock.results[0]?.value).rejects.toBe(failure);
+    },
+  );
+
+  it("joins an in-flight batch before the final buffer and seals event admission", async () => {
+    const gate = createDeferredCore<{ ok: true; value: undefined }>();
+    recordAcpParentStreamEventsMock.mockReturnValueOnce(gate.promise);
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "settlement",
+      parentSessionKey: "agent:main:main",
+      eventRouting: {},
+      childSessionKey: "agent:main:acp:child",
+      childSessionId: "child",
+      agentId: "main",
+    });
+    const emit = (ordinal: number) =>
+      emitAgentEvent({ runId: "settlement", stream: "acp", data: { ordinal } });
+    emit(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    emit(2);
+    let disposed = false;
+    const closing = relay.dispose().then(() => {
+      disposed = true;
+    });
+    emit(3);
+    expect(disposed).toBe(false);
+    expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(1);
+    gate.resolve({ ok: true, value: undefined });
+    await closing;
+    expect(
+      recordAcpParentStreamEventsMock.mock.calls.map(([events]) =>
+        events.map((entry: { event: { data: { ordinal: number } } }) => entry.event.data.ordinal),
+      ),
+    ).toEqual([[1], [2]]);
   });
 
   it("remaps cron-run parent session keys while relaying stream events", () => {

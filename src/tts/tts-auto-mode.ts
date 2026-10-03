@@ -12,9 +12,6 @@ function isTtsAutoMode(value: string): value is TtsAutoMode {
 
 /** Normalize an unknown value into a supported TTS auto mode. */
 export function normalizeTtsAutoMode(value: unknown): TtsAutoMode | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
   const normalized = normalizeOptionalLowercaseString(value);
   if (normalized && isTtsAutoMode(normalized)) {
     return normalized;

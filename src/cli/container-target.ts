@@ -121,13 +121,8 @@ function assertContainerProxyUrlIsReachable(proxyUrl: string, env: NodeJS.Proces
   if (env[CONTAINER_ALLOW_LOOPBACK_PROXY_URL_ENV] === "1") {
     return;
   }
-  let parsed: URL;
-  try {
-    parsed = new URL(proxyUrl);
-  } catch {
-    return;
-  }
-  if (!isLoopbackProxyHostname(parsed.hostname)) {
+  const parsed = URL.parse(proxyUrl);
+  if (!parsed || !isLoopbackProxyHostname(parsed.hostname)) {
     return;
   }
   throw new Error(
@@ -160,18 +155,17 @@ function isLoopbackProxyHostname(hostname: string): boolean {
 }
 
 function redactProxyUrlForMessage(raw: string): string {
-  try {
-    const url = new URL(raw);
-    if (url.username || url.password) {
-      url.username = "redacted";
-      url.password = url.password ? "redacted" : "";
-    }
-    url.search = "";
-    url.hash = "";
-    return url.toString();
-  } catch {
+  const url = URL.parse(raw);
+  if (!url) {
     return "<invalid URL>";
   }
+  if (url.username || url.password) {
+    url.username = "redacted";
+    url.password = url.password ? "redacted" : "";
+  }
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function buildContainerExecEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

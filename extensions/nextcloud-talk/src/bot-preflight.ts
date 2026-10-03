@@ -113,7 +113,9 @@ export async function probeNextcloudTalkBotResponseFeature(params: {
         },
       },
       auditContext: "nextcloud-talk.bot-response-preflight",
-      policy: ssrfPolicyFromPrivateNetworkOptIn(account.config),
+      policy: ssrfPolicyFromPrivateNetworkOptIn(
+        account.config.network?.dangerouslyAllowPrivateNetwork,
+      ),
       timeoutMs,
     });
     try {

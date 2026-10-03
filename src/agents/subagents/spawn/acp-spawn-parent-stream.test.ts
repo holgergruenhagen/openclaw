@@ -196,8 +196,9 @@ describe("startAcpSpawnParentStreamRelay", () => {
   });
 
   it("backs off and caps confirmed rollback retries", async () => {
+    const rollback = createDeferredCore<{ ok: false; error: Error }>();
     recordAcpParentStreamEventsMock
-      .mockResolvedValueOnce({ ok: false, error: new Error("database unavailable") })
+      .mockReturnValueOnce(rollback.promise)
       .mockResolvedValue({ ok: true, value: undefined });
     const relay = startAcpSpawnParentStreamRelay({
       runId: "run-diagnostic-retry",
@@ -216,6 +217,13 @@ describe("startAcpSpawnParentStreamRelay", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(recordAcpParentStreamEventsMock).toHaveBeenCalledTimes(1);
 
+    emitAgentEvent({
+      runId: "run-diagnostic-retry",
+      stream: "assistant",
+      data: { delta: "arrived while the write was pending" },
+    });
+    rollback.resolve({ ok: false, error: new Error("database unavailable") });
+    await vi.advanceTimersByTimeAsync(0);
     for (let index = 0; index < 300; index += 1) {
       emitAgentEvent({
         runId: "run-diagnostic-retry",

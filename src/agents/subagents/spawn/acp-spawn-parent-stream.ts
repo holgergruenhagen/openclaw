@@ -204,6 +204,7 @@ export function startAcpSpawnParentStreamRelay(params: {
             pendingLogEvents.unshift(...events);
             capPendingLogEvents();
             consecutiveLogFailures += 1;
+            clearLogFlushTimer();
             scheduleLogFlush(
               Math.min(STREAM_LOG_FLUSH_MS * 2 ** consecutiveLogFailures, STREAM_LOG_MAX_RETRY_MS),
             );

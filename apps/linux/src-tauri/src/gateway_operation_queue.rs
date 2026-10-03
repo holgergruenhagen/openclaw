@@ -16,6 +16,8 @@ pub(crate) enum GatewayOperation {
     },
     RetryRemote,
     Install(InstallChannel),
+    #[cfg(not(target_os = "windows"))]
+    Runtime(crate::RuntimeAction),
     Action(GatewayAction),
     RecoverRemote {
         child_id: u64,
@@ -98,6 +100,11 @@ impl GatewayOperationQueue {
 
     pub(crate) fn submit_action(&self, action: GatewayAction) {
         self.submit_detached(GatewayOperation::Action(action));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn submit_runtime(&self, action: crate::RuntimeAction) {
+        self.submit_detached(GatewayOperation::Runtime(action));
     }
 
     pub(crate) fn execute(

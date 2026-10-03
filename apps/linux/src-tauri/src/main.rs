@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "windows"))]
+mod bundled_runtime;
 mod chrome_setup;
 mod cli;
 #[cfg(target_os = "linux")]
@@ -30,6 +32,8 @@ mod pending_approvals;
 mod quickchat;
 mod quickchat_widgets;
 mod remote_gateway;
+#[cfg(not(target_os = "windows"))]
+mod runtime_migration;
 mod tray;
 mod updater;
 mod window_chrome;
@@ -58,6 +62,12 @@ use tauri_plugin_opener::OpenerExt;
 
 const CONNECTED_WATCH_INTERVAL: Duration = Duration::from_secs(15);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+#[cfg(not(target_os = "windows"))]
+#[derive(Clone, Copy)]
+pub(crate) enum RuntimeAction {
+    Adopt,
+    RestoreNode,
+}
 fn external_browser_url_allowed(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url.has_host()
@@ -821,6 +831,13 @@ impl DesktopState {
         if explicit_local {
             self.inner.remote_tunnels.clear();
         }
+        #[cfg(not(target_os = "windows"))]
+        if self.update_owned_runtime(app, &cli, selection)? {
+            let snapshot = gateway::status(&cli)?;
+            self.show_local(app, "stopped", false, None)?;
+            self.update_tray(&snapshot);
+            return Ok(snapshot);
+        }
         let ready = gateway::ensure_ready(&cli)?;
         self.finish_local_connection(app, cli, ready)
     }
@@ -829,16 +846,41 @@ impl DesktopState {
         &self,
         app: &AppHandle,
         channel: InstallChannel,
+        selection: u64,
     ) -> Result<GatewaySnapshot, String> {
         let _operation = self
             .inner
             .operation
             .lock()
             .map_err(|_| "Installer lock is unavailable.".to_string())?;
-        installer::install(app, channel)?;
+        #[cfg(not(target_os = "windows"))]
+        if let Ok(cli) = OpenClawCli::discover() {
+            if runtime_migration::is_app_managed(&cli)? {
+                if self.update_owned_runtime(app, &cli, selection)? {
+                    return gateway::status(&cli);
+                }
+                let ready = gateway::ensure_ready(&cli)?;
+                return self.finish_local_connection(app, cli, ready);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let fresh = matches!(OpenClawCli::discover(), Err(CliError::Missing))
+            && std::env::var_os("OPENCLAW_DESKTOP_CLI").is_none()
+            && installer::managed_launcher_absent(
+                &cli::openclaw_home().map_err(|error| error.to_string())?,
+            )?;
+        #[cfg(target_os = "windows")]
+        let fresh = false;
+        #[cfg(not(target_os = "windows"))]
+        let runtime = fresh.then(|| bundled_runtime::seed(app)).transpose()?;
+        installer::install(app, channel, fresh)?;
         let cli = OpenClawCli::discover().map_err(|error| {
             format!("OpenClaw is installed, but the CLI could not be found: {error}")
         })?;
+        #[cfg(not(target_os = "windows"))]
+        if let Some(runtime) = runtime.as_ref() {
+            runtime_migration::bind_fresh_cli_runtime(&cli, runtime)?;
+        }
         *self.inner.cli.lock().expect("CLI mutex poisoned") = Some(cli.clone());
 
         // The installed CLI owns config/state migrations; repair before any
@@ -859,6 +901,17 @@ impl DesktopState {
                     serde_json::json!({ "stream": "stderr", "line": line }),
                 );
             }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if let Some(runtime) = runtime {
+            runtime_migration::migrate(
+                &cli,
+                &runtime,
+                &app.package_info().version.to_string(),
+                runtime_migration::Mode::Fresh,
+                &|| self.runtime_operation_is_current(app, selection),
+            )?;
         }
 
         self.inner.chrome_setup.installed(app.clone(), cli.clone());
@@ -885,6 +938,7 @@ impl DesktopState {
         &self,
         app: &AppHandle,
         action: GatewayAction,
+        selection: u64,
     ) -> Result<GatewaySnapshot, String> {
         let _operation = self
             .inner
@@ -895,7 +949,7 @@ impl DesktopState {
             self.cancel_watchdog();
         }
         let cli = self.resolve_cli().map_err(|error| error.to_string())?;
-        let snapshot = gateway::act(&cli, action)?;
+        let mut snapshot = gateway::act(&cli, action)?;
         if matches!(action, GatewayAction::Stop) {
             app.state::<gateway_ws::GatewayClient>()
                 .clear_configuration(app);
@@ -903,7 +957,93 @@ impl DesktopState {
             self.update_tray(&snapshot);
             return Ok(snapshot);
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.update_owned_runtime(app, &cli, selection)?;
+            snapshot = gateway::status(&cli)?;
+        }
 
+        let ready = gateway::dashboard(&cli, snapshot)?;
+        self.finish_local_connection(app, cli, ready)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn runtime_operation_is_current(&self, app: &AppHandle, selection: u64) -> bool {
+        !self.is_quitting()
+            && app
+                .state::<GatewayOperationQueue>()
+                .selection_is_current(selection)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn update_owned_runtime(
+        &self,
+        app: &AppHandle,
+        cli: &OpenClawCli,
+        selection: u64,
+    ) -> Result<bool, String> {
+        if !runtime_migration::is_app_managed(cli)? {
+            return Ok(false);
+        }
+        let ownership = runtime_migration::inspect(cli)?;
+        if !ownership.managed {
+            return Ok(false);
+        }
+        if ownership.paused {
+            return Ok(true);
+        }
+        let runtime = bundled_runtime::seed(app)?;
+        let outcome = runtime_migration::migrate(
+            cli,
+            &runtime,
+            &app.package_info().version.to_string(),
+            runtime_migration::Mode::OwnedUpdate,
+            &|| self.runtime_operation_is_current(app, selection),
+        )?;
+        Ok(matches!(
+            outcome,
+            runtime_migration::MigrationOutcome::DeferredPaused
+        ))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn runtime_action(
+        &self,
+        app: &AppHandle,
+        action: RuntimeAction,
+        selection: u64,
+    ) -> Result<GatewaySnapshot, String> {
+        let _operation = self
+            .inner
+            .operation
+            .lock()
+            .map_err(|_| "Gateway operation lock is unavailable.")?;
+        if remote_gateway::saved_settings()?.is_some() {
+            return Err("Select the local Gateway before changing its runtime.".into());
+        }
+        let cli = self.resolve_cli().map_err(|error| error.to_string())?;
+        let is_current = || self.runtime_operation_is_current(app, selection);
+        match action {
+            RuntimeAction::Adopt => {
+                let runtime = bundled_runtime::seed(app)?;
+                if matches!(
+                    runtime_migration::migrate(
+                        &cli,
+                        &runtime,
+                        &app.package_info().version.to_string(),
+                        runtime_migration::Mode::Adopt,
+                        &is_current,
+                    )?,
+                    runtime_migration::MigrationOutcome::DeferredPaused
+                ) {
+                    return Err("Start the Gateway, then choose Use bundled runtime again. The stopped installation was preserved.".into());
+                }
+            }
+            RuntimeAction::RestoreNode => {
+                runtime_migration::restore_retained_node(&cli, &is_current)?
+            }
+        }
+        let snapshot = gateway::status(&cli)?;
         let ready = gateway::dashboard(&cli, snapshot)?;
         self.finish_local_connection(app, cli, ready)
     }
@@ -3355,10 +3495,14 @@ fn main() {
                     operation_state.retry_remote(&operation_app, selection)
                 }
                 GatewayOperation::Install(channel) => {
-                    operation_state.install_cli(&operation_app, channel)
+                    operation_state.install_cli(&operation_app, channel, selection)
+                }
+                #[cfg(not(target_os = "windows"))]
+                GatewayOperation::Runtime(action) => {
+                    operation_state.runtime_action(&operation_app, action, selection)
                 }
                 GatewayOperation::Action(action) => {
-                    operation_state.gateway_action(&operation_app, action)
+                    operation_state.gateway_action(&operation_app, action, selection)
                 }
                 GatewayOperation::RecoverRemote { child_id } => {
                     operation_state.recover_remote(&operation_app, selection, child_id)

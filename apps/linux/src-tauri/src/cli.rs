@@ -18,6 +18,7 @@ pub struct OpenClawCli {
     executable: PathBuf,
     openclaw_home: PathBuf,
     available: Arc<AtomicBool>,
+    allow_runtime_management: bool,
 }
 
 #[derive(Debug)]
@@ -57,7 +58,9 @@ impl OpenClawCli {
     pub(crate) fn locate() -> Result<Self, CliError> {
         let home = openclaw_home()?;
         if let Some(override_path) = env::var_os("OPENCLAW_DESKTOP_CLI") {
-            return Ok(Self::new(PathBuf::from(override_path), home));
+            let mut cli = Self::new(PathBuf::from(override_path), home);
+            cli.allow_runtime_management = false;
+            return Ok(cli);
         }
 
         let managed = home.join("bin/openclaw");
@@ -73,6 +76,7 @@ impl OpenClawCli {
             executable,
             openclaw_home,
             available: Arc::new(AtomicBool::new(true)),
+            allow_runtime_management: true,
         }
     }
 
@@ -231,7 +235,12 @@ impl OpenClawCli {
             .map_err(|_| CliError::InvalidJson("Chrome setup returned no valid result.".into()))
     }
 
-    fn command_path(&self) -> Result<OsString, CliError> {
+    pub(crate) fn managed_wrapper(&self) -> Option<PathBuf> {
+        let managed = self.openclaw_home.join("bin/openclaw");
+        (self.allow_runtime_management && self.executable == managed).then_some(managed)
+    }
+
+    pub(crate) fn command_path(&self) -> Result<OsString, CliError> {
         let mut paths = vec![
             self.openclaw_home.join("bin"),
             self.openclaw_home.join("tools/node/bin"),

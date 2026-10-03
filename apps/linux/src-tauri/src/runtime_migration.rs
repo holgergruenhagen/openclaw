@@ -1,0 +1,1275 @@
+//! The companion owns its marked launcher; the CLI owns updates and service mutations.
+use crate::cli::{output_tail, OpenClawCli};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const MARKER: &str = "# OpenClaw-Tauri runtime v1 ";
+const CHANGED: &str = "The Gateway or CLI changed ownership. Its current selection was preserved; inspect it before retrying.";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct BundledRuntime {
+    pub bun: PathBuf,
+    pub sqlite: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Mode {
+    Fresh,
+    Adopt,
+    OwnedUpdate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MigrationOutcome {
+    Migrated,
+    Current,
+    DeferredPaused,
+    PreservedExternal,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MigrationStatus {
+    pub managed: bool,
+    pub can_adopt: bool,
+    pub can_restore: bool,
+    pub paused: bool,
+}
+
+/// Startup must not execute or adopt an unmarked CLI just to discover app ownership.
+pub(crate) fn is_app_managed(cli: &OpenClawCli) -> Result<bool, String> {
+    let Some(path) = cli.managed_wrapper() else {
+        return Ok(false);
+    };
+    // npm links and other executable contracts can live at the managed lookup path.
+    // Their presence permits attachment, not app ownership of the link or its target.
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= 65536 => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Could not inspect CLI ownership: {error}")),
+    }
+    let bytes = read_regular(&path)?;
+    if !std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| text.lines().nth(1))
+        .is_some_and(|line| line.starts_with(MARKER))
+    {
+        return Ok(false);
+    }
+    Ok(read_wrapper(cli)?
+        .managed
+        .is_some_and(|metadata| metadata.purpose == Purpose::Gateway))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Target {
+    runtime: PathBuf,
+    entry: PathBuf,
+    sqlite: Option<PathBuf>,
+    bun: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Binding {
+    revision: String,
+    pin_revision: String,
+    config_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Managed {
+    purpose: Purpose,
+    target: Target,
+    node: Target,
+    retained_wrapper: PathBuf,
+    retained_wrapper_sha256: String,
+    package_version: String,
+    binding: Option<Binding>,
+    pending: Option<Pending>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Pending {
+    original: Binding,
+    original_wrapper: PathBuf,
+    original_wrapper_sha256: String,
+    mode: Mode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingState {
+    Original,
+    Bun,
+    Node,
+}
+
+fn pending_state(metadata: &Managed, state: &Snapshot) -> Result<PendingState, String> {
+    let pending = metadata.pending.as_ref().ok_or(CHANGED)?;
+    let binding = state.binding()?;
+    if binding.config_path != pending.original.config_path {
+        return Err(CHANGED.into());
+    }
+    if binding == pending.original {
+        return Ok(PendingState::Original);
+    }
+    if state.matches_bun(&metadata.target) {
+        return Ok(PendingState::Bun);
+    }
+    if state.unpinned() && state.matches_target(&metadata.node) {
+        return Ok(PendingState::Node);
+    }
+    Err(CHANGED.into())
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Purpose {
+    Gateway,
+    Browser,
+}
+
+impl Managed {
+    fn owns(&self, state: &Snapshot) -> bool {
+        self.purpose == Purpose::Gateway
+            && self.binding.as_ref().is_some_and(|binding| {
+                state.binding().is_ok_and(|current| {
+                    binding.pin_revision == current.pin_revision
+                        && binding.config_path == current.config_path
+                }) && state.matches_bun(&self.target)
+            })
+    }
+}
+
+#[derive(Clone)]
+struct Wrapper {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    node: Target,
+    managed: Option<Managed>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Service {
+    loaded: Option<bool>,
+    target_role: Option<String>,
+    command: Option<ServiceCommand>,
+    runtime: Option<ServiceRuntime>,
+    runtime_intent: Option<RuntimeIntent>,
+    revision: Option<String>,
+    definition_mutation: Option<String>,
+    #[serde(default)]
+    launcher_overridden: bool,
+    layout: Option<ServiceLayout>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ServiceCommand {
+    program_arguments: Vec<String>,
+    #[serde(flatten)]
+    other: std::collections::BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ServiceRuntime {
+    status: String,
+    pid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ServicePort {
+    port: u16,
+    status: String,
+    listeners: Vec<PortListener>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PortListener {
+    pid: Option<u32>,
+    ppid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceLayout {
+    entrypoint_real: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RuntimeIntent {
+    status: String,
+    revision: Option<String>,
+    stored: Option<bool>,
+    pin: Option<RuntimePin>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RuntimePin {
+    runtime: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Snapshot {
+    cli: Option<CliStatus>,
+    service: Service,
+    gateway: Value,
+    config: Value,
+    rpc: Option<Value>,
+    port: Option<ServicePort>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CliStatus {
+    version: String,
+    runtime: Option<CliRuntime>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRuntime {
+    kind: String,
+    exec_path: PathBuf,
+    supported: bool,
+}
+
+fn require_retained_node(state: &Snapshot, node: &Target, version: &str) -> Result<(), String> {
+    if !node.bun
+        && state.cli.as_ref().is_some_and(|cli| cli.version == version)
+        && state.uses_runtime(node)
+    {
+        return Ok(());
+    }
+    Err("The retained Node runtime could not qualify for this package version. Repair the managed Node installation before retrying.".into())
+}
+
+impl Snapshot {
+    fn uses_runtime(&self, target: &Target) -> bool {
+        self.cli
+            .as_ref()
+            .and_then(|cli| cli.runtime.as_ref())
+            .is_some_and(|runtime| {
+                runtime.kind == (if target.bun { "bun" } else { "node" })
+                    && runtime.supported
+                    && fs::canonicalize(&runtime.exec_path).ok().as_ref() == Some(&target.runtime)
+            })
+    }
+
+    fn healthy_for(&self, target: &Target) -> bool {
+        let Some(runtime) = self
+            .service
+            .runtime
+            .as_ref()
+            .filter(|runtime| runtime.status == "running")
+        else {
+            return false;
+        };
+        let Some(pid) = runtime.pid.filter(|pid| *pid > 0) else {
+            return false;
+        };
+        self.service.loaded == Some(true)
+            && self.service.target_role.as_deref() == Some("target")
+            && self.uses_runtime(target)
+            && self.matches_target(target)
+            && self.port.as_ref().is_some_and(|port| {
+                port.status == "busy" && port.port > 0
+                    && self.gateway.get("port").and_then(Value::as_u64) == Some(u64::from(port.port))
+                    && !port.listeners.is_empty()
+                    // Consume the CLI's PID/PPID evidence using its restart-port-ownership contract.
+                    && port.listeners.iter().all(|listener| listener.pid == Some(pid) || listener.ppid == Some(pid))
+            })
+            && self.rpc.as_ref().and_then(|rpc| rpc.get("ok")).and_then(Value::as_bool) == Some(true)
+    }
+
+    fn binding(&self) -> Result<Binding, String> {
+        let intent = self.service.runtime_intent.as_ref().ok_or(
+            "Update the installed CLI to this app's version before selecting the bundled runtime.",
+        )?;
+        if intent.status != "known"
+            || self.service.definition_mutation.as_deref() != Some("writable")
+            || self.service.loaded.is_none()
+            || self.service.launcher_overridden
+            || self.config.get("mismatch").and_then(Value::as_bool) == Some(true)
+        {
+            return Err("Gateway runtime intent or service ownership could not be verified. The current service was preserved.".into());
+        }
+        Ok(Binding {
+            revision: self.service.revision.clone().ok_or(CHANGED)?,
+            pin_revision: intent.revision.clone().ok_or(CHANGED)?,
+            config_path: self
+                .config
+                .pointer("/daemon/path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or(CHANGED)?,
+        })
+    }
+
+    fn paused(&self) -> bool {
+        self.service.command.is_some()
+            && (self.service.loaded == Some(false)
+                || self
+                    .service
+                    .runtime
+                    .as_ref()
+                    .map(|value| value.status.as_str())
+                    == Some("stopped"))
+    }
+
+    fn absent(&self) -> bool {
+        self.service.loaded == Some(false) && self.service.command.is_none()
+    }
+
+    fn matches_target(&self, target: &Target) -> bool {
+        let Some(command) = &self.service.command else {
+            return false;
+        };
+        command
+            .program_arguments
+            .first()
+            .and_then(|path| fs::canonicalize(path).ok())
+            .as_ref()
+            == Some(&target.runtime)
+            && match self
+                .service
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.entrypoint_real.as_ref())
+            {
+                Some(entry) => same_package_entry(entry, &target.entry),
+                None => legacy_service_entry(&command.program_arguments)
+                    .and_then(|path| fs::canonicalize(path).ok())
+                    .is_some_and(|entry| same_package_entry(&entry, &target.entry)),
+            }
+    }
+
+    fn matches_bun(&self, target: &Target) -> bool {
+        self.binding().is_ok()
+            && self.matches_target(target)
+            && self
+                .service
+                .runtime_intent
+                .as_ref()
+                .and_then(|intent| intent.pin.as_ref())
+                .is_some_and(|pin| pin.runtime == "bun" && pin.path == target.runtime)
+    }
+
+    fn unpinned(&self) -> bool {
+        self.service.runtime_intent.as_ref().is_some_and(|intent| {
+            intent.status == "known" && intent.stored == Some(false) && intent.pin.is_none()
+        })
+    }
+}
+
+pub(crate) fn inspect(cli: &OpenClawCli) -> Result<MigrationStatus, String> {
+    let wrapper = read_wrapper(cli)?;
+    let state = capture(
+        cli,
+        wrapper
+            .managed
+            .as_ref()
+            .and_then(|value| value.pending.as_ref())
+            .map(|_| &wrapper.node),
+        false,
+    )?;
+    let bound = wrapper
+        .managed
+        .as_ref()
+        .is_some_and(|metadata| metadata.owns(&state));
+    let pending = wrapper.managed.as_ref().is_some_and(|metadata| {
+        metadata.purpose == Purpose::Gateway && pending_state(metadata, &state).is_ok()
+    });
+    let fresh = wrapper.managed.as_ref().is_some_and(|metadata| {
+        metadata.purpose == Purpose::Gateway
+            && metadata.pending.is_none()
+            && metadata.binding.is_none()
+            && state.binding().is_ok()
+            && state.absent()
+            && state.unpinned()
+    });
+    Ok(MigrationStatus {
+        managed: bound || pending || fresh,
+        can_adopt: wrapper.managed.is_none()
+            && state.binding().is_ok()
+            && state.unpinned()
+            && (state.absent() || state.matches_target(&wrapper.node)),
+        can_restore: (bound || pending) && retained_bytes(&wrapper).is_ok(),
+        paused: state.paused(),
+    })
+}
+
+/// Private browser setup has no service authority; its launcher deliberately has no service binding.
+pub(crate) fn bind_cli_runtime_only(
+    cli: &OpenClawCli,
+    runtime: &BundledRuntime,
+) -> Result<(), String> {
+    bind_runtime(cli, runtime, Purpose::Browser)
+}
+
+pub(crate) fn bind_fresh_cli_runtime(
+    cli: &OpenClawCli,
+    runtime: &BundledRuntime,
+) -> Result<(), String> {
+    bind_runtime(cli, runtime, Purpose::Gateway)
+}
+
+fn bind_runtime(
+    cli: &OpenClawCli,
+    runtime: &BundledRuntime,
+    purpose: Purpose,
+) -> Result<(), String> {
+    let wrapper = read_wrapper(cli)?;
+    if wrapper
+        .managed
+        .as_ref()
+        .is_some_and(|metadata| metadata.binding.is_some() || metadata.pending.is_some())
+    {
+        return Err(
+            "A service-bound CLI must be updated through its Gateway runtime owner.".into(),
+        );
+    }
+    let target = bundled_target(runtime, &wrapper.node.entry)?;
+    let version = version(cli, Some(&target))?;
+    let mut metadata = managed_metadata(&wrapper, target, version, None)?;
+    metadata.purpose = purpose;
+    publish(&wrapper, &render(&metadata)?)
+}
+
+pub(crate) fn migrate(
+    cli: &OpenClawCli,
+    runtime: &BundledRuntime,
+    app_version: &str,
+    mode: Mode,
+    is_current: &dyn Fn() -> bool,
+) -> Result<MigrationOutcome, String> {
+    check_current(is_current)?;
+    let mut wrapper = read_wrapper(cli)?;
+    if wrapper
+        .managed
+        .as_ref()
+        .is_some_and(|metadata| metadata.pending.is_some())
+    {
+        return resume_pending(cli, runtime, app_version, is_current, &wrapper);
+    }
+    let mode = if mode == Mode::OwnedUpdate
+        && wrapper
+            .managed
+            .as_ref()
+            .is_some_and(|value| value.purpose == Purpose::Gateway && value.binding.is_none())
+    {
+        Mode::Fresh
+    } else {
+        mode
+    };
+    if mode == Mode::OwnedUpdate
+        && wrapper
+            .managed
+            .as_ref()
+            .and_then(|value| value.binding.as_ref())
+            .is_none()
+    {
+        return Ok(MigrationOutcome::PreservedExternal);
+    }
+    let mut state = capture(cli, None, false)?;
+    if mode == Mode::Fresh && !state.absent() {
+        return Err(CHANGED.into());
+    }
+    if state.paused() {
+        return Ok(MigrationOutcome::DeferredPaused);
+    }
+    if !state.absent()
+        && state
+            .service
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.status.as_str())
+            != Some("running")
+    {
+        return Err("The Gateway runtime state is unknown. Its installation was preserved; retry after checking Gateway status.".into());
+    }
+    // Published CLIs may lack the new projection. Explicit adoption may update their package,
+    // but only the candidate's canonical pin inspection may authorize a runtime change.
+    if state.service.runtime_intent.is_some() {
+        admit(&wrapper, &state, mode)?;
+    } else if mode == Mode::OwnedUpdate || (!state.absent() && !state.matches_target(&wrapper.node))
+    {
+        return Err(CHANGED.into());
+    }
+    let installed = version(cli, None)?;
+    let app_version = if crate::is_release_version(app_version) {
+        app_version
+    } else {
+        installed.as_str()
+    };
+    let target = bundled_target(runtime, &wrapper.node.entry)?;
+    if wrapper.managed.as_ref().is_some_and(|metadata| {
+        metadata.owns(&state)
+            && metadata.target == target
+            && metadata.package_version == app_version
+            && installed == app_version
+    }) && state.matches_bun(&target)
+    {
+        return Ok(MigrationOutcome::Current);
+    }
+    let package_updated = installed != app_version;
+    if package_updated {
+        recheck(cli, &wrapper, &state, is_current, false)?;
+        let mut command = target_command(cli, &wrapper.node)?;
+        command.args(["update", "--yes", "--json", "--tag", app_version]);
+        checked_output(command, "Gateway update")?;
+        let unverified = |reason: String| {
+            format!("The installed updater completed, but its package version could not be verified and bundled Bun was not activated: {reason}")
+        };
+        check_current(is_current).map_err(unverified)?;
+        let observed = version(cli, Some(&wrapper.node)).map_err(unverified)?;
+        if observed != app_version {
+            return Err(format!("The installed updater completed, but the CLI reports {observed} instead of {app_version}. Bundled Bun was not activated."));
+        }
+    }
+    let refusal = |reason: String| {
+        if package_updated {
+            format!(
+                "CLI package reached {app_version}, but bundled Bun was not activated: {reason}"
+            )
+        } else {
+            reason
+        }
+    };
+    if package_updated {
+        wrapper = read_wrapper(cli).map_err(refusal)?;
+        state = capture(cli, None, false).map_err(refusal)?;
+        // Core may refresh the service's definition and pin binding while preserving runtime intent.
+        admit(&wrapper, &state, mode).map_err(refusal)?;
+    }
+    let qualified = capture(cli, Some(&wrapper.node), false).map_err(refusal)?;
+    require_retained_node(&qualified, &wrapper.node, app_version).map_err(refusal)?;
+    if qualified.binding().map_err(refusal)? != state.binding().map_err(refusal)? {
+        return Err(refusal(CHANGED.into()));
+    }
+    state = qualified;
+    if mode != Mode::Fresh {
+        recheck(cli, &wrapper, &state, is_current, true).map_err(refusal)?;
+        let mut command = target_command(cli, &wrapper.node).map_err(refusal)?;
+        command.args(["update", "repair", "--yes", "--no-restart", "--json"]);
+        checked_output(command, "Gateway update repair").map_err(refusal)?;
+        check_current(is_current).map_err(refusal)?;
+        state = capture(cli, Some(&wrapper.node), false).map_err(refusal)?;
+        require_retained_node(&state, &wrapper.node, app_version).map_err(refusal)?;
+        admit(&wrapper, &state, mode).map_err(refusal)?;
+    }
+    if state.paused() {
+        return Ok(MigrationOutcome::DeferredPaused);
+    }
+    state.binding().map_err(refusal)?;
+    let target = bundled_target(runtime, &wrapper.node.entry).map_err(refusal)?;
+    if version(cli, Some(&target)).map_err(refusal)? != app_version {
+        return Err(refusal(
+            "The bundled runtime could not verify the installed app version.".into(),
+        ));
+    }
+    let recovery = backup(
+        &wrapper.path,
+        "recovery",
+        &serde_json::to_vec(&serde_json::json!({
+            "wrapper": String::from_utf8_lossy(&wrapper.bytes),
+            "service": capture_value(cli, None, false)?,
+            "retainedNode": wrapper.node,
+        }))
+        .map_err(|error| error.to_string())?,
+    )?;
+    recheck(cli, &wrapper, &state, is_current, true)?;
+    let original_binding = state.binding()?;
+    let mut metadata = managed_metadata(&wrapper, target.clone(), app_version.into(), None)?;
+    metadata.pending = Some(Pending {
+        original: original_binding.clone(),
+        original_wrapper: backup(&wrapper.path, "transition", &wrapper.bytes)?,
+        original_wrapper_sha256: digest(&wrapper.bytes),
+        mode,
+    });
+    publish(&wrapper, &render(&metadata)?)?;
+    wrapper = read_wrapper(cli)?;
+    let installed = recheck(cli, &wrapper, &state, is_current, true)
+        .and_then(|()| install(cli, &target, &state, true));
+    // The retained interpreter can inspect a failed Bun launch without depending on that Bun.
+    let candidate = capture(cli, Some(&wrapper.node), false);
+    let attempted_binding = candidate
+        .as_ref()
+        .ok()
+        .filter(|value| value.matches_bun(&target))
+        .and_then(|value| value.binding().ok());
+    let switch = installed.and_then(|()| {
+        let candidate = candidate?;
+        if !candidate.matches_bun(&target) {
+            return Err(CHANGED.into());
+        }
+        let expected = candidate.binding()?;
+        wait_healthy(cli, &target, &expected, is_current)?;
+        check_current(is_current)?;
+        let verified = capture(cli, Some(&target), true)?;
+        if verified.binding()? != expected
+            || !verified.matches_bun(&target)
+            || !verified.healthy_for(&target)
+        {
+            return Err(CHANGED.into());
+        }
+        let metadata =
+            managed_metadata(&wrapper, target.clone(), app_version.into(), Some(expected))?;
+        publish(&wrapper, &render(&metadata)?)
+    });
+    if let Err(error) = switch {
+        let restoration = restore_after_failure(
+            cli,
+            &wrapper,
+            &original_binding,
+            &target,
+            attempted_binding.as_ref(),
+            app_version,
+        );
+        return Err(match restoration {
+            Ok(()) => format!("Bundled Bun activation failed: {error} Recovery completed. Retry to use bundled Bun. Recovery backup: {}", recovery.display()),
+            Err(restore) => format!("Bundled Bun activation failed: {error} Recovery needs attention: {restore} Recovery backup: {}", recovery.display()),
+        });
+    }
+    Ok(MigrationOutcome::Migrated)
+}
+
+fn resume_pending(
+    cli: &OpenClawCli,
+    runtime: &BundledRuntime,
+    app_version: &str,
+    is_current: &dyn Fn() -> bool,
+    wrapper: &Wrapper,
+) -> Result<MigrationOutcome, String> {
+    let metadata = wrapper.managed.as_ref().ok_or(CHANGED)?;
+    let pending = metadata.pending.as_ref().ok_or(CHANGED)?;
+    let state = capture(cli, Some(&wrapper.node), false)?;
+    let selection = pending_state(metadata, &state)?;
+    if state.paused() {
+        return Ok(MigrationOutcome::DeferredPaused);
+    }
+    require_retained_node(&state, &wrapper.node, &metadata.package_version)?;
+    recheck(cli, wrapper, &state, is_current, true)?;
+    if selection == PendingState::Original {
+        publish(
+            wrapper,
+            &verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256)?,
+        )?;
+        return migrate(cli, runtime, app_version, pending.mode, is_current);
+    }
+    if selection == PendingState::Node {
+        wait_healthy(cli, &wrapper.node, &state.binding()?, is_current)?;
+        recheck(cli, wrapper, &state, is_current, true)?;
+        let verified = capture(cli, Some(&wrapper.node), true)?;
+        if verified.binding()? != state.binding()? || !verified.healthy_for(&wrapper.node) {
+            return Err(CHANGED.into());
+        }
+        publish(wrapper, &retained_bytes(wrapper)?)?;
+        return Err("The interrupted transition restored the previous Node runtime. Choose Use bundled runtime again when ready; a stopped Gateway remains stopped.".into());
+    }
+    let result = (|| {
+        let current = capture(cli, Some(&wrapper.node), false)?;
+        if !current.matches_bun(&metadata.target) {
+            return Err(CHANGED.into());
+        }
+        let binding = current.binding()?;
+        wait_healthy(cli, &metadata.target, &binding, is_current)?;
+        let verified = capture(cli, Some(&metadata.target), true)?;
+        if verified.binding()? != binding || !verified.healthy_for(&metadata.target) {
+            return Err(CHANGED.into());
+        }
+        same_wrapper(wrapper)?;
+        check_current(is_current)?;
+        let mut completed = metadata.clone();
+        completed.binding = Some(binding);
+        completed.pending = None;
+        publish(wrapper, &render(&completed)?)
+    })();
+    if let Err(error) = result {
+        let recovery = restore_retained_node(cli, &|| true);
+        return Err(match recovery {
+            Ok(()) => format!("Interrupted Bun activation failed: {error} The retained Node runtime was restored. Retry to use bundled Bun."),
+            Err(recovery) => format!("Interrupted Bun activation failed: {error} Recovery needs attention: {recovery}"),
+        });
+    }
+    migrate(cli, runtime, app_version, Mode::OwnedUpdate, is_current)
+}
+
+pub(crate) fn restore_retained_node(
+    cli: &OpenClawCli,
+    is_current: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let wrapper = read_wrapper(cli)?;
+    let metadata = wrapper
+        .managed
+        .as_ref()
+        .ok_or("This CLI is not managed by OpenClaw-Tauri.")?;
+    let state = capture(cli, Some(&wrapper.node), false)?;
+    if metadata.pending.is_some() {
+        pending_state(metadata, &state)?;
+        check_current(is_current)?;
+    } else {
+        admit(&wrapper, &state, Mode::OwnedUpdate)?;
+    }
+    if state.paused() {
+        return Err(
+            "The Gateway is paused. Start it before restoring the retained Node runtime.".into(),
+        );
+    }
+    let original = retained_bytes(&wrapper)?;
+    require_retained_node(&state, &wrapper.node, &metadata.package_version)?;
+    recheck(cli, &wrapper, &state, is_current, true)?;
+    install(cli, &wrapper.node, &state, false)?;
+    let restored = capture(cli, Some(&wrapper.node), false)?;
+    if !restored.matches_target(&wrapper.node) || !restored.unpinned() {
+        return Err(CHANGED.into());
+    }
+    wait_healthy(cli, &wrapper.node, &restored.binding()?, is_current)?;
+    let verified = capture(cli, Some(&wrapper.node), true)?;
+    if verified.binding()? != restored.binding()? || !verified.healthy_for(&wrapper.node) {
+        return Err(CHANGED.into());
+    }
+    check_current(is_current)?;
+    publish(&wrapper, &original)
+}
+
+fn admit(wrapper: &Wrapper, state: &Snapshot, mode: Mode) -> Result<(), String> {
+    state.binding()?;
+    if mode == Mode::Fresh {
+        return if state.absent()
+            && state.unpinned()
+            && wrapper
+                .managed
+                .as_ref()
+                .is_none_or(|value| value.purpose == Purpose::Gateway && value.binding.is_none())
+        {
+            Ok(())
+        } else {
+            Err(CHANGED.into())
+        };
+    }
+    if let Some(metadata) = &wrapper.managed {
+        return if metadata.owns(state) {
+            Ok(())
+        } else {
+            Err(CHANGED.into())
+        };
+    }
+    if mode == Mode::Adopt && !state.unpinned() {
+        return Err("An existing runtime pin prevents switching to bundled Bun.".into());
+    }
+    if mode == Mode::Adopt && (state.absent() || state.matches_target(&wrapper.node)) {
+        Ok(())
+    } else {
+        Err(CHANGED.into())
+    }
+}
+
+fn restore_after_failure(
+    cli: &OpenClawCli,
+    wrapper: &Wrapper,
+    original: &Binding,
+    target: &Target,
+    attempted: Option<&Binding>,
+    expected_version: &str,
+) -> Result<(), String> {
+    same_wrapper(wrapper)?;
+    let current = capture(cli, Some(&wrapper.node), false)?;
+    let current_binding = current.binding()?;
+    if &current_binding != original
+        && (attempted != Some(&current_binding) || !current.matches_bun(target))
+    {
+        return Err(CHANGED.into());
+    }
+    if &current_binding == original && attempted.is_none() {
+        let pending = wrapper
+            .managed
+            .as_ref()
+            .and_then(|metadata| metadata.pending.as_ref())
+            .ok_or(CHANGED)?;
+        let bytes = verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256)?;
+        let previous = decode_wrapper(wrapper.path.clone(), bytes)?;
+        let previous_target = previous
+            .managed
+            .as_ref()
+            .map(|metadata| &metadata.target)
+            .unwrap_or(&previous.node);
+        if let Ok(probed) = capture(cli, Some(previous_target), !current.absent()) {
+            if probed.binding()? != *original {
+                return Err(CHANGED.into());
+            }
+            if probed.absent() || probed.healthy_for(previous_target) {
+                return publish(wrapper, &previous.bytes);
+            }
+        }
+    }
+    let before = current.binding()?;
+    require_retained_node(&current, &wrapper.node, expected_version)?;
+    if capture(cli, Some(&wrapper.node), false)?.binding()? != before {
+        return Err(CHANGED.into());
+    }
+    install(cli, &wrapper.node, &current, false)?;
+    let restored = capture(cli, Some(&wrapper.node), false)?;
+    if !restored.matches_target(&wrapper.node) || !restored.unpinned() {
+        return Err(CHANGED.into());
+    }
+    wait_healthy(cli, &wrapper.node, &restored.binding()?, &|| true)?;
+    let verified = capture(cli, Some(&wrapper.node), true)?;
+    if verified.binding()? != restored.binding()? || !verified.healthy_for(&wrapper.node) {
+        return Err(CHANGED.into());
+    }
+    if wrapper.managed.is_some() {
+        publish(wrapper, &retained_bytes(wrapper)?)?;
+    }
+    Ok(())
+}
+
+fn install(cli: &OpenClawCli, target: &Target, state: &Snapshot, bun: bool) -> Result<(), String> {
+    let mut command = target_command(cli, target)?;
+    command.args([
+        "gateway",
+        "install",
+        "--force",
+        "--json",
+        "--runtime",
+        if bun { "bun" } else { "node" },
+    ]);
+    if bun {
+        command.arg("--runtime-path").arg(&target.runtime);
+    }
+    if let Some(port) = state.gateway.get("port").and_then(Value::as_u64) {
+        command.args(["--port", &port.to_string()]);
+    }
+    if state.service.command.as_ref().is_some_and(|command| {
+        command
+            .program_arguments
+            .iter()
+            .any(|arg| arg == "--allow-unconfigured")
+    }) {
+        command.arg("--allow-unconfigured");
+    }
+    let output = checked_output(command, "Gateway runtime installation")?;
+    let result: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Gateway install returned invalid JSON.")?;
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err("Gateway runtime installation did not succeed.".into());
+    }
+    Ok(())
+}
+
+fn wait_healthy(
+    cli: &OpenClawCli,
+    target: &Target,
+    binding: &Binding,
+    is_current: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    // The core updater's first-run migrations can exceed the ordinary connection probe window.
+    let deadline = Instant::now() + Duration::from_secs(600);
+    loop {
+        check_current(is_current)?;
+        let state = capture(cli, Some(target), true)?;
+        if state.binding()? != *binding || !state.matches_target(target) {
+            return Err(CHANGED.into());
+        }
+        if state.healthy_for(target) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "The Gateway did not become healthy within its migration startup window.".into(),
+            );
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn recheck(
+    cli: &OpenClawCli,
+    wrapper: &Wrapper,
+    expected: &Snapshot,
+    is_current: &dyn Fn() -> bool,
+    require_intent: bool,
+) -> Result<(), String> {
+    check_current(is_current)?;
+    same_wrapper(wrapper)?;
+    let current = capture(
+        cli,
+        wrapper
+            .managed
+            .as_ref()
+            .and_then(|value| value.pending.as_ref())
+            .map(|_| &wrapper.node),
+        false,
+    )?;
+    if require_intent {
+        if current.binding()? != expected.binding()? || current.paused() != expected.paused() {
+            return Err(CHANGED.into());
+        }
+    } else if current.service.revision != expected.service.revision
+        || current.service.command != expected.service.command
+        || current.config != expected.config
+        || current.gateway.get("port") != expected.gateway.get("port")
+        || current.absent() != expected.absent()
+        || current.paused() != expected.paused()
+    {
+        return Err(CHANGED.into());
+    }
+    same_wrapper(wrapper)?;
+    check_current(is_current)
+}
+
+// Older published status has no layout projection. Accept only the ordinary generated
+// Node/Bun launch shape; unfamiliar runtime flags remain with their existing owner.
+fn legacy_service_entry(args: &[String]) -> Option<&str> {
+    let script = args.iter().skip(1).position(|arg| {
+        !matches!(arg.as_str(), "--no-install" | "--no-warnings")
+            && !arg.starts_with("--max-old-space-size=")
+    })? + 1;
+    (args.get(script + 1).map(String::as_str) == Some("gateway")).then(|| args[script].as_str())
+}
+
+fn same_package_entry(service: &Path, cli: &Path) -> bool {
+    // The daemon owner prefers dist/index while install-cli's wrapper uses dist/entry.
+    // The full service revision still binds its exact argv after this package admission.
+    service.parent() == cli.parent()
+        && service
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "index.js" | "index.mjs" | "entry.js" | "entry.mjs"))
+}
+
+fn capture(cli: &OpenClawCli, target: Option<&Target>, probe: bool) -> Result<Snapshot, String> {
+    serde_json::from_value(capture_value(cli, target, probe)?)
+        .map_err(|_| "Gateway status returned incomplete runtime metadata.".into())
+}
+
+fn capture_value(cli: &OpenClawCli, target: Option<&Target>, probe: bool) -> Result<Value, String> {
+    let mut command = cli_command(cli, target)?;
+    command.args(["gateway", "status", "--deep", "--json"]);
+    if !probe {
+        command.arg("--no-probe");
+    }
+    let output = checked_output(command, "Gateway runtime inspection")?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Gateway status returned invalid JSON.".into())
+}
+
+fn version(cli: &OpenClawCli, target: Option<&Target>) -> Result<String, String> {
+    let mut command = cli_command(cli, target)?;
+    command.arg("--version");
+    let output = checked_output(command, "CLI version verification")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let normalized = text.trim().strip_prefix("OpenClaw ").unwrap_or(text.trim());
+    normalized
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "The CLI did not report its version.".into())
+}
+
+fn cli_command(cli: &OpenClawCli, target: Option<&Target>) -> Result<Command, String> {
+    match target {
+        Some(target) => target_command(cli, target),
+        None => cli
+            .command([] as [&str; 0])
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn target_command(cli: &OpenClawCli, target: &Target) -> Result<Command, String> {
+    let mut command = Command::new(&target.runtime);
+    if target.bun {
+        command.arg("--no-install");
+    }
+    let mut paths = vec![target
+        .runtime
+        .parent()
+        .ok_or("Runtime path has no parent.")?
+        .to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &cli.command_path().map_err(|error| error.to_string())?,
+    ));
+    command
+        .arg(&target.entry)
+        .env(
+            "PATH",
+            std::env::join_paths(paths).map_err(|error| error.to_string())?,
+        )
+        .env_remove("OPENCLAW_SQLITE_LIBRARY")
+        .env_remove("LD_LIBRARY_PATH");
+    if let Some(sqlite) = &target.sqlite {
+        command.env("OPENCLAW_SQLITE_LIBRARY", sqlite);
+    }
+    Ok(command)
+}
+
+fn checked_output(mut command: Command, label: &str) -> Result<Output, String> {
+    command.stdin(std::process::Stdio::null());
+    let output = command
+        .output()
+        .map_err(|error| format!("{label} could not start: {error}"))?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    Err(format!(
+        "{label} failed: {}",
+        output_tail(&output.stderr).unwrap_or_else(|| output.status.to_string())
+    ))
+}
+
+fn bundled_target(runtime: &BundledRuntime, entry: &Path) -> Result<Target, String> {
+    for path in [
+        &runtime.bun,
+        runtime.sqlite.as_ref().unwrap_or(&runtime.bun),
+    ] {
+        if !path.is_absolute()
+            || fs::canonicalize(path).map_err(|error| error.to_string())? != *path
+        {
+            return Err("Bundled runtime paths must be immutable, absolute files.".into());
+        }
+    }
+    Ok(Target {
+        runtime: runtime.bun.clone(),
+        entry: entry.to_path_buf(),
+        sqlite: runtime.sqlite.clone(),
+        bun: true,
+    })
+}
+
+fn read_wrapper(cli: &OpenClawCli) -> Result<Wrapper, String> {
+    let path = cli
+        .managed_wrapper()
+        .ok_or("This CLI is independently managed; its runtime was preserved.")?;
+    let bytes = read_regular(&path)?;
+    decode_wrapper(path, bytes)
+}
+
+fn decode_wrapper(path: PathBuf, bytes: Vec<u8>) -> Result<Wrapper, String> {
+    let text = std::str::from_utf8(&bytes).map_err(|_| "The managed CLI wrapper is not UTF-8.")?;
+    if let Some(line) = text
+        .lines()
+        .nth(1)
+        .and_then(|line| line.strip_prefix(MARKER))
+    {
+        let managed: Managed = serde_json::from_str(line)
+            .map_err(|_| "The app's runtime ownership marker is invalid.")?;
+        if render(&managed)? != bytes
+            || managed.retained_wrapper.parent() != path.parent()
+            || !managed
+                .retained_wrapper
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".openclaw-tauri-node-"))
+        {
+            return Err(CHANGED.into());
+        }
+        if managed.pending.as_ref().is_some_and(|pending| {
+            pending.original_wrapper.parent() != path.parent()
+                || !pending.original_wrapper.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".openclaw-tauri-transition-")
+                })
+        }) {
+            return Err(CHANGED.into());
+        }
+        return Ok(Wrapper {
+            path,
+            bytes,
+            node: managed.node.clone(),
+            managed: Some(managed),
+        });
+    }
+    let prefix = path.parent().and_then(Path::parent).ok_or(CHANGED)?;
+    let node = legacy_node(text, prefix)?;
+    Ok(Wrapper {
+        path,
+        bytes,
+        node,
+        managed: None,
+    })
+}
+
+fn legacy_node(text: &str, prefix: &Path) -> Result<Target, String> {
+    let start = format!(
+        "#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"",
+        prefix.display()
+    );
+    let entry = text
+        .strip_prefix(&start)
+        .and_then(|text| text.strip_suffix("\" \"$@\"\n"))
+        .ok_or("The CLI wrapper is not a canonical managed Node installation; it was preserved.")?;
+    if entry
+        .chars()
+        .any(|ch| matches!(ch, '\n' | '\r' | '$' | '`' | '"' | '\\'))
+        || !entry.ends_with("/dist/entry.js")
+    {
+        return Err(CHANGED.into());
+    }
+    let entry = fs::canonicalize(entry).map_err(|error| error.to_string())?;
+    let root = fs::canonicalize(prefix).map_err(|error| error.to_string())?;
+    let runtime =
+        fs::canonicalize(prefix.join("tools/node/bin/node")).map_err(|error| error.to_string())?;
+    if !entry.starts_with(&root) || !runtime.starts_with(root.join("tools")) {
+        return Err(CHANGED.into());
+    }
+    Ok(Target {
+        runtime,
+        entry,
+        sqlite: None,
+        bun: false,
+    })
+}
+
+fn managed_metadata(
+    wrapper: &Wrapper,
+    target: Target,
+    package_version: String,
+    binding: Option<Binding>,
+) -> Result<Managed, String> {
+    let (retained_wrapper, retained_wrapper_sha256) = match &wrapper.managed {
+        Some(metadata) => (
+            metadata.retained_wrapper.clone(),
+            metadata.retained_wrapper_sha256.clone(),
+        ),
+        None => (
+            backup(&wrapper.path, "node", &wrapper.bytes)?,
+            digest(&wrapper.bytes),
+        ),
+    };
+    Ok(Managed {
+        purpose: Purpose::Gateway,
+        target,
+        node: wrapper.node.clone(),
+        retained_wrapper,
+        retained_wrapper_sha256,
+        package_version,
+        binding,
+        pending: None,
+    })
+}
+
+fn retained_bytes(wrapper: &Wrapper) -> Result<Vec<u8>, String> {
+    let metadata = wrapper.managed.as_ref().ok_or(CHANGED)?;
+    verified_backup(
+        &metadata.retained_wrapper,
+        &metadata.retained_wrapper_sha256,
+    )
+}
+
+fn verified_backup(path: &Path, expected: &str) -> Result<Vec<u8>, String> {
+    let bytes = read_regular(path)?;
+    if digest(&bytes) != expected {
+        return Err("The recovery wrapper changed; it was not restored.".into());
+    }
+    Ok(bytes)
+}
+
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn render(metadata: &Managed) -> Result<Vec<u8>, String> {
+    let quoted = |path: &Path| -> Result<String, String> {
+        let value = path
+            .to_str()
+            .filter(|value| !value.contains(['\n', '\r', '\0']))
+            .ok_or("Runtime paths must be single-line UTF-8.")?;
+        Ok(format!("'{}'", value.replace('\'', "'\\''")))
+    };
+    let sqlite = metadata
+        .target
+        .sqlite
+        .as_ref()
+        .map(|path| quoted(path).map(|value| format!("export OPENCLAW_SQLITE_LIBRARY={value}\n")))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(format!(
+        "#!/bin/sh\n{MARKER}{}\n{sqlite}exec {} --no-install {} \"$@\"\n",
+        serde_json::to_string(metadata).map_err(|error| error.to_string())?,
+        quoted(&metadata.target.runtime)?,
+        quoted(&metadata.target.entry)?
+    )
+    .into_bytes())
+}
+
+fn read_regular(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect CLI ownership: {error}"))?;
+    if !metadata.is_file() || metadata.len() > 65536 {
+        return Err(CHANGED.into());
+    }
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+fn same_wrapper(wrapper: &Wrapper) -> Result<(), String> {
+    if read_regular(&wrapper.path)? == wrapper.bytes {
+        Ok(())
+    } else {
+        Err(CHANGED.into())
+    }
+}
+
+fn backup(wrapper: &Path, kind: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let path = wrapper.with_file_name(format!(
+        ".openclaw-tauri-{kind}-{}.backup",
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn publish(wrapper: &Wrapper, bytes: &[u8]) -> Result<(), String> {
+    let temporary = wrapper
+        .path
+        .with_file_name(format!(".openclaw-tauri-launcher-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        same_wrapper(wrapper)?;
+        fs::rename(&temporary, &wrapper.path).map_err(|error| error.to_string())
+    })();
+    let _ = fs::remove_file(temporary);
+    result
+}
+
+fn check_current(is_current: &dyn Fn() -> bool) -> Result<(), String> {
+    if is_current() {
+        Ok(())
+    } else {
+        Err("Runtime setup was superseded; retry from the current Gateway selection.".into())
+    }
+}
+
+#[cfg(test)]
+#[path = "runtime_migration_tests.rs"]
+mod tests;

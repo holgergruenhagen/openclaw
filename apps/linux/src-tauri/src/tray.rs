@@ -27,6 +27,10 @@ const QUICKCHAT_SHORTCUT_ID: &str = "quickchat-shortcut";
 const START_ID: &str = "start-gateway";
 const STOP_ID: &str = "stop-gateway";
 const RESTART_ID: &str = "restart-gateway";
+#[cfg(not(target_os = "windows"))]
+const ADOPT_RUNTIME_ID: &str = "adopt-bundled-runtime";
+#[cfg(not(target_os = "windows"))]
+const RESTORE_RUNTIME_ID: &str = "restore-node-runtime";
 const QUIT_ID: &str = "quit";
 
 pub struct TrayHandles {
@@ -246,9 +250,12 @@ pub fn build(
     } else {
         menu_builder
     };
+    let menu_builder = menu_builder.separator().items(&[&start, &stop, &restart]);
+    #[cfg(not(target_os = "windows"))]
+    let menu_builder = menu_builder
+        .text(ADOPT_RUNTIME_ID, "Use bundled runtime…")
+        .text(RESTORE_RUNTIME_ID, "Restore previous Node runtime…");
     let menu = menu_builder
-        .separator()
-        .items(&[&start, &stop, &restart])
         .separator()
         .text(QUIT_ID, "Quit OpenClaw")
         .build()?;
@@ -448,8 +455,47 @@ fn handle_menu(
             app.state::<GatewayOperationQueue>()
                 .submit_action(GatewayAction::Restart);
         }
+        #[cfg(not(target_os = "windows"))]
+        ADOPT_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::Adopt),
+        #[cfg(not(target_os = "windows"))]
+        RESTORE_RUNTIME_ID => confirm_runtime_action(app, crate::RuntimeAction::RestoreNode),
         _ => {}
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn confirm_runtime_action(app: &AppHandle, action: crate::RuntimeAction) {
+    use tauri_plugin_dialog::MessageDialogButtons;
+    if app.state::<DesktopState>().is_quitting() {
+        return;
+    }
+    let (title, message, button) = match action {
+        crate::RuntimeAction::Adopt => (
+            "Use bundled runtime",
+            "Update the CLI to this app's version, then use bundled Bun for this Gateway? The update keeps backups and may restart the Gateway. Saved runtime pins are preserved and can block the switch after the CLI update. Adoption retains Node for recovery and lets future app updates manage this installation.",
+            "Use bundled runtime",
+        ),
+        crate::RuntimeAction::RestoreNode => (
+            "Restore previous Node runtime",
+            "Restore and verify the retained Node Gateway? This installation will stop following the app's bundled runtime until you choose Use bundled runtime again.",
+            "Restore Node",
+        ),
+    };
+    let current_app = app.clone();
+    app.dialog()
+        .message(message)
+        .title(title)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            button.into(),
+            "Cancel".into(),
+        ))
+        .show(move |accepted| {
+            if accepted && !current_app.state::<DesktopState>().is_quitting() {
+                current_app
+                    .state::<GatewayOperationQueue>()
+                    .submit_runtime(action);
+            }
+        });
 }
 
 pub fn publish_keep_awake(app: &AppHandle, status: KeepAwakeStatus) {

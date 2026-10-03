@@ -32,6 +32,15 @@ import time
 START_FAILURE = "Fixture: systemd user service is unavailable."
 
 
+def role_matches(actual_role, expected_role):
+    roles = expected_role if isinstance(expected_role, tuple) else (expected_role,)
+    # WebKitGTK versions expose the same button as either AT-SPI role name.
+    buttons = ("button", "push button")
+    return actual_role in roles or (
+        actual_role in buttons and any(role in buttons for role in roles)
+    )
+
+
 def exercise(app, Atspi, GLib, *, remote_only, local_start_failure, inline_fixture, binary, gateway_switch):
     last_headings = set()
     last_controls = set()
@@ -97,8 +106,7 @@ def exercise(app, Atspi, GLib, *, remote_only, local_start_failure, inline_fixtu
                             content.startswith(label) if prefix else content == label
                         )
                     else:
-                        roles = role if isinstance(role, tuple) else (role,)
-                        matches = actual_role in roles and (
+                        matches = role_matches(actual_role, role) and (
                             name.startswith(label) if prefix else name == label
                         )
                     # Application-root state queries can block in GTK; only

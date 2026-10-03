@@ -20,9 +20,9 @@ Gateways. It:
 
 - walks new users through choosing a local Gateway, a discovered remote Gateway,
   a manually entered Gateway URL, or an SSH tunnel
-- installs the OpenClaw CLI and Node in a private managed runtime when local
-  setup needs them, rather than requiring a global CLI install; release builds
-  install the stable channel automatically, while development builds ask for
+- installs the OpenClaw CLI and runs fresh local installations on the bundled
+  OpenClaw Bun fork, without requiring a global CLI install; release builds
+  install their matching stable version, while development builds ask for
   the channel first
 - attaches to a healthy Gateway before attempting service changes
 - delegates install, start, stop, and restart operations to the CLI-managed systemd user service
@@ -79,6 +79,12 @@ runtime installer. See [Chrome extension](/tools/chrome-extension) for approval,
 disconnection, and manual recovery.
 
 ### Desktop compatibility
+
+The companion shares one Bun fork pin with the native macOS app and CI. Runtime
+admission, SQLite safety checks, and the fork's disabled implicit package
+auto-install remain enabled. Windows Tauri test builds retain their existing
+runtime until a signed Windows fork is available; an unsigned dry-run is not
+shippable. See [Bun compatibility](/install/bun-compatibility).
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
 newer plus a `libstdc++` that provides `GLIBCXX_3.4.30`. Ubuntu 22.04 and
@@ -140,6 +146,33 @@ after the new dashboard loads successfully.
 
 The macOS Tauri build is named **OpenClaw-Tauri** and keeps its saved connections
 separate from the native **OpenClaw** app.
+
+### Adopt the bundled runtime
+
+Fresh local installations record explicit app ownership. Older installations
+remain unchanged until you choose **Use bundled runtime…** in the tray menu and
+confirm. Historical Tauri and terminal installations have identical launchers,
+so automatic adoption could take over a separately managed Gateway. Operator
+runtime pins and external CLI overrides remain under their existing owner.
+
+Adoption uses the installed CLI's updater first, then switches the same package
+version to bundled Bun and verifies Gateway health. The app retains a recovery
+backup and Node tools; a failed switch restores and verifies Node. Choose
+**Use bundled runtime…** again to retry, or **Restore previous Node runtime…**
+to leave app runtime management after a successful adoption. A stopped Gateway
+stays stopped until you choose **Start Gateway**.
+
+The confirmed CLI update may restart the Gateway and can finish even if a saved
+runtime pin prevents the later Bun switch. In that case the pin is preserved,
+the installation remains unadopted, and the app reports the completed package
+update separately.
+
+Once adopted, future app updates use that same migration owner automatically.
+This matches the native macOS app's updater-first, same-version switch and
+rollback pattern; only legacy unmarked installations need explicit adoption.
+The CLI still owns configuration, database migrations, backups, and service
+installation. The companion preserves independently selected runtime pins.
+Development app builds retain the installed CLI version.
 
 ### Desktop sharing
 
@@ -287,7 +320,7 @@ either Linux bundle, install the packages and inspection tool explicitly:
 
 ```bash
 sudo apt update && sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-tools patchelf xdg-utils
+  gstreamer1.0-plugins-bad gstreamer1.0-tools patchelf xdg-utils unzip
 ```
 
 The packaging script stages only that media capability set before Tauri invokes

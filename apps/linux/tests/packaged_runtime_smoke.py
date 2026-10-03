@@ -91,6 +91,9 @@ GSTREAMER_TOOL_NAMES = (
     "gst-launch-1.0",
 )
 
+BUNDLED_BUN_PATH = Path("usr/lib/OpenClaw/desktop-runtime/bin/bun")
+LINUX_RUNTIME_PREFIX = b"OPENCLAW-BUN-RUNTIME-V1\n"
+
 
 def version_key(version):
     return tuple(int(part) for part in version.split("."))
@@ -212,6 +215,35 @@ def read_abi_requirements(path, source, readelf, architecture):
     )
 
 
+def read_bundled_bun_requirements(path, source, readelf, architecture):
+    manifest_path = path.parent.parent / "manifest.json"
+    for candidate in (path, path.parent, path.parent.parent, manifest_path):
+        if candidate.is_symlink():
+            raise RuntimeError(f"{source} has a redirected runtime resource")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        expected = manifest["files"]["bin/bun"]
+        if manifest["platform"] != "linux" or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError("invalid Linux runtime identity")
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"{source} has an invalid runtime manifest") from error
+    # Staging envelopes Bun so linuxdeploy cannot rewrite its ELF bytes. Decode
+    # only this owned resource, then apply the ordinary ABI policy to its raw ELF.
+    with tempfile.TemporaryDirectory(prefix="openclaw-bun-abi-") as temporary:
+        decoded = Path(temporary) / "bun"
+        with path.open("rb") as encoded, decoded.open("wb") as output:
+            if encoded.read(len(LINUX_RUNTIME_PREFIX)) != LINUX_RUNTIME_PREFIX:
+                raise RuntimeError(f"{source} has an invalid runtime envelope")
+            shutil.copyfileobj(encoded, output)
+        if sha256(decoded) != expected:
+            raise RuntimeError(f"{source} runtime checksum mismatch")
+        if not is_regular_elf(decoded):
+            raise RuntimeError(f"{source} does not contain an ELF runtime")
+        if read_elf_architecture(decoded, source, readelf) != architecture:
+            raise RuntimeError(f"{source} architecture does not match the AppImage")
+        return read_abi_requirements(decoded, source, readelf, architecture)
+
+
 def collect_abi_report(appimage, appdir, readelf=None):
     readelf = readelf or shutil.which("readelf")
     if readelf is None:
@@ -237,6 +269,7 @@ def collect_abi_report(appimage, appdir, readelf=None):
             "source": "appimage-runtime",
         }
     ]
+    bundled_bun = appdir / BUNDLED_BUN_PATH
     candidates.extend(
         {
             "path": path,
@@ -244,8 +277,14 @@ def collect_abi_report(appimage, appdir, readelf=None):
             "source": "appdir",
         }
         for path in appdir.rglob("*")
-        if is_regular_elf(path)
+        if path != bundled_bun and is_regular_elf(path)
     )
+    if bundled_bun.parent.parent.exists() or bundled_bun.parent.parent.is_symlink():
+        candidates.append({
+            "path": bundled_bun,
+            "reportPath": BUNDLED_BUN_PATH.as_posix(),
+            "source": "appdir",
+        })
     files = []
     for candidate in sorted(
         candidates,
@@ -255,7 +294,11 @@ def collect_abi_report(appimage, appdir, readelf=None):
             {
                 "path": candidate["reportPath"],
                 "source": candidate["source"],
-                "requires": read_abi_requirements(
+                "requires": (
+                    read_bundled_bun_requirements
+                    if candidate["path"] == bundled_bun
+                    else read_abi_requirements
+                )(
                     candidate["path"],
                     candidate["reportPath"],
                     readelf,

@@ -131,6 +131,8 @@ export async function preparePackageActivation(
     prepared.journal,
     assertOriginal,
     prepared.initial,
+    undefined,
+    options.onWarning,
   );
   return { ...prepared, ...owner };
 }

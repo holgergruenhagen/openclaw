@@ -3,6 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { requireDirectorySync, syncDirectory } from "./directory-durability.js";
 import { hasErrnoCode } from "./errors.js";
 import {
@@ -17,6 +18,7 @@ import {
   type PackageActivationJournal,
   type PackageActivationPhase,
   type PackageActivationRecord,
+  type PackageActivationDescriptor,
   encodePackageActivationLauncher,
   isPackageActivationComplete,
 } from "./package-update-activation-journal.js";
@@ -29,11 +31,13 @@ import {
 } from "./package-update-filesystem.js";
 import {
   createPackageIntegrityReader,
+  isPackageIntegrityResourceError,
   packageIntegrityDifferences,
   PackageIntegrityMismatchError,
-  type PackageIntegrityFingerprint,
 } from "./package-update-integrity.js";
 import { assertManagedUpdateLeaseDatabaseIdentity } from "./update-managed-service-handoff-database.js";
+
+const log = createSubsystemLogger("update/package-integrity");
 
 export function createPublicationOwner(
   anchor: string,
@@ -43,9 +47,11 @@ export function createPublicationOwner(
   assertJournalCurrent: (expected: PackageActivationRecord) => void = journal.assertCurrent.bind(
     journal,
   ),
+  onWarning: (message: string) => void = (message) => log.warn(message),
 ) {
   let record = initial;
   const descriptor = record.descriptor;
+  let candidateWarningRecorded = false;
   let retirementSelected: "previous" | "candidate" | undefined;
   const live = descriptor.authority.installKey;
   const root = (name: string) => path.join(anchor, name);
@@ -150,7 +156,7 @@ export function createPublicationOwner(
   };
   const matches = async (
     file: string,
-    expected: PackageIntegrityFingerprint,
+    expected: PackageActivationDescriptor["candidate"],
     logical: string,
     contents = true,
   ) => {
@@ -166,12 +172,31 @@ export function createPublicationOwner(
     }
     // A prepared descriptor carries its in-process observation, so settled unchanged
     // files are not re-read. A recovery process parses one without and re-reads all.
-    const observed = await createPackageIntegrityReader().tree(file, logical, expected);
-    if (!isDeepStrictEqual(observed, expected)) {
-      throw new PackageIntegrityMismatchError(
-        `Package publication object changed: ${file}`,
-        packageIntegrityDifferences(expected, observed),
+    if ("digest" in expected) {
+      try {
+        const observed = await createPackageIntegrityReader().tree(file, logical, expected);
+        if (!isDeepStrictEqual(observed, expected)) {
+          throw new PackageIntegrityMismatchError(
+            `Package publication object changed: ${file}`,
+            packageIntegrityDifferences(expected, observed),
+          );
+        }
+        return true;
+      } catch (error) {
+        if (expected !== descriptor.candidate || !isPackageIntegrityResourceError(error)) {
+          throw error;
+        }
+      }
+    }
+    const observed = await createPackageIntegrityReader().directoryIdentity(file);
+    if (observed?.identity !== expected.identity || observed.version !== expected.version) {
+      throw new Error(`Package publication object changed: ${file}`);
+    }
+    if (!candidateWarningRecorded) {
+      onWarning(
+        "candidate package fingerprint incomplete; activation requires the directory identity, package version and launchers; full package contents are unverified",
       );
+      candidateWarningRecorded = true;
     }
     return true;
   };

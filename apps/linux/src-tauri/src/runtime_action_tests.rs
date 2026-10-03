@@ -17,45 +17,35 @@ impl Fixture {
             serde_json::to_vec(&fixture.healthy()).unwrap(),
         )
         .unwrap();
-        let script = format!(
-            r##"#!/bin/sh
-case "$*" in
-  *--version*) printf 'OpenClaw 2026.10.1\n' ;;
-  *'gateway status'*)
-    /bin/cat {root}/state.json
-    if test -f {root}/next.json; then /bin/mv {root}/next.json {root}/state.json; fi ;;
-  *'gateway install'*)
-    printf 'install\n' >> {root}/calls
-    printf '%s\n' "$@" > {root}/args
-    if test -f {root}/reject; then printf 'changed pin or definition\n' >&2; exit 1; fi
-    /bin/cp {root}/healthy.json {root}/state.json
-    if test -f {root}/replacement-launcher; then /bin/cp {root}/replacement-launcher {root}/bin/openclaw; fi
-    printf '{{"ok":true}}\n' ;;
-  *) printf 'unexpected command\n' >&2; exit 8 ;;
-esac
-"##,
-            root = quote(&fixture.0).unwrap()
-        );
-        fixture.executable(&fixture.0.join("bin/openclaw"), &script);
+        // A concurrent fork must never inherit a writable descriptor for an executed fixture.
+        symlink(Self::script(), fixture.0.join("bin/openclaw")).unwrap();
         fixture
     }
 
-    fn executable(&self, path: &Path, text: &str) {
-        fs::write(path, text).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    fn script() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-action-cli.sh")
     }
 
     fn canonical_launcher(&self) -> PathBuf {
         let wrapper = self.0.join("bin/openclaw");
-        let script = fs::read_to_string(&wrapper).unwrap();
         let node = self.0.join("tools/node/bin/node");
         fs::create_dir_all(node.parent().unwrap()).unwrap();
-        self.executable(&node, &script);
-        self.executable(&self.runtime().bun, &script);
+        symlink(Self::script(), node).unwrap();
         let entry = self.0.join("package/dist/entry.js");
         fs::create_dir_all(entry.parent().unwrap()).unwrap();
         fs::write(&entry, "fixture").unwrap();
-        fs::write(&wrapper, format!("#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"{}\" \"$@\"\n", self.0.display(), entry.display())).unwrap();
+        fs::remove_file(&wrapper).unwrap();
+        // Canonical parsing requires path-specific bytes. A child owns the writer, so Rust test
+        // forks cannot inherit it; waiting for that writer proves it closed before execution.
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\"", "fixture"])
+            .arg(&wrapper)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer.stdin.take().unwrap().write_all(format!("#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}/tools/node/bin/node\" \"{}\" \"$@\"\n", self.0.display(), entry.display()).as_bytes()).unwrap();
+        assert!(writer.wait().unwrap().success());
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
         wrapper
     }
 
@@ -155,8 +145,32 @@ fn fresh_install_carries_null_definition_and_bundled_path() {
 
 #[test]
 fn fresh_install_marks_a_preexisting_canonical_launcher_after_health() {
+    const CHILD: &str = "OPENCLAW_RUNTIME_ACTION_EXECUTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Isolate publication and execution from sibling tests that fork while the launcher is written.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", std::thread::current().name().unwrap()])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"));
+        return;
+    }
     let fixture = Fixture::new();
     let wrapper = fixture.canonical_launcher();
+    assert!(Command::new("/bin/cp")
+        .arg(Fixture::script())
+        .arg(&fixture.runtime().bun)
+        .status()
+        .unwrap()
+        .success());
+    fs::set_permissions(&fixture.runtime().bun, fs::Permissions::from_mode(0o700)).unwrap();
     fixture.write_state(&fixture.absent());
     let cli = fixture.cli();
     fresh(&cli, &fixture.runtime(), &|| true).unwrap();
@@ -166,6 +180,8 @@ fn fresh_install_marks_a_preexisting_canonical_launcher_after_health() {
     assert_eq!(launcher.purpose, Purpose::Gateway);
     assert_eq!(launcher.runtime, fixture.runtime());
     assert!(inspect(&cli).unwrap().healthy_for(&fixture.runtime()));
+    let executables = fs::read_to_string(fixture.0.join("executables")).unwrap();
+    assert_eq!(executables.lines().last(), fixture.runtime().bun.to_str());
     assert_eq!(fixture.installs(), 1);
 }
 
@@ -192,6 +208,13 @@ fn fresh_install_preserves_an_independent_launcher_and_its_symlink() {
     for linked in [false, true] {
         let fixture = Fixture::new();
         let wrapper = fixture.0.join("bin/openclaw");
+        fs::remove_file(&wrapper).unwrap();
+        assert!(Command::new("/bin/cp")
+            .arg(Fixture::script())
+            .arg(&wrapper)
+            .status()
+            .unwrap()
+            .success());
         let original = fs::read(&wrapper).unwrap();
         if linked {
             let target = fixture.0.join("operator-cli");

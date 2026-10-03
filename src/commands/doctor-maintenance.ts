@@ -15,10 +15,7 @@ import { readActiveGatewayLockIdentity } from "../infra/gateway-lock.js";
 import { GATEWAY_SERVICE_STOP_TIMEOUT_MS } from "../infra/gateway-shutdown-budget.js";
 import { GatewayStateOwnerContentionError } from "../infra/gateway-state-owner.js";
 import type { AgentDatabaseMigrationTarget } from "../infra/state-migrations.media-persistence-targets.js";
-import {
-  resolveConfigPathForMigration,
-  resolveStateDirForMigration,
-} from "../infra/state-migrations.paths.js";
+import { resolveStateDirForMigration } from "../infra/state-migrations.paths.js";
 import { DoctorUnreadableStateDatabaseError } from "../infra/state-repair-message.js";
 import { UPDATE_RUN_ID_ENV } from "../infra/update-control-plane-sentinel.js";
 import { DoctorMaintenanceRefusalError, UpdateDoctorError } from "../infra/update-doctor-result.js";
@@ -35,6 +32,7 @@ import {
   assertDoctorMaintenanceInspection,
   classifyDoctorMaintenanceRefusal,
   readDoctorGatewayOwnerLease,
+  readDoctorMaintenanceConfig,
   readDoctorMaintenanceRecoveryConfig,
 } from "./doctor-maintenance-inspection.js";
 import {
@@ -359,13 +357,7 @@ async function beginDoctorMaintenanceForSelectedState(
               : `Warning: Doctor could not reacquire maintenance ownership: ${String(ownershipError)} Restoring its service without repairing shared state.`;
           warn(warning);
         }
-        const { createConfigIO } = await import("../config/io.factory.js");
-        const { config } = await createConfigIO({
-          configPath: resolveConfigPathForMigration(state.env),
-          env: state.env,
-          pluginValidation: "skip",
-          observe: false,
-        }).readConfigFileSnapshot();
+        const config = await readDoctorMaintenanceConfig(state.env);
         // Compensation retains Doctor's selected snapshot instead of rediscovering canonical paths.
         await finish(
           config,

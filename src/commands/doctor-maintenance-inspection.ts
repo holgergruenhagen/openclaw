@@ -150,20 +150,25 @@ export async function assertDoctorMaintenanceReady(
   return { schemaPublicationDeferred };
 }
 
+export async function readDoctorMaintenanceConfig(env: NodeJS.ProcessEnv): Promise<OpenClawConfig> {
+  const { createConfigIO } = await import("../config/io.factory.js");
+  const { config } = await createConfigIO({
+    configPath: resolveConfigPathForMigration(env),
+    env,
+    pluginValidation: "skip",
+    observe: false,
+  }).readConfigFileSnapshot();
+  return config;
+}
+
 /** Repair may have committed config before a later diagnostic failed. */
 export async function readDoctorMaintenanceRecoveryConfig(
   resources: Pick<OpenClawDatabaseMaintenanceScope, "run">,
   env: NodeJS.ProcessEnv,
   log: (message: string) => void,
 ): Promise<OpenClawConfig> {
-  const { createConfigIO } = await import("../config/io.factory.js");
   return resources.run(async () => {
-    const { config } = await createConfigIO({
-      configPath: resolveConfigPathForMigration(env),
-      env,
-      pluginValidation: "skip",
-      observe: false,
-    }).readConfigFileSnapshot();
+    const config = await readDoctorMaintenanceConfig(env);
     await assertDoctorMaintenanceReady(config, env, log);
     return config;
   });

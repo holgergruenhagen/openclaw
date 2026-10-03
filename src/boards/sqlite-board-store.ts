@@ -283,11 +283,14 @@ export class SqliteBoardStore implements BoardStore {
 
   private async consumeRead<Value, T>(
     target: BoardSessionTarget,
-    native: (database: Pick<OpenClawAgentDatabase, "db" | "path">, sessionKey: string) => Value,
+    native: (
+      database: Pick<OpenClawAgentDatabase, "db" | "path">,
+      sessionKey: string,
+    ) => Value | undefined,
     worker: (
       scope: Pick<SqliteWorkerStore<BoardReadOperations>, "execute">,
       sessionKey: string,
-    ) => Promise<Value>,
+    ) => Promise<Value | undefined>,
     consume: (value: Value | undefined, sessionKey: string) => T,
   ): Promise<Awaited<T>> {
     target = { ...target };

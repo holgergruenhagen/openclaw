@@ -14,7 +14,7 @@ import {
   SidebarSessionNarrationController,
   type SidebarNarrationSyncInput,
 } from "./app-sidebar-session-narration.ts";
-import type { SidebarToolActivity } from "./app-sidebar-session-types.ts";
+import type { SidebarRecentSession, SidebarToolActivity } from "./app-sidebar-session-types.ts";
 import { deriveSidebarNarrationLine } from "./sidebar-narration-line.ts";
 import "../test-helpers/app-sidebar-tool-activity-cases.ts";
 
@@ -329,6 +329,11 @@ describe("SidebarSessionNarrationController", () => {
     const unsubscribeMessages = vi.fn(() => Promise.resolve());
     const source = { subscribeMessages, unsubscribeMessages };
     const controller = new SidebarSessionNarrationController(() => undefined);
+    const rows: SidebarRecentSession[] = [
+      { ...runningRow("agent:main:stale"), hasActiveRun: false, status: "running" },
+      { ...runningRow("agent:main:failed"), hasActiveRun: false, status: "failed" },
+      runningRow("agent:main:active"),
+    ];
 
     controller.sync({
       enabled: true,
@@ -336,11 +341,7 @@ describe("SidebarSessionNarrationController", () => {
       connectionIdentity: {},
       source,
       openSessionKey: "",
-      rows: [
-        { ...runningRow("agent:main:stale"), hasActiveRun: false, status: "running" },
-        { ...runningRow("agent:main:failed"), hasActiveRun: false, status: "failed" },
-        runningRow("agent:main:active"),
-      ],
+      rows,
       agentId: "main",
     });
     await Promise.resolve();

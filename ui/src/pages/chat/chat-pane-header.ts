@@ -1,4 +1,4 @@
-import { html, nothing } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { isIncognitoSessionKey } from "../../../../src/shared/incognito-session-key.js";
 import type { GatewaySessionRow, SessionVisibility } from "../../api/types.ts";
 import { isNativeLocalGateway } from "../../app/native-editor-locality.runtime.ts";
@@ -49,6 +49,7 @@ import type {
 import {
   canRevealSessionWorkspace,
   renderChatPaneHeader,
+  renderChatPanePanelToggle,
   renderChatPanePanelLayoutActions,
   resolveChatPaneParentSession,
   resolveChatPaneWorkspaceIcon,
@@ -114,6 +115,7 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
     changes: () => this.headerWorkspace?.onOpenDiff?.(),
     files: () => this.headerWorkspace?.onToggleCollapsed(),
     companion: () => this.requestSessionRail("toggle"),
+    subagents: () => this.requestSubagentsPanel("toggle"),
   };
   private readonly onHeaderDefault = () => {
     if (this.headerDefaultAction?.kind !== "status") {
@@ -134,6 +136,7 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
     placementStartupStatus: ApplicationPlacementStartupStatus | null | undefined,
     sidebarLayout?: SidebarLayout,
     panelDefinitions = sidebarPanelDefinitions(),
+    subagentStop: TemplateResult | typeof nothing = nothing,
   ) {
     this.headerMenuRow = row;
     this.headerWorkspace = sessionWorkspace;
@@ -266,33 +269,25 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
     const currentLayout = sidebarLayout ?? this.state?.sidebarLayout;
     const sidePanelOpen = currentLayout?.open === true && !currentLayout.expanded;
     const toggleSidePanel = () => this.setChatSidePanelOpen(!sidePanelOpen, sidebarLayout);
-    const sidePanelAction = html`<openclaw-tooltip
-      .content=${t(sidePanelOpen ? "chat.sidePanel.minimize" : "chat.sidePanel.label")}
-    >
-      <button
-        class="btn btn--ghost btn--icon chat-icon-btn chat-side-panel-toggle"
-        type="button"
-        aria-label=${t(sidePanelOpen ? "chat.sidePanel.minimize" : "chat.sidePanel.label")}
-        aria-expanded=${String(sidePanelOpen)}
-        @click=${toggleSidePanel}
-      >
-        ${sidePanelOpen ? icons.panelRightClose : icons.panelRightOpen}
-      </button>
-    </openclaw-tooltip>`;
+    const sidePanelAction = renderChatPanePanelToggle({
+      label: t(sidePanelOpen ? "chat.sidePanel.minimize" : "chat.sidePanel.label"),
+      icon: sidePanelOpen ? icons.panelRightClose : icons.panelRightOpen,
+      className: "chat-side-panel-toggle",
+      expanded: sidePanelOpen,
+      onToggle: toggleSidePanel,
+    });
     const browserPanelAction = sessionWorkspace.onToggleBrowser
-      ? html`<openclaw-tooltip .content=${t("browser.toggle")}>
-          <button
-            class="btn btn--ghost btn--icon chat-icon-btn chat-browser-panel-toggle"
-            type="button"
-            aria-label=${t("browser.toggle")}
-            @click=${sessionWorkspace.onToggleBrowser}
-          >
-            ${icons.globe}
-          </button>
-        </openclaw-tooltip>`
+      ? renderChatPanePanelToggle({
+          label: t("browser.toggle"),
+          icon: icons.globe,
+          className: "chat-browser-panel-toggle",
+          onToggle: sessionWorkspace.onToggleBrowser,
+        })
       : nothing;
     const sessionRailVisible =
       this.state !== undefined && isSidebarSlotVisible(this.state.sidebarLayout, "companion");
+    const subagentsVisible =
+      this.state !== undefined && isSidebarSlotVisible(this.state.sidebarLayout, "subagents");
     const modifiedFiles =
       sessionWorkspace.list?.files.filter((file) => file.kind === "modified").length ?? 0;
     const panelMenuActions = this.headerPanelsMemo.read(
@@ -306,6 +301,8 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
         sessionWorkspace.collapsed,
         modifiedFiles,
         sessionRailVisible,
+        subagentsVisible,
+        catalog,
         i18n.getLocale(),
       ],
       () => {
@@ -376,6 +373,15 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
           active: sessionRailVisible,
           onActivate: this.headerPanelCallbacks.companion,
         });
+        if (!catalog) {
+          actions.push({
+            id: "session-subagents",
+            label: t("chat.subagentsPanel.title"),
+            icon: icons.bot,
+            active: subagentsVisible,
+            onActivate: this.headerPanelCallbacks.subagents,
+          });
+        }
         return actions;
       },
     );
@@ -576,6 +582,9 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
       renameDisabledReason,
       actionsDisabled: this.state?.connected !== true,
       panelActions: browserPanelAction,
+      subagentsExpanded: subagentsVisible,
+      onToggleSubagents: catalog ? undefined : this.headerPanelCallbacks.subagents,
+      runAction: subagentStop,
       panelLayoutActions: html`${renderChatPanePanelLayoutActions(
         currentLayout,
         panelDefinitions,

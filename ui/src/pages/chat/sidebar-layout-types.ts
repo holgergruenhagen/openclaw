@@ -8,6 +8,7 @@ export type SidebarSlotId =
   | "detail"
   | "discussion"
   | "portal"
+  | "subagents"
   | "terminal"
   | "workspace"
   | `plugin:${string}/${string}`;

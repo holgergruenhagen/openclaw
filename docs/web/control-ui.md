@@ -96,10 +96,13 @@ When an incoming message causes an unstarted tool call to be skipped, its card
 and work summary show **Skipped**, including after reloading the conversation.
 Approval blocks and tool failures keep their separate outcomes.
 
-Subagent runs appear in their session transcripts, outside sidebar navigation.
-Inspect them from the parent conversation with `/subagents list`,
-`/subagents info <id|#>`, and `/subagents log <id|#>`. Opening a child transcript
-is view-only; continue the conversation in its parent session.
+Open **Subagents** in the parent conversation's chat header or side-panel **+**
+menu to inspect ordinary child runs. The panel groups running and finished work,
+shows elapsed time and available tool activity, and opens each child's existing
+view-only transcript beside the parent. It does not add rows to the left sidebar;
+Swarm members remain in their parallel-tasks view. A directly opened child page
+offers **Open parent session**. The `/subagents list`, `/subagents info <id|#>`,
+and `/subagents log <id|#>` commands remain available.
 
 The **running tasks** indicator previews only active background tasks (running or
 queued). Its tooltip shows up to five tasks, with an overflow count for additional

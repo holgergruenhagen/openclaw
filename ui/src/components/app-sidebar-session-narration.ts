@@ -75,12 +75,12 @@ export type SidebarNarrationSyncInput = {
   connected: boolean;
   connectionIdentity: object | null;
   source: NarrationSource | null;
-  rows: readonly SidebarRecentSession[];
+  rows: readonly Pick<SidebarRecentSession, "key" | "hasActiveRun" | "startedAt" | "updatedAt">[];
   openSessionKey: string;
   agentId: string;
 };
 
-function rowRecency(row: SidebarRecentSession): number {
+function rowRecency(row: Pick<SidebarRecentSession, "startedAt" | "updatedAt">): number {
   return row.startedAt ?? row.updatedAt ?? 0;
 }
 

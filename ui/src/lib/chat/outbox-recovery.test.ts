@@ -144,13 +144,39 @@ it.each(["local-copy", "session", "scope", "text-only", "assistant", "no-run-id"
   },
 );
 
-it("retains the draft and unproven inputs when only one saved submission was delivered", () => {
+it("leaves a mixed unowned legacy row for explicit restore", () => {
   const f = deliveryFixture();
   const legacy = readStoredOutboxStore(sessionStorage, f.source);
-  const session = legacy.sessions[sourceScope]!;
-  session.draft = "Keep this draft";
-  session.queue!.push({ id: "unsent", text: "Still unsent", createdAt: 2 });
+  legacy.sessions[sourceScope]!.draft = "Keep this draft";
   writeStoredOutboxStore(sessionStorage, f.source, legacy);
+  f.state.chatMessages = [
+    { role: "user", __openclaw: { seq: 7, idempotencyKey: "original-attempt:user" } },
+  ];
+  const before = sessionStorage.getItem(f.source.key);
+  const entries = readChatOutboxRecovery(f.state).entries;
+  expect(retireDeliveredChatOutboxRecovery(f.state, entries)).toBe("unchanged");
+  expect(sessionStorage.getItem(f.source.key)).toBe(before);
+  expect(f.stored().recovery).toEqual({});
+  expect(readChatOutboxRecovery(f.state).entries).toEqual(entries);
+});
+
+it("retains the draft and unproven inputs when only one owned submission was delivered", () => {
+  const f = deliveryFixture();
+  const legacy = readStoredOutboxStore(sessionStorage, f.source);
+  const delivered = legacy.sessions[sourceScope]!.queue![0]!;
+  legacy.sessions = {};
+  writeStoredOutboxStore(sessionStorage, f.source, legacy);
+  const owned = f.stored();
+  owned.recovery.owned = {
+    sourceVersion: 4,
+    sourceScopeKey: sourceScope,
+    session: {
+      draft: "Keep this draft",
+      updatedAt: 1,
+      queue: [delivered, { id: "unsent", text: "Still unsent", createdAt: 2 }],
+    },
+  };
+  writeStoredOutboxStore(sessionStorage, storageTargetForComposer(f.state), owned);
   f.state.chatMessages = [
     { role: "user", __openclaw: { seq: 7, idempotencyKey: "original-attempt:user" } },
   ];
@@ -158,27 +184,9 @@ it("retains the draft and unproven inputs when only one saved submission was del
     "retired",
   );
   expect(readChatOutboxRecovery(f.state).entries).toMatchObject([
-    {
-      session: {
-        draft: "Keep this draft",
-        queue: [{ id: "unsent" }],
-      },
-    },
+    { id: "owned", session: { draft: "Keep this draft", queue: [{ id: "unsent" }] } },
   ]);
-  const remaining = readChatOutboxRecovery(f.state).entries[0]!;
-  expect(remaining.session.queue).toHaveLength(1);
-  const owned = f.stored();
-  owned.recovery[remaining.id]!.session.queue = [
-    { id: "delivered", text: "done", createdAt: 3, sendRunId: "original-attempt" },
-  ];
-  writeStoredOutboxStore(sessionStorage, storageTargetForComposer(f.state), owned);
-  expect(retireDeliveredChatOutboxRecovery(f.state, readChatOutboxRecovery(f.state).entries)).toBe(
-    "retired",
-  );
-  expect(readChatOutboxRecovery(f.state).entries).toMatchObject([
-    { session: { draft: "Keep this draft" } },
-  ]);
-  expect(readChatOutboxRecovery(f.state).entries[0]!.session.queue).toBeUndefined();
+  expect(readChatOutboxRecovery(f.state).entries[0]!.session.queue).toHaveLength(1);
 });
 
 it("preserves authoritative recovery edits made after delivery discovery", () => {

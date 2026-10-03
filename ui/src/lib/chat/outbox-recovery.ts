@@ -294,6 +294,16 @@ export function retireDeliveredChatOutboxRecovery(
     ) {
       continue;
     }
+    // Consuming an unowned legacy row transfers it to the current account. Only
+    // explicit Restore may adopt leftovers, so retire such rows only when nothing remains.
+    const unowned =
+      entry.id.startsWith("legacy-session:") || entry.id.startsWith("legacy-recovery:");
+    if (
+      unowned &&
+      (hasStoredComposerDraftInput(entry.session) || !entry.session.queue.every(delivered))
+    ) {
+      continue;
+    }
     const result = consumeChatOutboxRecovery(state, entry, null, 0, isCurrent, delivered);
     if (result !== "completed") {
       return result;

@@ -44,7 +44,7 @@ mod window_chrome_macos;
 
 use cli::{CliError, OpenClawCli};
 use gateway::{GatewayAction, GatewaySnapshot, ReadyGateway};
-use gateway_operation_queue::{GatewayOperation, GatewayOperationQueue};
+use gateway_operation_queue::{GatewayOperation, GatewayOperationError, GatewayOperationQueue};
 use installer::InstallChannel;
 use remote_gateway::{RemoteConnectionSource, RemoteGatewayRequest, TunnelRoute};
 use serde::Serialize;
@@ -3474,7 +3474,13 @@ fn main() {
                     operation_state.recover_remote(&operation_app, selection, child_id)
                 }
             },
-            move |error| error_state.show_error(&error_app, error),
+            move |error| match error {
+                GatewayOperationError::Action(error) => error_state.show_error(&error_app, &error),
+                #[cfg(target_os = "linux")]
+                GatewayOperationError::Runtime(error) => {
+                    tray::show_runtime_error(&error_app, &error)
+                }
+            },
         ));
         let deep_link_app = app.handle().clone();
         app.deep_link().on_open_url(move |event| {

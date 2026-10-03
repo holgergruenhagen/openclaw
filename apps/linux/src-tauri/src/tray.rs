@@ -480,6 +480,24 @@ fn handle_menu(
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn show_runtime_error(app: &AppHandle, error: &str) {
+    let current_app = app.clone();
+    let error = error.to_owned();
+    let _ = app.run_on_main_thread(move || {
+        if current_app.state::<DesktopState>().is_quitting() {
+            return;
+        }
+        show_window(&current_app);
+        current_app
+            .dialog()
+            .message(error)
+            .title("Use bundled runtime")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    });
+}
+
+#[cfg(target_os = "linux")]
 fn confirm_runtime_action(app: &AppHandle) {
     use tauri_plugin_dialog::MessageDialogButtons;
     let current_app = app.clone();
@@ -499,7 +517,7 @@ fn confirm_runtime_action(app: &AppHandle) {
         let action = match observed {
             Ok(action) => action,
             Err(error) => {
-                state.show_error(&current_app, &error);
+                show_runtime_error(&current_app, &error);
                 return;
             }
         };

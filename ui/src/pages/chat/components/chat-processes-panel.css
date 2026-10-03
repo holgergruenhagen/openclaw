@@ -166,7 +166,7 @@ openclaw-chat-processes-panel,
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: var(--font-mono);
+  font-family: var(--mono);
   font-size: var(--control-ui-text-xs);
   line-height: 1.6;
 }

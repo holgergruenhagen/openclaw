@@ -383,7 +383,7 @@ suite.define(() => {
           await page.locator(".chat-group").first().waitFor();
 
           const topbarButtons = page.locator(".chat-pane__actions .chat-icon-btn");
-          await expect.poll(() => topbarButtons.count()).toBe(5);
+          await expect.poll(() => topbarButtons.count()).toBe(4);
           await expect
             .poll(async () => {
               const buttons = (await topbarButtons.all()).map(async (button) => ({
@@ -412,11 +412,10 @@ suite.define(() => {
             })
             .toEqual({
               buttonCenterSpread: 0,
-              buttonHeights: [28, 28, 28, 28, 28],
+              buttonHeights: [28, 28, 28, 28],
               gapSpread: 0,
               glyphCenterSpread: 0,
               glyphSizes: [
-                [16, 16],
                 [16, 16],
                 [16, 16],
                 [16, 16],

@@ -95,7 +95,8 @@ function readChannelAllowEntries(database: DatabaseSync, channel: PairingChannel
 export const pairingReadOperations = {
   "pairing.allowFrom": (input: { channel: string; accountId: string }, db) => ({
     type: "pairing.allowFrom" as const,
-    entries: readChannelAllowEntries(db, input.channel)[input.accountId] ?? [],
+    // Match the native reader's refusal of inherited, non-array account keys.
+    entries: (readChannelAllowEntries(db, input.channel)[input.accountId] ?? []).slice(),
   }),
 } satisfies WorkerOperationHandlers<DatabaseSync>;
 

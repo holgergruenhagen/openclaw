@@ -71,6 +71,16 @@ it("returns no permission without creating a missing store and still validates k
   );
 });
 
+it.each(["__proto__", "constructor"])(
+  "preserves the native refusal for inherited account key %s",
+  async (accountId) => {
+    expect(() => readChannelAllowFromStoreSync("demo", env, accountId)).toThrow(TypeError);
+    await expect(readChannelAllowFromStore("demo", env, accountId)).rejects.toBeInstanceOf(
+      TypeError,
+    );
+  },
+);
+
 it("captures the original store before yielding and preserves normalized persisted account ordering", async () => {
   writeChannelPairingStateSnapshot(
     "legacy",

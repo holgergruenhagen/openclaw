@@ -555,7 +555,7 @@ pub(crate) fn migrate(
     wrapper = read_wrapper(cli)?;
     // A rejected pre-install check grants no service recovery authority.
     recheck(cli, &wrapper, &state, is_current, true)?;
-    let installed = install(cli, &target, &state, true);
+    install(cli, &target, &state, true)?;
     // The retained interpreter can inspect a failed Bun launch without depending on that Bun.
     let candidate = capture(cli, Some(&wrapper.node), false);
     let attempted_binding = candidate
@@ -563,7 +563,7 @@ pub(crate) fn migrate(
         .ok()
         .filter(|value| value.matches_bun(&target))
         .and_then(|value| value.binding().ok());
-    let switch = installed.and_then(|()| {
+    let switch = (|| {
         let candidate = candidate?;
         if !candidate.matches_bun(&target) {
             return Err(CHANGED.into());
@@ -581,7 +581,7 @@ pub(crate) fn migrate(
         let metadata =
             managed_metadata(&wrapper, target.clone(), app_version.into(), Some(expected))?;
         publish(&wrapper, &render(&metadata)?)
-    });
+    })();
     if let Err(error) = switch {
         let restoration = restore_after_failure(
             cli,

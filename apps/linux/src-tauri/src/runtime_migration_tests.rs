@@ -677,7 +677,7 @@ impl MigrationFixture {
             |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
         for (kind, executable) in [("node", &wrapper.node.runtime), ("bun", &runtime.bun)] {
             let script = format!(
-                "#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw 2026.10.1\\n' ;;\n *'gateway status'*) printf '%s\\n' \"{kind} $*\" >> {}; exec /bin/cat {} ;;\n *'update repair'*) printf 'repair\\n' >> {} ;;\n *'gateway install'*'--runtime bun '*) printf 'install-bun\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *'gateway install'*'--runtime node '*) printf 'install-node\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-mutation\\n' >> {}; exit 9 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'OpenClaw 2026.10.1\\n' ;;\n *'gateway status'*) printf '%s\\n' \"{kind} $*\" >> {}; exec /bin/cat {} ;;\n *'update repair'*) printf 'repair\\n' >> {} ;;\n *'gateway install'*'--runtime bun '*) printf 'install-bun\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; if test -e {rejection}; then if test \"$(/bin/cat {rejection})\" = nonzero; then exit 7; fi; printf '{{\"ok\":false}}\\n'; else printf '{{\"ok\":true}}\\n'; fi ;;\n *'gateway install'*'--runtime node '*) printf 'install-node\\n' >> {}; /bin/cp {} {}; /bin/cp {} {}; printf '{{\"ok\":true}}\\n' ;;\n *) printf 'unexpected-mutation\\n' >> {}; exit 9 ;;\nesac\n",
                 quote(&fixture.0.join("inspections")), quote(&fixture.0.join(format!("current-{kind}.json"))),
                 quote(&fixture.0.join("calls")), quote(&fixture.0.join("calls")),
                 quote(&fixture.0.join("installed-node.json")), quote(&fixture.0.join("current-node.json")),
@@ -686,6 +686,7 @@ impl MigrationFixture {
                 quote(&fixture.0.join("restored-node.json")), quote(&fixture.0.join("current-node.json")),
                 quote(&fixture.0.join("restored-bun.json")), quote(&fixture.0.join("current-bun.json")),
                 quote(&fixture.0.join("calls")),
+                rejection = quote(&fixture.0.join("reject-bun-install")),
             );
             fs::write(executable, script).unwrap();
             fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -881,6 +882,75 @@ fn interrupted_bun_bindings_become_external_without_health_or_service_mutation()
             .unwrap()
             .lines()
             .all(|line| line.starts_with("node ") && line.contains("--no-probe")));
+    }
+}
+
+#[test]
+fn rejected_install_cannot_claim_or_restore_a_newer_operator_bun_binding() {
+    for (rejection, paused_original) in [("nonzero", false), ("json", false), ("nonzero", true)] {
+        let fixture = MigrationFixture::new();
+        let mut newer = if paused_original {
+            let mut state = fixture.fixture.state_json(&fixture.wrapper);
+            state["service"]["runtime"]["status"] = "stopped".into();
+            state["rpc"]["ok"] = false.into();
+            state
+        } else {
+            fixture.bun_state()
+        };
+        if !paused_original {
+            newer["service"]["revision"] = "operator-bun-service".into();
+            newer["service"]["runtimeIntent"]["revision"] = "operator-bun-pin".into();
+            newer["service"]["runtimeIntent"]["definition"] = "operator-bun-definition".into();
+        }
+        fixture.write_state("installed", &newer);
+        fs::write(fixture.fixture.0.join("reject-bun-install"), rejection).unwrap();
+        let newer_service = ["node", "bun"].map(|kind| {
+            fs::read(fixture.fixture.0.join(format!("installed-{kind}.json"))).unwrap()
+        });
+        assert!(fixture.migrate(Mode::Adopt).is_err(), "{rejection}");
+        assert!(fs::read_to_string(fixture.fixture.0.join("inspections"))
+            .unwrap()
+            .lines()
+            .all(|line| line.contains("--no-probe")));
+        assert_eq!(fixture.calls(), "repair\ninstall-bun\n", "{rejection}");
+        assert_eq!(fixture.current_bytes(), newer_service, "{rejection}");
+        let wrapper = read_wrapper(&fixture.cli).unwrap();
+        let metadata = wrapper.managed.as_ref().unwrap();
+        let pending = metadata.pending.as_ref().unwrap();
+        assert_eq!(
+            pending.original,
+            fixture.fixture.state(&fixture.wrapper).binding().unwrap()
+        );
+        for (path, expected) in [
+            (&pending.original_wrapper, &pending.original_wrapper_sha256),
+            (
+                &metadata.retained_wrapper,
+                &metadata.retained_wrapper_sha256,
+            ),
+        ] {
+            assert_eq!(
+                verified_backup(path, expected).unwrap(),
+                fixture.wrapper.bytes
+            );
+        }
+        let resumed = fixture.migrate(Mode::OwnedUpdate).unwrap();
+        assert_eq!(fixture.calls(), "repair\ninstall-bun\n", "{rejection}");
+        assert_eq!(fixture.current_bytes(), newer_service, "{rejection}");
+        if paused_original {
+            assert_eq!(resumed, MigrationOutcome::DeferredPaused);
+            assert_eq!(fs::read(&fixture.wrapper.path).unwrap(), wrapper.bytes);
+            continue;
+        }
+        assert_eq!(resumed, MigrationOutcome::PreservedExternal, "{rejection}");
+        let external = read_wrapper(&fixture.cli).unwrap().managed.unwrap();
+        assert_eq!(external.purpose, Purpose::External);
+        assert!(external.pending.is_none());
+        assert!(external.binding.is_none());
+        assert_eq!(external.retained_wrapper, metadata.retained_wrapper);
+        assert_eq!(
+            verified_backup(&pending.original_wrapper, &pending.original_wrapper_sha256).unwrap(),
+            fixture.wrapper.bytes
+        );
     }
 }
 

@@ -376,8 +376,10 @@ verifies Gateway health. Development builds retain the installed package version
 The CLI update can complete even if a saved runtime pin prevents the subsequent
 Bun switch. The pin stays under its existing owner and the installation remains
 unadopted; the app reports the completed package update separately.
-Backups and the same-version Node tools remain available for recovery. A failed
-switch restores and verifies Node; choose **Use bundled runtime…** again to retry.
+Backups and the same-version Node tools remain available for recovery. Failed
+health after a confirmed runtime install restores and verifies Node; choose
+**Use bundled runtime…** again to retry. A rejected or unverified install preserves
+the current service and pins instead of attempting rollback.
 **Restore previous Node runtime…** verifies the retained Node Gateway and removes
 app ownership, so subsequent startup does not undo the rollback.
 

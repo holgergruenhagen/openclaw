@@ -157,7 +157,9 @@ runtime pins and external CLI overrides remain under their existing owner.
 
 Adoption uses the installed CLI's updater first, then switches the same package
 version to bundled Bun and verifies Gateway health. The app retains a recovery
-backup and Node tools; a failed switch restores and verifies Node. Choose
+backup and Node tools; failed health after a confirmed runtime install restores
+and verifies Node. A rejected or unverified install preserves the current service
+and pins instead of attempting rollback. Choose
 **Use bundled runtime…** again to retry, or **Restore previous Node runtime…**
 to leave app runtime management after a successful adoption. A stopped Gateway
 stays stopped until you choose **Start Gateway**.

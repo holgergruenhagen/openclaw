@@ -23,3 +23,12 @@ export function cancelBackgroundExecSession(sessionId: string): boolean {
   session.cancellationRequested = true;
   return true;
 }
+
+/** A requested cancellation is successful only after its own terminal reason and cleanup. */
+export function isConfirmedRequestedStop(session: ProcessSession): boolean {
+  return (
+    session.cancellationRequested === true &&
+    session.exitReason === "manual-cancel" &&
+    session.finalizationFailed !== true
+  );
+}

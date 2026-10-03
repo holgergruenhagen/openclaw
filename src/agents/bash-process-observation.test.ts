@@ -61,3 +61,19 @@ it("bounds encoded output and rows without consuming agent output or crossing gl
   global.agentId = undefined;
   expect(readBackgroundProcesses({ ...readGlobal, agentId: "main" }).processes).toEqual([]);
 });
+
+it.each([
+  { requested: true, reason: "manual-cancel", cleanupFailed: false, status: "killed" },
+  { requested: true, reason: "overall-timeout", cleanupFailed: false, status: "failed" },
+  { requested: true, reason: "manual-cancel", cleanupFailed: true, status: "failed" },
+  { requested: false, reason: "manual-cancel", cleanupFailed: false, status: "failed" },
+] as const)(
+  "projects confirmed Stop without hiding other failures: $reason/$cleanupFailed/$requested",
+  ({ requested, reason, cleanupFailed, status }) => {
+    const session = seed("stop-outcome");
+    session.cancellationRequested = requested;
+    session.finalizationFailed = cleanupFailed;
+    markExited(session, null, "SIGTERM", "failed", reason);
+    expect(readBackgroundProcesses(scope).processes[0]).toMatchObject({ status, canStop: false });
+  },
+);

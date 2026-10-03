@@ -9,6 +9,7 @@ import {
 import {
   cancelBackgroundExecSession,
   isBackgroundExecCancellable,
+  isConfirmedRequestedStop,
 } from "./bash-process-control.js";
 import {
   compareProcessSessionStartOrder,
@@ -53,7 +54,7 @@ export function readBackgroundProcesses(scope: ProcessObservationScope): {
         deriveSessionName(session.command) || session.command,
         SESSION_PROCESS_NAME_MAX_CHARS,
       ),
-      status: session.terminalStatus ?? "running",
+      status: isConfirmedRequestedStop(session) ? "killed" : (session.terminalStatus ?? "running"),
       startedAt: session.startedAt,
       ...(session.endedAt !== undefined ? { endedAt: session.endedAt } : {}),
       tail: output,

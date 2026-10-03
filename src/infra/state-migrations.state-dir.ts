@@ -10,7 +10,7 @@ import {
   listLegacyOAuthSidecarPaths,
 } from "../commands/doctor-auth-legacy-paths.js";
 import { readCurrentConfigForResolution } from "../config/io.runtime.js";
-import { resolveLegacyStateDirs, resolveNewStateDir, resolveStateDir } from "../config/paths.js";
+import { resolveNewStateDir, resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { inspectPersistedInstalledPluginIndexInstallRecordsSync } from "../plugins/installed-plugin-index-record-state.js";
 import {
@@ -25,6 +25,7 @@ import { migrationFileExists } from "./state-migrations.fs.js";
 import {
   isLegacyDirSymlinkMirror,
   resolveConfigPathForMigration,
+  resolveLegacyStateDirs,
   resolveStateDirForMigration,
   resolveSymlinkTarget,
 } from "./state-migrations.paths.js";

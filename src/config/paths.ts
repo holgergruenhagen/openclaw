@@ -13,7 +13,6 @@ import {
 import { parseTcpPort } from "../infra/tcp-port.js";
 import { resolveNewStateDir, resolveStateDir } from "./state-dir.js";
 import type { OpenClawConfig } from "./types.js";
-export { resolveLegacyStateDirs } from "../infra/state-migrations.paths.js";
 export { resolveNewStateDir, resolveStateDir } from "./state-dir.js";
 
 /**

@@ -13,12 +13,12 @@ import {
 import { listWorkspaceStateDirs } from "../agents/workspace-state-dirs.js";
 import { resolveWorkspaceStateIdentity } from "../agents/workspace-state-identity.js";
 import { readWorkspaceStateSnapshot } from "../agents/workspace-state-store.js";
-import { resolveLegacyStateDirs } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "./errors.js";
 import { resolveUserPath } from "./home-dir.js";
 import { pathMayExistSync } from "./path-existence.js";
 import { withLegacyMigrationStateLock } from "./state-migrations.lock.js";
+import { resolveLegacyStateDirs } from "./state-migrations.paths.js";
 import { markLegacyMigrationSourceRemoved } from "./state-migrations.receipts.js";
 import {
   type LegacyMigrationSourceClaim,

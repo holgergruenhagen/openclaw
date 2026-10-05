@@ -50,7 +50,9 @@ that depends on the operation. Dismissal IDs retain exact-match semantics.
 Replace `recordCommittedInput(input)` with `await recordCommittedInputAsync(input)`
 and `invalidate(sessionKey)` with `await invalidateAsync(sessionKey)`. Await
 recording before reading the resulting Inbox, and await invalidation before
-depending on refreshed connected views.
+depending on refreshed connected views. Recording also awaits the collaboration
+writer's session involvement update before saving Inbox items. Both writes retain
+their existing owners and settle before Gateway worker shutdown.
 
 The shipped `list`, `dismiss`, `recordCommittedInput`, and `invalidate` methods
 remain synchronous third-party adapters until the next Plugin SDK major and
@@ -61,6 +63,37 @@ timing stay intact, including recording before an immediate synchronous list.
 Notifications publish after the enclosing transaction commits and are discarded
 on rollback. This migration changes no schema, retained data, retention, or
 update behavior.
+
+## Await personal model-account operations
+
+The Gateway context's `modelAccountConnectService` now provides awaited
+replacements for its seven synchronous storage methods. Keep the existing
+arguments and await the result before publishing a response, starting dependent
+work, or releasing the caller's authority:
+
+| Synchronous method | Awaited replacement |
+| ------------------ | ------------------- |
+| `listLinks`        | `listLinksAsync`    |
+| `link`             | `linkAsync`         |
+| `unlink`           | `unlinkAsync`       |
+| `list`             | `listAsync`         |
+| `select`           | `selectAsync`       |
+| `status`           | `statusAsync`       |
+| `cancel`           | `cancelAsync`       |
+
+Each replacement resolves to the existing result envelope. Pass the current
+owner and live `assertCurrent` callback; the service rechecks authority across
+awaited work and before disclosing account summaries or links. Results never
+include credentials. If a write's commit outcome is unknown, do not retry it or
+fall back to its synchronous counterpart.
+
+The synchronous methods shipped in 2026.9.8 retain their arguments, immediate
+return values, and completion timing until the next Plugin SDK major and
+explicit breaking-release approval. Each emits one `DEP_SESSION_PERSISTENCE`
+warning per plugin and method per process, including across plugin reloads;
+unscoped calls warn once per method. Core and bundled callers use the awaited
+methods. This migration changes no RPC schema, stored data, retention, or update
+behavior.
 
 ## Await session transcript persistence
 
@@ -114,6 +147,34 @@ for read limits, cancellation, and target-binding rules. Synchronous getters rea
 the prepared view. `inMemory()` and `fromEntries()` remain synchronous;
 `appendModelChange`, `appendThinkingLevelChange`, and `createBranchedSession`
 already return promises and keep their names.
+
+Replace `SessionManager.readSessionContext(target, read)` with
+`await SessionManager.readSessionContextAsync(target, read, { admission?, signal? })`.
+This reader preserves full-fidelity messages, including storage-only fields omitted
+from model context. Its consumer may return a promise; the iterator closes when
+the consumer settles, and source validation must succeed before the result is
+returned. A rewritten source or revoked admission rejects the read. The durable
+reader retains its database owner through consumption and cleanup;
+database closure revokes the read. Final acceptance uses the existing writer
+FIFO and native mutation witness, including rewrites made after worker validation.
+The `session-manager-sync-context-read` record deprecates the synchronous reader on
+October 4, 2026, with one warning per process and removal at the next Plugin SDK
+major. Its existing synchronous result remains compatible during that window.
+
+Actor-bound incognito sessions reject the deprecated synchronous persistence and
+context methods before native storage or loaded-view mutation. The error names
+the awaited replacement. Production incognito remains host-owned until the atomic
+worker activation; durable synchronous compatibility is unchanged. An ordinary
+`resolveCurrentTurnEntryId()` only walks the loaded view; to include omitted
+custom messages, await `openAsync(target)` and walk that complete view instead.
+
+Bundled Codex history captures `captureCodexSessionContextReader(target, signal?)`
+from `openclaw/plugin-sdk/codex-session-transcript-runtime` before yielding. When
+an actor binding exists, await the returned reader with the same target and a
+context consumer. It retains the actor through scanning, consumption, validation,
+and cleanup. Without an actor binding it returns `undefined`, preserving the
+existing host route. The synchronous Codex context reader and validators refuse
+actor-bound access; they never reopen a native incognito database.
 
 `branchAsync` can hydrate missing history through the read worker before selecting
 the branch. `resetLeafAsync(): Promise<void>` orders an in-memory navigation reset
@@ -286,6 +347,21 @@ you use, such as `agents.defaults.systemAgent.agentId` for system work.
 Authored `agents.list` and boolean entry `default` markers are rejected. Run
 `openclaw doctor --fix` to migrate stored legacy configs; Doctor also records
 explicit ownership for migrated multi-agent rosters.
+
+Entries also carry no `agentRuntime` or `compaction`. Validation rejects both, so
+the authored config type omits them and `resolveAgentConfig` no longer returns
+`agentRuntime`. Read runtime policy from per-model `models[ref].agentRuntime` and
+compaction settings from `agents.defaults.compaction`.
+
+`agents.defaults` also no longer types `imageGenerationModel`, `videoGenerationModel`,
+`musicGenerationModel`, `envelopeTimezone`, `envelopeTimestamp`, `envelopeElapsed`,
+`timeFormat`, `promptOverlays`, or `agentRuntime`; validation rejects all nine. Use
+`mediaModels.image`, `mediaModels.video`, and `mediaModels.music`, `userTimezone` with
+built-in envelope and time formatting, `plugins.entries.openai.config.personality`,
+and per-model `models[ref].agentRuntime`. This is a type-only SDK change; run
+`openclaw doctor --fix` to migrate stored configs. A stored `agents.defaults.agentRuntime`
+is a retired format that current Doctor refuses;
+[upgrade through OpenClaw 2026.9.5](/install/updating#upgrading-very-old-versions) first.
 
 Plugins built against stable SDK releases through 2026.9.x may still read the
 deprecated, non-enumerable runtime `agents.list` projection introduced in

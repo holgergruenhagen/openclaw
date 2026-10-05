@@ -361,6 +361,24 @@ describe("chat pane read markers", () => {
       );
     });
 
+    it.each([
+      { code: ErrorCodes.UNAVAILABLE, calls: 2 },
+      { code: ErrorCodes.INVALID_REQUEST, calls: 1 },
+    ])(
+      "retries a hidden run after a $code failure only when transient",
+      async ({ code, calls }) => {
+        const { pane, patch } = createParentPane([run("done")]);
+        patch.mockRejectedValueOnce(new GatewayRequestError({ code, message: "ack failed" }));
+
+        pane.markSessionRead(parent);
+        await vi.waitFor(() => expect(patch).toHaveBeenCalledOnce());
+        await Promise.resolve();
+        pane.markSessionRead(parent);
+
+        expect(patch).toHaveBeenCalledTimes(calls);
+      },
+    );
+
     it("does not acknowledge hidden runs from a parent the caller only views", () => {
       const { pane, patch } = createParentPane([run("done")]);
 

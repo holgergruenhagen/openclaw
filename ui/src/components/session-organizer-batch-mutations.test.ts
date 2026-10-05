@@ -210,13 +210,18 @@ describe("patchSessionRows", () => {
     );
   });
 
-  it("acknowledges hidden runs with Mark as read but not with Mark as unread", async () => {
+  it("acknowledges hidden runs conditionally with Mark as read but not with Mark as unread", async () => {
     const run = { ...sessionRow(1), key: "agent:main:subagent:done", isChild: true };
-    const parent = {
+    const parent: SidebarRecentSession = {
       ...sessionRow(0),
       unread: false,
-      subagentSummary: { unreadHiddenRuns: [run] },
-    } as SidebarRecentSession;
+      subagentSummary: {
+        attention: { kind: "none" },
+        runningChildCount: 0,
+        failedChildCount: 0,
+        unreadHiddenRuns: [run],
+      },
+    };
     const harness = createHarness();
 
     await runBatchSessionAction(
@@ -234,9 +239,17 @@ describe("patchSessionRows", () => {
       harness.scope,
     );
 
+    // Selected rows keep their explicit batch read; folded runs keep manual markers.
     expect(harness.request.mock.calls.map(([, params]) => params)).toEqual([
-      { targets: [sessionTarget(parent), sessionTarget(run)], patch: { unread: false } },
+      { targets: [sessionTarget(parent)], patch: { unread: false } },
       { targets: [sessionTarget(parent)], patch: { unread: true } },
+    ]);
+    expect(harness.patch.mock.calls).toEqual([
+      [
+        run.key,
+        { unread: false },
+        { agentId: "main", expectedMarkedUnreadAt: null, expectedSessionId: run.sessionId },
+      ],
     ]);
   });
 

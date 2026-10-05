@@ -28,6 +28,7 @@ import {
 } from "../../lib/sessions/catalog-key.ts";
 import { resolveSessionKey, scopedAgentParamsForSession } from "../../lib/sessions/index.ts";
 import { parseAgentSessionKey, scopedSessionArtifactKey } from "../../lib/sessions/session-key.ts";
+import { isPermanentUnreadAckFailure } from "../../lib/sessions/unread.ts";
 import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import { catalogMessageId } from "./catalog-message-id.ts";
 import { loadChatBranches } from "./chat-history-branches.ts";
@@ -390,7 +391,8 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
         }
       };
       // The null expectation lets the Gateway keep a marker set after this snapshot.
-      // Rejections stay latched until the run changes; the capability reports them once.
+      // Permanent rejections stay latched until the run changes; the capability
+      // reports them once. Transient failures retry on the next read.
       void this.context.sessions
         .patch(run.key, { unread: false }, { agentId, expectedMarkedUnreadAt: null })
         .then(
@@ -399,7 +401,11 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
               retry();
             }
           },
-          () => undefined,
+          (error: unknown) => {
+            if (!isPermanentUnreadAckFailure(error)) {
+              retry();
+            }
+          },
         );
     }
   }

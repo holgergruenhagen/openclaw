@@ -408,6 +408,17 @@ export async function deleteSessionsBatch(
   }
 }
 
+/** Reading a parent also acknowledges the hidden runs folded into its unread state. */
+function withUnreadHiddenRuns(rows: readonly SidebarRecentSession[]): SidebarRecentSession[] {
+  const targets = new Map(rows.map((row) => [row.key, row]));
+  for (const run of rows.flatMap((row) => row.subagentSummary?.unreadHiddenRuns ?? [])) {
+    if (!targets.has(run.key)) {
+      targets.set(run.key, run);
+    }
+  }
+  return [...targets.values()];
+}
+
 export async function runBatchSessionAction(
   host: SessionOrganizerControllerHost,
   action: SessionMenuAction,
@@ -417,7 +428,12 @@ export async function runBatchSessionAction(
 ): Promise<void> {
   switch (action.kind) {
     case "toggle-unread":
-      await patchSessionRows(host, rows, { unread: !allUnread }, scope);
+      await patchSessionRows(
+        host,
+        allUnread ? withUnreadHiddenRuns(rows) : rows,
+        { unread: !allUnread },
+        scope,
+      );
       break;
     case "move-to-group":
       await patchSessionRows(

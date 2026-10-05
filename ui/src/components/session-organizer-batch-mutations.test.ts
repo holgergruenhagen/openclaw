@@ -36,6 +36,7 @@ import {
   deleteSessionGroup,
   deleteSessionsBatch,
   patchSession,
+  runBatchSessionAction,
   stopCloudWorker,
   snoozeSessionWithUndo,
 } from "./session-organizer-operations.runtime.ts";
@@ -207,6 +208,36 @@ describe("patchSessionRows", () => {
       { unread: false },
       { agentId: "main", expectedSessionId: row.sessionId },
     );
+  });
+
+  it("acknowledges hidden runs with Mark as read but not with Mark as unread", async () => {
+    const run = { ...sessionRow(1), key: "agent:main:subagent:done", isChild: true };
+    const parent = {
+      ...sessionRow(0),
+      unread: false,
+      subagentSummary: { unreadHiddenRuns: [run] },
+    } as SidebarRecentSession;
+    const harness = createHarness();
+
+    await runBatchSessionAction(
+      harness.host,
+      { kind: "toggle-unread" },
+      [parent],
+      true,
+      harness.scope,
+    );
+    await runBatchSessionAction(
+      harness.host,
+      { kind: "toggle-unread" },
+      [parent],
+      false,
+      harness.scope,
+    );
+
+    expect(harness.request.mock.calls.map(([, params]) => params)).toEqual([
+      { targets: [sessionTarget(parent), sessionTarget(run)], patch: { unread: false } },
+      { targets: [sessionTarget(parent)], patch: { unread: true } },
+    ]);
   });
 
   it("preflights every lifecycle identity before dispatching the first chunk", async () => {

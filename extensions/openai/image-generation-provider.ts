@@ -18,7 +18,6 @@ import {
 } from "openclaw/plugin-sdk/provider-onboard";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-policy";
 import { filterStringRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   canonicalizeCodexResponsesBaseUrl,
   isOpenAICodexBaseUrl,
@@ -28,6 +27,10 @@ import {
   OPENAI_CODEX_DEFAULT_MODEL,
   OPENAI_DEFAULT_IMAGE_MODEL as DEFAULT_OPENAI_IMAGE_MODEL,
 } from "./default-models.js";
+import {
+  annotateDirectImageAuthFailure,
+  sanitizeLogValue,
+} from "./image-generation-diagnostics.js";
 import { resolveModelAuthPolicy } from "./provider-policy-api.js";
 import { resolveConfiguredOpenAIBaseUrl } from "./shared.js";
 
@@ -55,7 +58,6 @@ const OPENAI_SUPPORTED_SIZES = [
 const OPENAI_LEGACY_IMAGE_SIZES = ["1024x1024", "1536x1024", "1024x1536"] as const;
 const OPENAI_MAX_INPUT_IMAGES = 5;
 const OPENAI_MAX_IMAGE_RESULTS = 4;
-const LOG_VALUE_MAX_CHARS = 256;
 const MOCK_OPENAI_PROVIDER_ID = "mock-openai";
 const OPENAI_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
 const OPENAI_BACKGROUNDS = ["transparent", "opaque", "auto"] as const;
@@ -82,27 +84,6 @@ const AZURE_HOSTNAME_SUFFIXES = [
 ] as const;
 
 const DEFAULT_AZURE_OPENAI_API_VERSION = "2024-12-01-preview";
-
-function sanitizeLogValue(value: unknown): string {
-  const raw =
-    typeof value === "string"
-      ? value
-      : typeof value === "number" || typeof value === "boolean"
-        ? String(value)
-        : "";
-  const cleaned = raw
-    .replace(/[\r\n\u2028\u2029]+/g, " ")
-    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/gi, "")
-    .replace(/\p{Cc}+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) {
-    return "unknown";
-  }
-  return cleaned.length > LOG_VALUE_MAX_CHARS
-    ? `${truncateUtf16Safe(cleaned, LOG_VALUE_MAX_CHARS)}...`
-    : cleaned;
-}
 
 function resolveOpenAIImageTimeoutMs(
   timeoutMs: number | undefined,
@@ -488,28 +469,6 @@ async function logCodexImageAuthSelected(params: {
       model,
     )} responsesModel=${DEFAULT_OPENAI_CODEX_IMAGE_RESPONSES_MODEL} timeoutMs=${params.timeoutMs}`,
   );
-}
-
-// Direct Images API auth failures look like account or model problems unless the
-// message names the route OpenClaw picked; an unused OAuth profile is the common cause.
-function annotateDirectImageAuthFailure(
-  error: unknown,
-  params: { url: string; authMode?: unknown; authSource?: unknown; oauthAvailable: boolean },
-): void {
-  const status = (error as { status?: unknown } | undefined)?.status;
-  if (!(error instanceof Error) || (status !== 401 && status !== 403)) {
-    return;
-  }
-  // Query strings can carry tokens on proxied endpoints, so only origin and path are shown.
-  const parsedUrl = URL.parse(params.url);
-  const endpoint = parsedUrl ? `${parsedUrl.origin}${parsedUrl.pathname}` : undefined;
-  const route = `route=images-api url=${sanitizeLogValue(endpoint)} credential=${sanitizeLogValue(
-    params.authMode ?? "api-key",
-  )} source=${sanitizeLogValue(params.authSource ?? "unknown")}`;
-  const hint = params.oauthAvailable
-    ? `; a ChatGPT/Codex OAuth profile exists but explicit models.providers.openai settings select the direct Images API. Set api "openai-chatgpt-responses" without apiKey or auth "api-key" to use that profile`
-    : "";
-  error.message = `${error.message} (${route}${hint})`;
 }
 
 function isCodexModelUnavailableBody(body: string | undefined, model: string): boolean {
@@ -919,6 +878,9 @@ export function buildOpenAIImageGenerationProvider(
             url,
             authMode: imageAuth.mode,
             authSource: imageAuth.source,
+            authOverridden: isAzure
+              ? requestOptions.headers.get("api-key") !== imageAuth.apiKey
+              : requestOptions.headers.get("authorization") !== `Bearer ${imageAuth.apiKey}`,
             oauthAvailable:
               explicitDirectOpenAIConfig &&
               hasCodexResponseTransportProfileConfigured(req, modelAuth),

@@ -1,6 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { ok } from "@openclaw/normalization-core/result";
-import { readBoardSessionKeys } from "../../boards/sqlite-board-store.kernel.js";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely,
@@ -138,21 +137,13 @@ export async function readSessionEntryWorkerRequest(
     const read = withOpenClawAgentDatabaseReadOnly(
       (database) => {
         const target = readTarget();
-        const identity = readOpenClawAgentDatabaseIdentity(database);
-        if (
-          typeof identity.identity !== "string" ||
-          !isOpenClawAgentDatabasePathCurrent(database)
-        ) {
-          throw new Error("Session runtime target requires its current durable owner");
-        }
         return {
           target,
-          source: {
-            agentId: database.agentId,
-            path: database.path,
-            databaseIdentity: identity.identity,
-            databaseBirthtime: identity.birthtime,
-          },
+          source: captureSessionEntryReadSource(
+            database,
+            undefined,
+            "Session runtime target requires its current durable owner",
+          ),
         };
       },
       { ...request.database, env: request.scope.env },
@@ -206,13 +197,14 @@ export async function readSessionEntryWorkerRequest(
 function captureSessionEntryReadSource(
   database: Parameters<typeof listSqliteSessionEntriesFromDatabase>[0],
   expectedIdentity: SessionEntryListWorkerInput["expectedIdentity"],
+  unavailableMessage = "Session entry read requires its current durable owner",
 ) {
   if (expectedIdentity) {
     assertOpenClawAgentDatabaseIdentity(database, expectedIdentity);
   }
   const identity = readOpenClawAgentDatabaseIdentity(database);
   if (typeof identity.identity !== "string" || !isOpenClawAgentDatabasePathCurrent(database)) {
-    throw new Error("Session entry read requires its current durable owner");
+    throw new Error(unavailableMessage);
   }
   return {
     agentId: database.agentId,
@@ -295,24 +287,17 @@ export function readSessionEntryCurrentFacts(
   const result = withOpenClawAgentDatabaseReadOnly(
     (database) =>
       readWithCanonicalSessionReaderContinuation(database, request.continuation, () => {
-        const identity = readOpenClawAgentDatabaseIdentity(database);
-        if (
-          typeof identity.identity !== "string" ||
-          !isOpenClawAgentDatabasePathCurrent(database)
-        ) {
-          throw new Error("Session currency read requires its current durable owner");
-        }
+        const source = captureSessionEntryReadSource(
+          database,
+          undefined,
+          "Session currency read requires its current durable owner",
+        );
         if (request.source) {
           assertSessionEntryCurrentNativeSource(request.source, database);
         }
         return {
           entry: readSessionEntryCurrentFactsInDatabase(database, sessionKey),
-          source: {
-            agentId: database.agentId,
-            path: database.path,
-            databaseIdentity: identity.identity,
-            databaseBirthtime: identity.birthtime,
-          },
+          source,
         };
       }),
     { ...request.database, env: request.scope.env },
@@ -332,19 +317,11 @@ export function readSessionDiagnosticText(request: SessionDiagnosticTextWorkerIn
     (database) =>
       readWithCanonicalSessionReaderContinuation(database, request.continuation, () =>
         runSqliteDeferredTransactionSync(database.db, () => {
-          const identity = readOpenClawAgentDatabaseIdentity(database);
-          if (
-            typeof identity.identity !== "string" ||
-            !isOpenClawAgentDatabasePathCurrent(database)
-          ) {
-            throw new Error("Session diagnostic read requires its current durable owner");
-          }
-          const source = {
-            agentId: database.agentId,
-            path: database.path,
-            databaseIdentity: identity.identity,
-            databaseBirthtime: identity.birthtime,
-          };
+          const source = captureSessionEntryReadSource(
+            database,
+            undefined,
+            "Session diagnostic read requires its current durable owner",
+          );
           const scope = {
             agentId: request.scope.agentId,
             sessionKey: resolveSqliteSessionKey(request.scope.sessionKey, request.scope.agentId),
@@ -675,19 +652,21 @@ export function readSessionRowDatabaseFacts(
             request.sessionKeys,
             "list",
             "canonical",
+            { includeBoardPresence: true },
           );
-          const boardKeys = readBoardSessionKeys(database, request.sessionKeys);
           return {
             kind: "session-row-facts" as const,
             rows: request.sessionKeys.flatMap((sessionKey) => {
-              const entry = readRow(sessionKey)?.entry;
-              if (!entry) {
+              const selected = readRow(sessionKey);
+              if (!selected) {
                 return [];
               }
+              const { entry } = selected;
               const facts: SessionRowDatabaseFacts = {
                 sessionKey,
                 entry,
-                hasBoard: boardKeys.has(sessionKey),
+                hasBoard:
+                  selected.row.session_key === sessionKey && selected.row.board_present === 1,
               };
               if (readSessionActivitySummary(entry)) {
                 facts.activitySummaryWatermark = readSessionTranscriptWatermarkInDatabase(

@@ -91,8 +91,6 @@ const loadDispatchAcpTranscriptRuntime = createLazyPromise(
   () => import("./dispatch-acp-transcript.runtime.js"),
 );
 
-type DispatchProcessedRecorder = InboundMessageAuditTerminalRecorder["note"];
-
 function resolveAcpRequestId(ctx: FinalizedRuntimeMsgContext): string {
   const id = ctx.MessageSidFull ?? ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
   return (
@@ -153,14 +151,13 @@ export async function tryDispatchAcpReplyCore(
     images?: Array<{ data: string; mimeType: string }>;
     extractedFileImages?: ExtractedFileImage[];
     sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
-    shouldSendToolSummaries: boolean;
-    shouldSendToolSummariesNow?: () => boolean;
-    shouldSendFullToolDetails: boolean;
+    shouldSendToolSummaries: () => Promise<boolean>;
+    shouldSendFullToolDetails: () => Promise<boolean>;
     bypassForCommand: boolean;
     onAgentRunStart?: GetReplyOptions["onAgentRunStart"];
     userTurnTranscriptRecorder?: GetReplyOptions["userTurnTranscriptRecorder"];
     prepareAssistantTranscriptMessage?: PrepareAssistantTranscriptMessage;
-    recordProcessed: DispatchProcessedRecorder;
+    recordProcessed: InboundMessageAuditTerminalRecorder["note"];
     markIdle: (reason: string) => void;
   },
 ): Promise<AcpDispatchAttemptResult | null> {
@@ -352,7 +349,6 @@ export async function tryDispatchAcpReplyCore(
   const projector = createAcpReplyProjector({
     cfg: params.cfg,
     shouldSendToolSummaries: params.shouldSendToolSummaries,
-    shouldSendToolSummariesNow: params.shouldSendToolSummariesNow,
     shouldSendFullToolDetails: params.shouldSendFullToolDetails,
     deliver: delivery.deliver,
     getConversationContext: () => params.ctx.agentText,

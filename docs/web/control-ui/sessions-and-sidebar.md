@@ -330,14 +330,14 @@ including while the team directory is loading or unavailable.
 
 1. Open the saved session and select **Session sharing** in the chat header. In the compact header menu, select **Session sharing** there instead.
 2. Under **Public access**, select **Enable public access…**, review the warning, then select **Make public**.
-3. Select **Copy public link**. The **Public** badge in the chat header remains visible while the transcript is published.
-4. Open the copied URL in a signed-out browser to verify that it shows the intended conversation text. New user messages and assistant final answers become visible there automatically.
-5. Return to **Session sharing** and select **Disable public access** when the link should stop working. The same URL then returns an unavailable page; disabling access cannot recall copies that recipients already saved.
+3. Select **Copy public link** to copy the normal thread URL. The **Public** badge in the chat header remains visible while the transcript is published.
+4. Open that same URL in a signed-out browser to verify the read-only conversation and **Log in** button. Signing in returns to the thread with your existing permissions. New user messages and assistant final answers become visible to public readers automatically.
+5. Return to **Session sharing** and select **Disable public access** to stop anonymous reads. The same URL then returns an unavailable page to signed-out readers. Enabling access again makes that URL public again; disabling access cannot recall saved copies.
 
 The public page excludes tools, reasoning, files, images, widgets, hidden messages,
 and internal metadata. Credential-pattern redaction is best effort, so review the
 conversation itself before publishing. Public access does not let visitors send
-messages or open the authenticated Control UI. For token lifecycle, pagination,
+messages or grant authenticated Control UI permissions. For link lifecycle, pagination,
 backup behavior, and login-proxy configuration, see
 [Public session transcripts](/web/urls#public-session-transcripts).
 
@@ -511,6 +511,8 @@ If startup is rejected, the draft remains available to correct and retry.
 
 On an OpenClaw Chat send, the submitted text and attachments appear immediately with a **Starting** indicator while the Gateway creates or adopts the session. This is a pending submission, not a Gateway acknowledgment. If creation is rejected, your prompt and attachments remain available to correct and retry. Once creation succeeds, the UI opens the session's chat. If navigation fails, the submitted message stays visible with an **Open session** action that retries navigation without creating or sending again. A background start keeps the same visible acknowledgment above the next draft, with a link to the created session.
 
+If the model catalog is still loading, session creation stops waiting after a shared 20-second catalog deadline and reports that the session was not created. Retry shortly; your draft remains available. Closing the requesting connection or losing its authority also ends a pending catalog wait.
+
 Starting a suggested task keeps its instructions visible through acceptance, with **Task started** and **Open session** after confirmation. Interrupted acceptance remains visible, and Retry checks the same task. Skill Workshop revisions carry their submitted instructions into chat while history loads.
 
 Attributed submissions show your avatar immediately, in the same position as the chat transcript. Opening the created session focuses the composer quietly; the attention cue is reserved for navigation that prefills a draft.
@@ -564,7 +566,7 @@ checkout directory's name.
 Registering the same resolved repository root again returns its existing project ID and
 display name. Passing a different `name` does not rename an existing project.
 
-`projects.list` returns recorded projects without probing Git. Operators with
+`projects.list` returns recorded projects without checking Git. Operators with
 `operator.write` can request `{"includeObserved":true}` to discover additional
 checkouts from visible sessions and managed worktrees. Concurrent discovery of
 the same checkout set shares one bounded Git pass; subsequent requests read

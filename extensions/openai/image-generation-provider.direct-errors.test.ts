@@ -16,7 +16,8 @@ const { assertOkOrThrowHttpErrorMock, postJsonRequestMock } = vi.hoisted(() => (
   })),
 }));
 
-vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
+vi.mock("openclaw/plugin-sdk/provider-auth-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/provider-auth-runtime")>()),
   resolveApiKeyForProvider: vi.fn(async () => ({
     apiKey: "openai-key",
     mode: "api-key",

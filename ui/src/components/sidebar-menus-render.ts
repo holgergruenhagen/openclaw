@@ -221,7 +221,7 @@ export function renderSidebarSessionMenuForController(controller: SidebarMenusCo
   }
   const context = host.sessionDataContext;
   const pluginActionSignal = controller.pluginActionLifetime.signal;
-  const currentSession = host.findSidebarSessionByKey(menu.session.key);
+  const currentSession = host.findSidebarMenuSessionByKey(menu.session.key);
   // Read again at dispatch: session updates can arrive before the menu rerenders.
   const currentPluginSession = () =>
     host.sessionData.sessionsResult?.sessions.find(

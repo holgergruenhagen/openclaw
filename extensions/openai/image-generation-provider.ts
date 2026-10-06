@@ -490,6 +490,28 @@ async function logCodexImageAuthSelected(params: {
   );
 }
 
+// Direct Images API auth failures look like account or model problems unless the
+// message names the route OpenClaw picked; an unused OAuth profile is the common cause.
+function annotateDirectImageAuthFailure(
+  error: unknown,
+  params: { url: string; authMode?: unknown; authSource?: unknown; oauthAvailable: boolean },
+): void {
+  const status = (error as { status?: unknown } | undefined)?.status;
+  if (!(error instanceof Error) || (status !== 401 && status !== 403)) {
+    return;
+  }
+  // Query strings can carry tokens on proxied endpoints, so only origin and path are shown.
+  const parsedUrl = URL.parse(params.url);
+  const endpoint = parsedUrl ? `${parsedUrl.origin}${parsedUrl.pathname}` : undefined;
+  const route = `route=images-api url=${sanitizeLogValue(endpoint)} credential=${sanitizeLogValue(
+    params.authMode ?? "api-key",
+  )} source=${sanitizeLogValue(params.authSource ?? "unknown")}`;
+  const hint = params.oauthAvailable
+    ? `; a ChatGPT/Codex OAuth profile exists but explicit models.providers.openai settings select the direct Images API. Set api "openai-chatgpt-responses" without apiKey or auth "api-key" to use that profile`
+    : "";
+  error.message = `${error.message} (${route}${hint})`;
+}
+
 function isCodexModelUnavailableBody(body: string | undefined, model: string): boolean {
   if (!body) {
     return false;
@@ -887,10 +909,22 @@ export function buildOpenAIImageGenerationProvider(
         : await postJsonRequest({ ...requestOptions, body });
       const { response, release } = requestResult;
       try {
-        await assertOkOrThrowHttpError(
-          response,
-          isEdit ? "OpenAI image edit failed" : "OpenAI image generation failed",
-        );
+        try {
+          await assertOkOrThrowHttpError(
+            response,
+            isEdit ? "OpenAI image edit failed" : "OpenAI image generation failed",
+          );
+        } catch (error) {
+          annotateDirectImageAuthFailure(error, {
+            url,
+            authMode: imageAuth.mode,
+            authSource: imageAuth.source,
+            oauthAvailable:
+              explicitDirectOpenAIConfig &&
+              hasCodexResponseTransportProfileConfigured(req, modelAuth),
+          });
+          throw error;
+        }
 
         const data = await readProviderJsonResponse(response, "openai.image-generation", {
           maxBytes: resolveInlineImageJsonResponseMaxBytes(

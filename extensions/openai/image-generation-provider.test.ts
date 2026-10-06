@@ -721,6 +721,66 @@ describe("openai image generation provider", () => {
     expect(jsonRequestCall().headers?.get("X-Test-OpenAI")).toBe("direct");
   });
 
+  it("names the direct route and unused OAuth profile when explicit config gets a scope error", async () => {
+    resolveApiKeyForProviderMock.mockResolvedValue({
+      apiKey: "openai-key",
+      mode: "api-key",
+      source: "env: OPENAI_API_KEY",
+    });
+    const { ProviderHttpError } = await import("openclaw/plugin-sdk/provider-http");
+    const scopeError = new ProviderHttpError(
+      "OpenAI image generation failed (HTTP 401): Missing scopes: api.model.images.request",
+      { status: 401 },
+    );
+    assertOkOrThrowHttpErrorMock.mockRejectedValueOnce(scopeError);
+
+    const request = generateOpenAIImage("Scope error", {
+      cfg: openAIImageConfig({ baseUrl: "https://api.openai.com/v1", api: "openai-completions" }),
+      authStore: createCodexOAuthAuthStore(),
+    });
+
+    await expect(request).rejects.toBe(scopeError);
+    expect(scopeError.status).toBe(401);
+    expect(scopeError.message).toBe(
+      "OpenAI image generation failed (HTTP 401): Missing scopes: api.model.images.request " +
+        "(route=images-api url=https://api.openai.com/v1/images/generations credential=api-key " +
+        "source=env: OPENAI_API_KEY; a ChatGPT/Codex OAuth profile exists but explicit " +
+        "models.providers.openai settings select the direct Images API. Set api " +
+        '"openai-chatgpt-responses" without apiKey or auth "api-key" to use that profile)',
+    );
+  });
+
+  it("names the direct route without an OAuth hint when no OAuth profile exists", async () => {
+    resolveApiKeyForProviderMock.mockResolvedValue({ apiKey: "openai-key", mode: "api-key" });
+    const { ProviderHttpError } = await import("openclaw/plugin-sdk/provider-http");
+    const forbidden = new ProviderHttpError("OpenAI image edit failed (HTTP 403)", {
+      status: 403,
+    });
+    assertOkOrThrowHttpErrorMock.mockRejectedValueOnce(forbidden);
+
+    await expect(
+      generateOpenAIImage("Forbidden edit", {
+        cfg: openAIImageConfig({ baseUrl: "https://proxy.example.test/v1" }),
+        inputImages: [{ buffer: Buffer.from("png-bytes"), mimeType: "image/png" }],
+      }),
+    ).rejects.toBe(forbidden);
+    expect(forbidden.message).toBe(
+      "OpenAI image edit failed (HTTP 403) " +
+        "(route=images-api url=https://proxy.example.test/v1/images/edits credential=api-key source=unknown)",
+    );
+  });
+
+  it("leaves non-auth direct image failures unchanged", async () => {
+    const { ProviderHttpError } = await import("openclaw/plugin-sdk/provider-http");
+    const rateLimited = new ProviderHttpError("OpenAI image generation failed (HTTP 429)", {
+      status: 429,
+    });
+    assertOkOrThrowHttpErrorMock.mockRejectedValueOnce(rateLimited);
+
+    await expect(generateOpenAIImage("Rate limited")).rejects.toBe(rateLimited);
+    expect(rateLimited.message).toBe("OpenAI image generation failed (HTTP 429)");
+  });
+
   it("uses Azure deployment-scoped JSON requests and its default timeout", async () => {
     await generateOpenAIImage("Transparent Azure sticker", {
       cfg: openAIImageConfig({ baseUrl: "https://myresource.openai.azure.com/openai/v1" }),

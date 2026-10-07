@@ -1,4 +1,3 @@
-// Doctor preview warning aggregation for config that can surprise users before repair.
 import { isRecord as hasRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   listAgentEntriesWithSource,
@@ -15,7 +14,6 @@ import type { OpenClawConfigWithLegacyRoster } from "../../../config/legacy.rost
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { ToolPolicyConfig } from "../../../config/types.tools.js";
 import { collectChannelRouteTargets } from "../../../routing/channel-route-targets.js";
-import { createLazyImportLoader } from "../../../shared/lazy-promise.js";
 import { VERSION_BOUND_RUNTIME_PLUGIN_POLICY_IDS_BY_SURFACE } from "./configured-runtime-plugin-installs.js";
 import type { BlockedLegacyOpenAICodexProviderPlan } from "./legacy-config-migrations.runtime.models.js";
 import {
@@ -24,12 +22,6 @@ import {
   SOURCE_REPLY_RUNTIME_MESSAGE_ALLOW,
 } from "./preview-message-tool-policy.js";
 import { resolveDoctorPrimaryModelRef } from "./primary-model-ref.js";
-
-type ChannelDoctorModule = typeof import("./channel-doctor.js");
-
-const channelDoctorModuleLoader = createLazyImportLoader<ChannelDoctorModule>(
-  () => import("./channel-doctor.js"),
-);
 
 function listAgentRecords(cfg: OpenClawConfig) {
   return listAgentEntriesWithSource(cfg).map(({ entry }) => entry);
@@ -102,7 +94,6 @@ function formatTargets(targets: string[]): string {
   return `${targets.slice(0, 2).join(", ")}, and ${targets.length - 2} more`;
 }
 
-/** Warn when visible-reply policy selects message_tool but message is unavailable. */
 function collectVisibleReplyToolPolicyWarnings(cfg: OpenClawConfig): string[] {
   const groupPolicy = resolveGroupVisibleReplyPolicy(cfg);
   const warnings: string[] = [];
@@ -133,7 +124,6 @@ function collectVisibleReplyToolPolicyWarnings(cfg: OpenClawConfig): string[] {
   return warnings;
 }
 
-/** Warn when routed channel agents lack the message tool required for channel actions. */
 function collectChannelBoundMessageToolPolicyWarnings(cfg: OpenClawConfig): string[] {
   return collectChannelRouteTargets(cfg).flatMap((target) => {
     const agentTools = resolveAgentConfig(cfg, target.agentId)?.tools;
@@ -242,22 +232,18 @@ function collectProfileConfiguredToolSectionScopeWarnings(params: {
   tools?: Record<string, unknown> | null;
   inheritedTools?: Record<string, unknown> | null;
   pathLabel: string;
-  inheritedPathLabel?: string;
-  includeInheritedSections?: boolean;
-  inheritedProfile?: string;
-  inheritedAlsoAllow?: string[];
 }): string[] {
   const tools = params.tools;
   const profile =
-    (typeof tools?.profile === "string" ? tools.profile : undefined) ?? params.inheritedProfile;
-  if (!profile) {
+    typeof tools?.profile === "string" ? tools.profile : params.inheritedTools?.profile;
+  if (typeof profile !== "string" || !profile) {
     return [];
   }
   const configuredEntries = [
-    ...(params.includeInheritedSections && params.inheritedTools && params.inheritedPathLabel
+    ...(tools !== undefined && typeof tools?.profile !== "string" && params.inheritedTools
       ? collectConfiguredToolSectionGrantEntries({
           tools: params.inheritedTools,
-          pathLabel: params.inheritedPathLabel,
+          pathLabel: "tools",
         })
       : []),
     ...collectConfiguredToolSectionGrantEntries({ tools, pathLabel: params.pathLabel }),
@@ -265,7 +251,9 @@ function collectProfileConfiguredToolSectionScopeWarnings(params: {
   if (configuredEntries.length === 0) {
     return [];
   }
-  const alsoAllow = readPreviewStringList(tools?.alsoAllow) ?? params.inheritedAlsoAllow;
+  const alsoAllow =
+    readPreviewStringList(tools?.alsoAllow) ??
+    readPreviewStringList(params.inheritedTools?.alsoAllow);
   const profilePolicy = mergeAlsoAllowPolicy(resolveToolProfilePolicy(profile), alsoAllow);
   return collectProfileConfiguredSectionWarnings({
     configuredEntries,
@@ -338,7 +326,6 @@ function resolveInheritedProviderPolicyForPreview(
 
 function collectInheritedByProviderConfiguredToolSectionWarnings(params: {
   inheritedTools?: Record<string, unknown> | null;
-  inheritedPathLabel: string;
   overridingTools?: Record<string, unknown> | null;
   overridingPathLabel: string;
   configuredEntries: ConfiguredToolSectionGrantEntry[];
@@ -393,7 +380,7 @@ function collectInheritedByProviderConfiguredToolSectionWarnings(params: {
       configuredEntries: params.configuredEntries,
       profilePolicy,
       profile,
-      profilePath: `${params.inheritedPathLabel}.byProvider.${providerKey}`,
+      profilePath: `tools.byProvider.${providerKey}`,
       advicePath: `${params.overridingPathLabel}.byProvider.${overridingEntry?.key ?? providerKey}`,
       profileKind: "inherited provider",
       hasAllow: hasNonEmptyStringList(overridingPolicy?.allow),
@@ -401,12 +388,9 @@ function collectInheritedByProviderConfiguredToolSectionWarnings(params: {
   });
 }
 
-/** Warn when configured tool sections no longer widen restrictive tool profiles. */
 function collectProfileConfiguredToolSectionWarnings(cfg: OpenClawConfig): string[] {
   const warnings: string[] = [];
   const globalTools = hasRecord(cfg.tools) ? cfg.tools : undefined;
-  const globalAlsoAllow = readPreviewStringList(globalTools?.alsoAllow);
-  const globalProfile = typeof globalTools?.profile === "string" ? globalTools.profile : undefined;
   const globalConfiguredEntries = collectConfiguredToolSectionGrantEntries({
     tools: globalTools,
     pathLabel: "tools",
@@ -430,8 +414,6 @@ function collectProfileConfiguredToolSectionWarnings(cfg: OpenClawConfig): strin
     const agentConfig = agentId ? resolveAgentConfig(cfg, agentId) : undefined;
     const modelRef = resolveDoctorPrimaryModelRef(cfg, agentConfig?.model);
     const agentPath = `agents.${source.kind === "entries" ? `entries.${source.key}` : `list[${source.index}]`}.tools`;
-    const includeInheritedSections =
-      agentTools !== undefined && typeof agentTools.profile !== "string";
     const ownAgentConfiguredEntries = collectConfiguredToolSectionGrantEntries({
       tools: agentTools,
       pathLabel: agentPath,
@@ -442,10 +424,6 @@ function collectProfileConfiguredToolSectionWarnings(cfg: OpenClawConfig): strin
         tools: agentTools,
         inheritedTools: globalTools,
         pathLabel: agentPath,
-        inheritedPathLabel: "tools",
-        includeInheritedSections,
-        inheritedProfile: globalProfile,
-        inheritedAlsoAllow: globalAlsoAllow,
       }),
       ...collectByProviderConfiguredToolSectionWarnings({
         tools: agentTools,
@@ -455,7 +433,6 @@ function collectProfileConfiguredToolSectionWarnings(cfg: OpenClawConfig): strin
       }),
       ...collectInheritedByProviderConfiguredToolSectionWarnings({
         inheritedTools: globalTools,
-        inheritedPathLabel: "tools",
         overridingTools: agentTools,
         overridingPathLabel: agentPath,
         configuredEntries: ownAgentConfiguredEntries,
@@ -494,7 +471,6 @@ export async function resolveDoctorChannelPreviewConfig(params: {
   return { cfg: resolved.resolvedConfig, diagnostics: resolved.diagnostics };
 }
 
-/** Collect info and warning notes for doctor preview mode. */
 export async function collectDoctorPreviewNotes(params: {
   cfg: unknown;
   activationSourceConfig?: OpenClawConfigWithLegacyRoster;
@@ -546,15 +522,13 @@ export async function collectDoctorPreviewNotes(params: {
       allowExec: params.allowExec,
     });
     warnings.push(...channelPreviewConfig.diagnostics);
-    const { collectChannelDoctorPreviewWarnings } = await channelDoctorModuleLoader.load();
+    const { collectChannelDoctorPreviewWarnings } = await import("./channel-doctor.js");
     const channelDoctorWarnings = await collectChannelDoctorPreviewWarnings({
       cfg: channelPreviewConfig.cfg,
       doctorFixCommand: params.doctorFixCommand,
       env,
     });
-    if (channelDoctorWarnings.length > 0) {
-      warnings.push(...channelDoctorWarnings);
-    }
+    warnings.push(...channelDoctorWarnings);
 
     const { collectOpenPolicyAllowFromWarnings, maybeRepairOpenPolicyAllowFrom } =
       await import("./open-policy-allowfrom.js");
@@ -629,7 +603,7 @@ export async function collectDoctorPreviewNotes(params: {
   }
 
   if (hasChannelConfig) {
-    const { createChannelDoctorEmptyAllowlistPolicyHooks } = await channelDoctorModuleLoader.load();
+    const { createChannelDoctorEmptyAllowlistPolicyHooks } = await import("./channel-doctor.js");
     const { scanEmptyAllowlistPolicyWarnings } = await import("./empty-allowlist-scan.js");
     const emptyAllowlistHooks = createChannelDoctorEmptyAllowlistPolicyHooks({
       cfg: params.cfg,

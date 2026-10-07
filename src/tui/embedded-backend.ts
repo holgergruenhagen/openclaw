@@ -5,6 +5,7 @@ import type {
   SessionsPatchResult,
 } from "../../packages/gateway-protocol/src/index.js";
 import { CHAT_HISTORY_MAX_ENTRIES } from "../../packages/gateway-protocol/src/schema/chat-history-constants.js";
+import { readAcpSessionMetaForEntries } from "../acp/runtime/session-meta-readonly.js";
 import { agentCommandFromIngress } from "../agents/agent-command.js";
 import { isAgentLifecycleYieldedWaiting } from "../agents/agent-lifecycle-parent-state.js";
 import { findAgentRunTerminalOutcome } from "../agents/agent-run-terminal-error.js";
@@ -82,7 +83,7 @@ import {
 import { capArrayByJsonBytes } from "../gateway/session-transcript-readers.js";
 import { projectSessionPatchResult } from "../gateway/session-utils-model.js";
 import { buildGatewaySessionRow } from "../gateway/session-utils-row.js";
-import { createGatewaySessionEntryReader } from "../gateway/session-utils-store-lookup.js";
+import { createGatewaySessionEntryReader } from "../gateway/session-utils-store-lineage.js";
 import {
   getSessionDefaults,
   listAgentsForGateway,
@@ -243,6 +244,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
       return createSessionRowProjection({ cfg: getRuntimeConfig(), getConfig: getRuntimeConfig });
     })();
     this.ready = this.sessionProjection.then(() => {});
+    void this.ready.catch(() => {});
     this.unbindSessionProjection = bindEmbeddedSessionRowProjection(this.sessionProjection);
     queueMicrotask(() => {
       this.onConnected?.();
@@ -554,25 +556,32 @@ export class EmbeddedTuiBackend implements TuiBackend {
       agentId: sessionAgentId,
       storePath: readSource?.path ?? storePath,
     };
-    const sessionInfo =
-      entry && (entry.incognito || isIncognitoSessionKey(canonicalKey))
-        ? buildGatewaySessionRow({
-            cfg,
-            storePath,
-            store,
-            key: canonicalKey,
-            entry,
-            agentId: sessionAgentId,
-            modelSource: { entry, readSourceEntry: createGatewaySessionEntryReader(selected) },
-            lightweightListRow: true,
-            skipTranscriptUsageFallback: true,
+    const privateEntry = entry && (entry.incognito || isIncognitoSessionKey(canonicalKey));
+    const [privateAcpMeta] = privateEntry
+      ? await readAcpSessionMetaForEntries({
+          cfg,
+          entries: [{ agentId: sessionAgentId, sessionKey: canonicalKey, entry }],
+        })
+      : [];
+    const sessionInfo = privateEntry
+      ? buildGatewaySessionRow({
+          cfg,
+          storePath,
+          store,
+          key: canonicalKey,
+          entry,
+          preparedAcpMeta: privateAcpMeta ?? null,
+          agentId: sessionAgentId,
+          modelSource: { entry, readSourceEntry: createGatewaySessionEntryReader(selected) },
+          lightweightListRow: true,
+          skipTranscriptUsageFallback: true,
+        })
+      : entry && projection
+        ? await readEmbeddedHistorySessionInfo(projection, target, {
+            sessionId,
+            lifecycleRevision: entry.lifecycleRevision,
           })
-        : entry && projection
-          ? await readEmbeddedHistorySessionInfo(projection, target, {
-              sessionId,
-              lifecycleRevision: entry.lifecycleRevision,
-            })
-          : undefined;
+        : undefined;
     const verboseLevel = entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
     if (sessionInfo) {
       sessionInfo.thinkingLevel = thinkingLevel;
@@ -645,10 +654,16 @@ export class EmbeddedTuiBackend implements TuiBackend {
       throw new Error(applied.error.message);
     }
 
+    const canonicalKey = target.canonicalKey ?? opts.key;
+    const [acpMeta] = await readAcpSessionMetaForEntries({
+      cfg,
+      entries: [{ agentId: target.agentId, sessionKey: canonicalKey, entry: applied.entry }],
+    });
     const projected = projectSessionPatchResult({
-      canonicalKey: target.canonicalKey ?? opts.key,
+      canonicalKey,
       cfg,
       entry: applied.entry,
+      preparedAcpMeta: acpMeta ?? null,
       storePath: target.storePath,
       targetAgentId: target.agentId,
     });
@@ -792,7 +807,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
     return { ok: this.pluginApprovalBroker.resolve(id, decision) };
   }
 
-  async listModels(opts?: { agentId?: string }): Promise<TuiModelChoice[]> {
+  async listModels(opts?: { agentId?: string; sessionKey?: string }): Promise<TuiModelChoice[]> {
     await this.ready;
     await this.preparedModelRuntime.waitUntilReady();
     const cfg = getRuntimeConfig();
@@ -867,7 +882,14 @@ export class EmbeddedTuiBackend implements TuiBackend {
   }):
     | { kind: "handled"; runId: string }
     | { kind: "enqueue"; queue: NonNullable<LocalRunState["pendingQueue"]> } {
-    const pendingMessages = this.listPendingLocalMessages(params.runScope);
+    const pendingMessages: LocalPendingMessage[] = [];
+    for (const run of this.runs.values()) {
+      if (this.isSameRunScope(run, params.runScope) && run.pendingQueue) {
+        run.pendingQueue.messages.forEach((message, messageIndex) => {
+          pendingMessages.push({ run, messageIndex, message });
+        });
+      }
+    }
     const overflowQueue = {
       items: [...pendingMessages],
       cap: params.settings.cap ?? DEFAULT_QUEUE_CAP,
@@ -945,22 +967,6 @@ export class EmbeddedTuiBackend implements TuiBackend {
         summaryLines: overflowQueue.summaryLines,
       },
     };
-  }
-
-  private listPendingLocalMessages(params: {
-    sessionKey: string;
-    agentId?: string;
-  }): LocalPendingMessage[] {
-    const pending: LocalPendingMessage[] = [];
-    for (const run of this.runs.values()) {
-      if (!this.isSameRunScope(run, params) || !run.pendingQueue) {
-        continue;
-      }
-      run.pendingQueue.messages.forEach((message, messageIndex) => {
-        pending.push({ run, messageIndex, message });
-      });
-    }
-    return pending;
   }
 
   private findQueuedSessionRunPromise(params: {

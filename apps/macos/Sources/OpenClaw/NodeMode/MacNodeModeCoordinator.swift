@@ -22,14 +22,6 @@ struct MacNodeGatewayTLSSessionCache {
     }
 }
 
-private struct EffectiveEndpoint: Equatable {
-    let mode: AppState.ConnectionMode
-    let url: URL
-    let token: String?
-    let password: String?
-    let routeRevision: UInt64
-}
-
 private struct ConnectionAttempt {
     let endpointGeneration: UInt64
     let routeAuthorityGeneration: UInt64
@@ -94,7 +86,7 @@ final class MacNodeModeCoordinator: NSObject {
     private var nodeHostWorkerConfigurationGeneration: UInt64 = 0
     private var nodeHostWorkerRetryTaskGeneration: UInt64 = 0
     private var pendingEndpoint: GatewayConnection.EndpointSnapshot?
-    private var activeNodeHostWorkerInput: MacNodeHostWorkerRetryPolicy.Input?
+    private var activeNodeHostWorkerInput: MacNodeHostWorkerLaunch?
     private var lastNodeHostWorkerStartFailure: (reason: String, diagnostic: String?)?
     private(set) var desktopSharingEnabled: Bool? {
         didSet {
@@ -872,10 +864,9 @@ final class MacNodeModeCoordinator: NSObject {
         guard self.nodeHostWorkerRetryTask == nil else {
             throw MacNodeHostWorkerRetryPolicy.RetryBackoffPending()
         }
-        let input = MacNodeHostWorkerRetryPolicy.Input(
-            launch: MacNodeHostWorkerLaunch(
-                command: command,
-                configurationGeneration: self.nodeHostWorkerConfigurationGeneration))
+        let input = MacNodeHostWorkerLaunch(
+            command: command,
+            configurationGeneration: self.nodeHostWorkerConfigurationGeneration)
         try self.nodeHostWorkerRetryPolicy.prepareForStart(input)
         self.activeNodeHostWorkerInput = input
     }
@@ -1038,7 +1029,7 @@ extension MacNodeModeCoordinator {
             // Worker launch metadata is startup-scoped. Route retries reuse it instead of
             // resolving the bundle again until an explicit restart resets state.
             try self.nodeHostWorkerRetryPolicy.prepareForStart(activeInput)
-            return try await nodeHostWorker.start(launch: activeInput.launch)
+            return try await nodeHostWorker.start(launch: activeInput)
         }
         let launch: MacNodeHostWorkerLaunch
         do {
@@ -1056,9 +1047,8 @@ extension MacNodeModeCoordinator {
             currentDirectoryURL: launch.currentDirectoryURL,
             environment: workerEnvironment,
             configurationGeneration: self.nodeHostWorkerConfigurationGeneration)
-        let input = MacNodeHostWorkerRetryPolicy.Input(launch: effectiveLaunch)
-        try self.nodeHostWorkerRetryPolicy.prepareForStart(input)
-        self.activeNodeHostWorkerInput = input
+        try self.nodeHostWorkerRetryPolicy.prepareForStart(effectiveLaunch)
+        self.activeNodeHostWorkerInput = effectiveLaunch
         return try await nodeHostWorker.start(launch: effectiveLaunch)
     }
 
@@ -1175,7 +1165,11 @@ extension MacNodeModeCoordinator {
         from previous: GatewayEndpointState,
         to next: GatewayEndpointState) -> Bool
     {
-        self.effectiveEndpoint(from: previous) != self.effectiveEndpoint(from: next)
+        switch (previous, next) {
+        case (.ready, .ready): previous != next
+        case (.ready, _), (_, .ready): true
+        default: false
+        }
     }
 
     nonisolated static func controlTransitionRequiresRouteInvalidation(
@@ -1272,16 +1266,6 @@ extension MacNodeModeCoordinator {
             lhs.routeAuthority == rhs.routeAuthority &&
             lhs.deviceAuthGatewayID == rhs.deviceAuthGatewayID &&
             lhs.revision == rhs.revision
-    }
-
-    private static func effectiveEndpoint(from state: GatewayEndpointState) -> EffectiveEndpoint? {
-        guard case let .ready(mode, url, token, password, routeRevision) = state else { return nil }
-        return EffectiveEndpoint(
-            mode: mode,
-            url: url,
-            token: token,
-            password: password,
-            routeRevision: routeRevision)
     }
 
     nonisolated static func advertisedPermissions(

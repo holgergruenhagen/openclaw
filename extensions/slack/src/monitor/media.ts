@@ -46,10 +46,8 @@ function isSlackHostname(hostname: string, govSlack: boolean): boolean {
 }
 
 function assertSlackFileUrl(rawUrl: string, govSlack: boolean): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
+  const parsed = URL.parse(rawUrl);
+  if (!parsed) {
     throw new Error(`Invalid Slack file URL: ${rawUrl}`);
   }
   if (parsed.protocol !== "https:") {
@@ -304,10 +302,6 @@ function resolveForwardedAttachmentImageUrl(
   }
 }
 
-/**
- * Downloads all files attached to a Slack message and returns them as an array.
- * Returns `null` when no files could be downloaded.
- */
 export async function resolveSlackMedia(params: {
   files?: SlackFile[];
   client?: SlackWebClient;
@@ -376,7 +370,6 @@ export async function resolveSlackMedia(params: {
   return resolved.length > 0 ? resolved : null;
 }
 
-/** Extracts text and media from forwarded-message attachments. Returns null when empty. */
 export async function resolveSlackAttachmentContent(params: {
   files?: SlackFile[];
   attachments?: SlackAttachment[];

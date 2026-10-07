@@ -114,16 +114,10 @@ import { createTypingController } from "./typing.js";
 
 type ResetCommandAction = "new" | "reset";
 
-const sessionResetModelRuntimeLoader = createLazyImportLoader(
-  () => import("./session-reset-model.runtime.js"),
-);
 const stageSandboxMediaRuntimeLoader = createLazyImportLoader(
   () => import("./stage-sandbox-media.runtime.js"),
 );
 const replyResolverTimingLog = createSubsystemLogger("auto-reply/reply-resolver-timing");
-const commandsCoreRuntimeLoader = createLazyImportLoader(
-  () => import("./commands-core.runtime.js"),
-);
 
 function canSelfServeLocalPaths(params: {
   ctx: MsgContext;
@@ -221,14 +215,6 @@ function finishCommandTurn(params: {
     runState.replyCompletion = resolveReplyCompletion("optional", "empty");
   }
   return reply;
-}
-
-function collectStagedAttachmentPaths(ctx: MsgContext): ReadonlyMap<number, string> {
-  return new Map(
-    normalizeMediaFacts(ctx.media).flatMap((fact, index) =>
-      fact.path ? [[index, fact.path] as const] : [],
-    ),
-  );
 }
 
 export async function getReplyFromConfig(
@@ -603,7 +589,7 @@ export async function getReplyFromConfig(
   let sessionState: Awaited<ReturnType<typeof initSessionState>>;
   try {
     sessionState = useFastTestBootstrap
-      ? initFastReplySessionState({
+      ? await initFastReplySessionState({
           ctx: finalized,
           cfg,
           agentId,
@@ -738,7 +724,7 @@ export async function getReplyFromConfig(
   }
 
   if (resetTriggered && normalizeOptionalString(bodyStripped)) {
-    const { applyResetModelOverride } = await sessionResetModelRuntimeLoader.load();
+    const { applyResetModelOverride } = await import("./session-reset-model.runtime.js");
     try {
       await applyResetModelOverride({
         cfg,
@@ -953,7 +939,7 @@ export async function getReplyFromConfig(
     if (!resetMatch) {
       return;
     }
-    const { emitResetCommandHooks } = await commandsCoreRuntimeLoader.load();
+    const { emitResetCommandHooks } = await import("./commands-core.runtime.js");
     const action: ResetCommandAction = resetMatch[1]?.toLowerCase() === "reset" ? "reset" : "new";
     await emitResetCommandHooks({
       action,
@@ -1114,8 +1100,12 @@ export async function getReplyFromConfig(
   }
   const { resolvedThinkLevel, resolvedReasoningLevel } = await resolveRunModelLevels();
 
-  let stagedAttachmentPaths = hasStagedMediaFacts(finalized.media)
-    ? collectStagedAttachmentPaths(finalized)
+  let stagedAttachmentPaths: ReadonlyMap<number, string> = hasStagedMediaFacts(finalized.media)
+    ? new Map(
+        normalizeMediaFacts(finalized.media).flatMap((fact, index) =>
+          fact.path ? [[index, fact.path] as const] : [],
+        ),
+      )
     : new Map<number, string>();
   // Already-staged facts or SDK projections must remain a single-stage contract.
   if (

@@ -32,6 +32,7 @@ import {
   resolveSessionSharingRole,
   resolveSessionSharingTarget,
 } from "../session-sharing.js";
+import { flushPendingSessionsChangedEvents } from "./session-change-event.js";
 import { sessionMutationHandlers } from "./sessions-mutations.js";
 import {
   createSessionMutationTestClient as client,
@@ -115,6 +116,8 @@ describe("sessions.patch", () => {
             presentation: "expanded",
           });
           expect(saved.details).toEqual({ ok: true, sessionKey, defaultPresentation: "expanded" });
+          // Finish the saved row's publication before the durability probe closes storage.
+          await flushPendingSessionsChangedEvents(requestContext);
           const database = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
           expect(await closeOpenClawAgentDatabaseByPathAsync(database.path)).toBe(true);
           expect(loadSessionEntry(scope)).toMatchObject({
@@ -482,7 +485,7 @@ describe("sessions.patch", () => {
         // the handler's reentrant writer context.
         const lifecycleWrite = catalogEntered.promise.then(async () => {
           await patchSessionEntryCore(scope(keys[1]!), () => ({
-            status: "running",
+            startedAt: 2,
             lifecycleRunId: "batch-catalog-run",
           }));
           revoked = revokeFirst;
@@ -526,7 +529,7 @@ describe("sessions.patch", () => {
           }
           await lifecycleWrite;
           expect(loadSessionEntry(scope(keys[1]!))).toMatchObject({
-            status: "running",
+            startedAt: 2,
             lifecycleRunId: "batch-catalog-run",
           });
           catalogRelease.resolve();
@@ -556,7 +559,7 @@ describe("sessions.patch", () => {
             expect(loadSessionEntry(scope(keys[1]!))?.archivedAt).toBeUndefined();
           }
           expect(loadSessionEntry(scope(keys[1]!))).toMatchObject({
-            status: "running",
+            startedAt: 2,
             lifecycleRunId: "batch-catalog-run",
           });
         } finally {

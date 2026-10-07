@@ -19,6 +19,7 @@ import {
   requestContext,
 } from "./server-methods/sessions-read-cache.test-support.js";
 import { retainSessionListForegroundWork } from "./session-projection-work.js";
+import { withReadySessionRows } from "./session-row-prepared-read.js";
 import { bindSessionRowProjection } from "./session-row-projection-access.js";
 import { createSessionRowProjectionBackfill } from "./session-row-projection-backfill.js";
 import { create, type Row } from "./session-row-projection-record.js";
@@ -170,7 +171,12 @@ it("refreshes committed metadata and lifecycle marks during a transcript window"
       displayName: "Renamed immediately",
       parentSessionKey: "agent:main:parent",
     });
-    expect(projection.snapshot(query).row?.displayName).toBe("Renamed immediately");
+    const renamed = await withReadySessionRows(
+      projection,
+      () => [query],
+      () => projection.snapshot(query).row,
+    );
+    expect(renamed?.displayName).toBe("Renamed immediately");
     await projection.ensureMaterialized();
     const afterMetadata = projection.materializedCount;
     emitSessionLifecycleEvent({ ...target, reason: "updated" });
@@ -179,48 +185,46 @@ it("refreshes committed metadata and lifecycle marks during a transcript window"
   });
 });
 
-it("cancels a pending trailing transcript refresh on disposal", async () => {
-  await withStreamingProjection(async ({ projection, append }) => {
-    await append("Leading update");
-    const before = projection.materializedCount;
-    await append("Pending update");
-    expect(projection.materializedCount).toBe(before);
-    expect(vi.getTimerCount()).toBe(1);
-    projection.dispose();
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(1_000);
-    await projection.ensureMaterialized();
-    expect(projection.materializedCount).toBe(before);
-    expect(projection.selectEntries()).toEqual([]);
-  });
-});
-
-it("does not carry a pending transcript refresh into a replacement session", async () => {
-  await withStreamingProjection(async ({ projection, target, query, append }) => {
-    await append("Leading update");
-    await append("Pending update");
-    expect(vi.getTimerCount()).toBe(1);
-    replaceSessionEntrySync(target, {
-      sessionId: "replacement",
-      updatedAt: 2,
-      displayName: "Replacement",
-      parentSessionKey: "agent:main:parent",
+it.each(["disposal", "replacement"] as const)(
+  "cancels a pending trailing transcript refresh on %s",
+  async (change) => {
+    await withStreamingProjection(async ({ projection, target, query, append }) => {
+      await append("Leading update");
+      const before = projection.materializedCount;
+      await append("Pending update");
+      expect(projection.materializedCount).toBe(before);
+      expect(vi.getTimerCount()).toBe(1);
+      if (change === "disposal") {
+        projection.dispose();
+      } else {
+        replaceSessionEntrySync(target, {
+          sessionId: "replacement",
+          updatedAt: 2,
+          displayName: "Replacement",
+          parentSessionKey: "agent:main:parent",
+        });
+        await projection.ensureMaterialized();
+        expect(projection.snapshot(query).row?.sessionId).toBe("replacement");
+      }
+      expect(vi.getTimerCount()).toBe(0);
+      const settled = projection.materializedCount;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await projection.ensureMaterialized();
+      expect(projection.materializedCount).toBe(settled);
+      if (change === "disposal") {
+        expect(settled).toBe(before);
+        expect(projection.selectEntries()).toEqual([]);
+      } else {
+        await persistSessionTranscriptTurn(
+          { ...target, sessionId: "replacement" },
+          { messages: [{ message: { role: "assistant", content: "New session" } }] },
+        );
+        await projection.ensureMaterialized();
+        expect(projection.materializedCount - settled).toBe(1);
+      }
     });
-    await projection.ensureMaterialized();
-    expect(projection.snapshot(query).row?.sessionId).toBe("replacement");
-    expect(vi.getTimerCount()).toBe(0);
-    const before = projection.materializedCount;
-    await vi.advanceTimersByTimeAsync(1_000);
-    await projection.ensureMaterialized();
-    expect(projection.materializedCount).toBe(before);
-    await persistSessionTranscriptTurn(
-      { ...target, sessionId: "replacement" },
-      { messages: [{ message: { role: "assistant", content: "New session" } }] },
-    );
-    await projection.ensureMaterialized();
-    expect(projection.materializedCount - before).toBe(1);
-  });
-});
+  },
+);
 
 it("eventually fills legacy titles and previews without waiting during startup or changing activity", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
@@ -292,14 +296,16 @@ it("eventually fills legacy titles and previews without waiting during startup o
         });
       });
       replaceSessionEntrySync(target, { sessionId: "replacement", updatedAt: 2 });
-      expect(
-        repairedProjection.snapshot(
-          { agentId: "main", key: target.sessionKey },
-          {
-            includeLastMessage: true,
-          },
-        ).row,
-      ).toMatchObject({ sessionId: "replacement", lastMessagePreview: undefined });
+      const query = { agentId: "main", key: target.sessionKey };
+      const replacement = await withReadySessionRows(
+        repairedProjection,
+        () => [query],
+        () => repairedProjection.snapshot(query, { includeLastMessage: true }).row,
+      );
+      expect(replacement).toMatchObject({
+        sessionId: "replacement",
+        lastMessagePreview: undefined,
+      });
     } finally {
       repairedProjection.dispose();
     }
@@ -507,7 +513,13 @@ it("preserves a stored fallback model without requiring a terminal transcript", 
           },
         },
       );
-      expect(projection.snapshot({ agentId: "main", key }).row).toMatchObject({
+      const query = { agentId: "main", key };
+      const replacement = await withReadySessionRows(
+        projection,
+        () => [query],
+        () => projection.snapshot(query).row,
+      );
+      expect(replacement).toMatchObject({
         activeModelProvider: "unit-test",
         activeModel: "replacement",
       });

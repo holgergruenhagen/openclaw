@@ -4,7 +4,6 @@ import { scheduleMainSessionRecoveryPendingTarget } from "../../agents/main-sess
 import {
   claimMainSessionRecoveryOwner,
   releaseMainSessionRecoveryOwner,
-  type MainSessionRecoveryPendingTarget,
   type MainSessionRecoveryOwnerLease,
 } from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
@@ -611,9 +610,7 @@ export async function admitReplyTurn(
           // Keep the lease through delivery and durable cleanup so reset/delete cannot race it.
           // Adoption retains the source-key lease; both idempotent releases run on clear.
           retainReplyOperationUntilComplete(operation);
-          let recoveryOwnerRelease:
-            | Promise<MainSessionRecoveryPendingTarget | undefined>
-            | undefined;
+          let recoveryOwnerRelease: ReturnType<typeof releaseReplyRecoveryOwner> | undefined;
           const releaseRecoveryOwner = () =>
             (recoveryOwnerRelease ??= releaseReplyRecoveryOwner(recoveryOwnerLease));
           if (recoveryOwnerLease) {

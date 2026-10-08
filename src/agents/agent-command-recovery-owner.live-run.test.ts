@@ -75,9 +75,35 @@ function execute<T extends ReturnType<typeof createTarget>>(
 describe("agent command admission while another turn is still running on the session", () => {
   const activeRunId = "active-turn";
   let readWorker: MockInstance<typeof sessionEntryReadRuntime.readSessionEntryReadOnlyInWorker>;
+  let workerReadsStarted = 0;
+  const workerReadWaiters = new Set<{ count: number; resolve: () => void }>();
+
+  // Resolves once the waiter has started this many worker reads; a cold worker may take seconds.
+  function workerReadsStartedAtLeast(count: number): Promise<void> {
+    if (workerReadsStarted >= count) {
+      return Promise.resolve();
+    }
+    const reached = createDeferred();
+    workerReadWaiters.add({ count, resolve: reached.resolve });
+    return reached.promise;
+  }
 
   beforeEach(() => {
-    readWorker = vi.spyOn(sessionEntryReadRuntime, "readSessionEntryReadOnlyInWorker");
+    workerReadsStarted = 0;
+    workerReadWaiters.clear();
+    const readInWorker = sessionEntryReadRuntime.readSessionEntryReadOnlyInWorker;
+    readWorker = vi
+      .spyOn(sessionEntryReadRuntime, "readSessionEntryReadOnlyInWorker")
+      .mockImplementation((...args) => {
+        workerReadsStarted += 1;
+        for (const waiter of workerReadWaiters) {
+          if (workerReadsStarted >= waiter.count) {
+            workerReadWaiters.delete(waiter);
+            waiter.resolve();
+          }
+        }
+        return readInWorker(...args);
+      });
   });
 
   // The running turn's own lifecycle start records the fence on the session row. While the
@@ -136,16 +162,6 @@ describe("agent command admission while another turn is still running on the ses
     vi.spyOn(sessionEntryReadRuntime, "readSessionEntryReadOnlyInWorker").mockImplementation(
       async (scope) => loadSessionEntry(scope),
     );
-  }
-
-  async function waitFor(condition: () => boolean) {
-    // A cold worker start can take seconds on a loaded runner.
-    for (let index = 0; index < 3_000 && !condition(); index += 1) {
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 10);
-      });
-    }
-    expect(condition()).toBe(true);
   }
 
   it.each([
@@ -227,6 +243,7 @@ describe("agent command admission while another turn is still running on the ses
     const clear = startActiveTurn(lifecycleGeneration);
     const order: string[] = [];
     const slowSecondPreparation = createDeferred();
+    const firstPreparesAgain = createDeferred();
     const preparations = { first: 0, second: 0 };
     const waiter = (name: "first" | "second") =>
       execute(target, {
@@ -235,6 +252,7 @@ describe("agent command admission while another turn is still running on the ses
         prepare: async () => {
           preparations[name] += 1;
           if (name === "first" && preparations.first === 2) {
+            firstPreparesAgain.resolve();
             await slowSecondPreparation.promise;
           }
           return target;
@@ -247,13 +265,13 @@ describe("agent command admission while another turn is still running on the ses
     try {
       const first = waiter("first");
       // The fence read resolved and the wait's own first check started: the first waiter waits.
-      await waitFor(() => readWorker.mock.calls.length >= 2);
+      await workerReadsStartedAtLeast(2);
       const second = waiter("second");
       await settleTicks();
       expect(order).toEqual([]);
 
       await finishActiveTurn(target, clear);
-      await waitFor(() => preparations.first === 2);
+      await firstPreparesAgain.promise;
       // The later command stays queued behind the earlier one while it prepares again.
       await settleTicks();
       expect(order).toEqual([]);
@@ -277,12 +295,12 @@ describe("agent command admission while another turn is still running on the ses
         lifecycleGeneration,
         opts: { runId: "queued-turn" } as AgentCommandOpts,
       });
-      await waitFor(() => readWorker.mock.calls.length >= 2);
+      await workerReadsStartedAtLeast(2);
       const syncRead = vi.spyOn(sessionAccessor, "loadSessionEntry");
-      const workerReads = readWorker.mock.calls.length;
+      const workerReads = workerReadsStarted;
       // An unrelated row change wakes the waiter; it rechecks without a main-thread read.
       await write(target, { ...activeFence(lifecycleGeneration), updatedAt: 250 });
-      await waitFor(() => readWorker.mock.calls.length > workerReads);
+      await workerReadsStartedAtLeast(workerReads + 1);
       expect(syncRead).not.toHaveBeenCalled();
       syncRead.mockRestore();
 

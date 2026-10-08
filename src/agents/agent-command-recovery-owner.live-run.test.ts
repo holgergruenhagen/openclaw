@@ -30,15 +30,6 @@ import {
   type EmbeddedAgentQueueHandle,
 } from "./embedded-agent-runner/runs.js";
 
-const recoveryOwnerMocks = vi.hoisted(() => ({
-  scheduleMainSessionRecoveryPendingTarget: vi.fn(),
-}));
-
-vi.mock("./main-session-recovery/main-session-recovery-owner-release.js", () => ({
-  scheduleMainSessionRecoveryPendingTarget:
-    recoveryOwnerMocks.scheduleMainSessionRecoveryPendingTarget,
-}));
-
 const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-agent-command-live-run-");
 const sessionKey = "agent:main:main";
 
@@ -235,7 +226,7 @@ describe("agent command admission while another turn is still running on the ses
     await write(target, activeFence(lifecycleGeneration));
     const clear = startActiveTurn(lifecycleGeneration);
     const order: string[] = [];
-    const slowSecondPreparation = createDeferred<void>();
+    const slowSecondPreparation = createDeferred();
     const preparations = { first: 0, second: 0 };
     const waiter = (name: "first" | "second") =>
       execute(target, {

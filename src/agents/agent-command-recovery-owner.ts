@@ -254,7 +254,7 @@ export async function runWithAgentCommandRecoveryOwner<
       assertCurrent();
       if (!commandAdmission && params.opts.sessionEffects !== "internal") {
         commandAdmission = await beginSessionWorkAdmission({
-          scope: prepared.storePath,
+          scope: prepared.storePath ?? `agent:${prepared.sessionAgentId}`,
           identities: [prepared.sessionKey, prepared.previousSessionId ?? prepared.sessionId],
           owner: COMMAND_ADMISSION_OWNER,
           serializeOwner: true,

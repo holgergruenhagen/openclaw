@@ -2,7 +2,7 @@
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import type { InternalSessionEntry } from "../config/sessions.js";
 import { isMainRestartRecoveryCandidate } from "../config/sessions/restart-recovery-state.js";
-import { loadSessionEntry } from "../config/sessions/session-accessor.js";
+import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import {
   isAgentEventLifecycleGenerationCurrent,
   onAgentEventForRun,
@@ -21,8 +21,9 @@ export type LiveRunFenceTarget = {
   storePath: string;
 };
 
-function readEntry(target: LiveRunFenceTarget): InternalSessionEntry | undefined {
-  return loadSessionEntry({
+// Admission runs on the Gateway thread; the worker-owned reader keeps SQLite off it.
+function readEntry(target: LiveRunFenceTarget): Promise<InternalSessionEntry | undefined> {
+  return readSessionEntryReadOnlyInWorker({
     agentId: target.agentId,
     sessionKey: target.sessionKey,
     storePath: target.storePath,
@@ -49,36 +50,41 @@ function isRunExecutingForSession(runId: string, target: LiveRunFenceTarget): bo
  * hold its own delivery claim. Recovery or delivery debt of any other run, other generations,
  * runs this waiter already saw end, and retained fences without a live execution (for example
  * after `sessions_yield`) return undefined, so those rows keep failing admission unchanged.
+ * An empty list means the asynchronous read already found the row unfenced: the turn settled
+ * between the rejected claim and this read, so the caller may claim again without waiting.
  */
-export function resolveLiveRunFenceIds(params: {
+export async function resolveLiveRunFenceIds(params: {
   endedRunIds: ReadonlySet<string>;
   lifecycleGeneration: string;
   runId?: string;
   target: LiveRunFenceTarget;
-}): string[] | undefined {
-  const entry = readEntry(params.target);
-  const runs = entry?.restartRecoveryRuns;
+}): Promise<string[] | undefined> {
+  const entry = await readEntry(params.target);
+  const runs = entry?.restartRecoveryRuns ?? [];
   if (
     !entry ||
-    !runs?.length ||
     entry.sessionId !== params.target.sessionId ||
     entry.abortedLastRun === true ||
     entry.mainRestartRecovery !== undefined ||
     entry.pendingFinalDelivery !== undefined ||
     (entry.restartRecoveryDeliveryRunId !== undefined &&
       !runs.some((run) => run.runId === entry.restartRecoveryDeliveryRunId)) ||
-    !isMainRestartRecoveryCandidate(entry, params.target.sessionKey) ||
     !isAgentEventLifecycleGenerationCurrent(params.lifecycleGeneration)
   ) {
     return undefined;
   }
-  const live = runs.every(
-    (run) =>
-      run.runId !== params.runId &&
-      !params.endedRunIds.has(run.runId) &&
-      run.lifecycleGeneration === params.lifecycleGeneration &&
-      isRunExecutingForSession(run.runId, params.target),
-  );
+  if (runs.length === 0) {
+    return [];
+  }
+  const live =
+    isMainRestartRecoveryCandidate(entry, params.target.sessionKey) &&
+    runs.every(
+      (run) =>
+        run.runId !== params.runId &&
+        !params.endedRunIds.has(run.runId) &&
+        run.lifecycleGeneration === params.lifecycleGeneration &&
+        isRunExecutingForSession(run.runId, params.target),
+    );
   return live ? runs.map((run) => run.runId) : undefined;
 }
 
@@ -100,6 +106,8 @@ export function waitForLiveRunFences(params: {
   return new Promise((resolve) => {
     const cleanups: Array<() => void> = [];
     let settled = false;
+    let reading = false;
+    let rereadRequested = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       if (settled) {
@@ -113,18 +121,40 @@ export function waitForLiveRunFences(params: {
       }
       resolve();
     };
+    // One worker read at a time; notifications during a read coalesce into one follow-up read.
     const check = () => {
       if (settled) {
         return;
       }
-      const entry = readEntry(params.target);
-      if (
-        !isAgentEventLifecycleGenerationCurrent(params.lifecycleGeneration) ||
-        entry?.sessionId !== params.target.sessionId ||
-        !entry.restartRecoveryRuns?.some((run) => params.runIds.includes(run.runId))
-      ) {
+      if (!isAgentEventLifecycleGenerationCurrent(params.lifecycleGeneration)) {
         finish();
+        return;
       }
+      if (reading) {
+        rereadRequested = true;
+        return;
+      }
+      reading = true;
+      void readEntry(params.target)
+        .then(
+          (entry) => {
+            if (
+              entry?.sessionId !== params.target.sessionId ||
+              !entry.restartRecoveryRuns?.some((run) => params.runIds.includes(run.runId))
+            ) {
+              finish();
+            }
+          },
+          // A failed read hands the decision back to the writer-ordered claim.
+          finish,
+        )
+        .finally(() => {
+          reading = false;
+          if (rereadRequested) {
+            rereadRequested = false;
+            check();
+          }
+        });
     };
     const deadlineTimer = setTimeout(
       finish,

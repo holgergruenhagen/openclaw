@@ -1,4 +1,5 @@
 import path from "node:path";
+import { REPLY_WORK_ADMISSION_OWNER } from "../auto-reply/reply/reply-turn-admission-owner.js";
 import type { InternalSessionEntry } from "../config/sessions.js";
 import {
   createSessionWorkStartChangedError,
@@ -14,7 +15,6 @@ import {
   getSessionWorkAdmissionOwnerRelease,
   type SessionWorkAdmissionLease,
 } from "../sessions/session-lifecycle-admission.js";
-import { resolveLiveRunFenceIds, waitForLiveRunFences } from "./agent-command-live-run-fence.js";
 import type { AgentCommandOpts } from "./command/types.js";
 import { MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER } from "./main-session-recovery/main-session-recovery-admission.js";
 import { repairMainSessionRecoveryMutation } from "./main-session-recovery/main-session-recovery-lifecycle.js";
@@ -27,7 +27,6 @@ import {
   type MainSessionRecoveryOwnerLease,
   type MainSessionRecoveryPendingTarget,
 } from "./main-session-recovery/main-session-recovery-store.js";
-import { createAgentRunRestartAbortError, isAgentRunDirectAbortReason } from "./run-termination.js";
 
 const log = createSubsystemLogger("agents/agent-command");
 const COMMAND_ADMISSION_OWNER = Symbol.for("openclaw.agentCommand");
@@ -41,7 +40,6 @@ type PreparedRecoveryOwnerTarget = {
   sessionEntry?: InternalSessionEntry;
   sessionStore?: Record<string, InternalSessionEntry>;
   storePath: string;
-  timeoutMs?: number;
   runLease?: { release: () => Promise<void> };
 };
 
@@ -58,16 +56,7 @@ function refreshPreparedRecoveryOwnerTarget(
   if (!acquired || acquired.entry.sessionId !== prepared.sessionId) {
     return;
   }
-  const current = acquired.entry;
-  const entry = {
-    ...current,
-    ...(current.restartRecoveryRuns
-      ? { restartRecoveryRuns: current.restartRecoveryRuns.map((run) => ({ ...run })) }
-      : {}),
-    ...(current.mainRestartRecovery
-      ? { mainRestartRecovery: structuredClone(current.mainRestartRecovery) }
-      : {}),
-  };
+  const entry = structuredClone(acquired.entry);
   prepared.sessionEntry = entry;
   if (prepared.sessionStore && prepared.sessionKey) {
     prepared.sessionStore[prepared.sessionKey] = entry;
@@ -189,19 +178,15 @@ export async function runWithAgentCommandRecoveryOwner<
         : interrupted.signal,
     },
   };
+  const assertCurrent = () => {
+    params.opts.abortSignal.throwIfAborted();
+    assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+    params.opts.assertSourceCurrent?.();
+    params.opts.operatorAuthority?.assertCurrent();
+  };
   // Gateway may preclaim before dispatch, so every preparation outcome must release ownership.
   let lease = params.opts.mainRestartRecoveryOwnerLease;
   let commandAdmission: SessionWorkAdmissionLease | undefined;
-  // Admissions kept while waiting for a live run; later accepted commands queue behind them.
-  const heldAdmissions: SessionWorkAdmissionLease[] = [];
-  const releaseHeldAdmissions = () => {
-    for (const held of heldAdmissions.splice(0)) {
-      held.release();
-    }
-  };
-  // Work under kept admissions treats them as its own instead of as competing turns.
-  const runUnderHeldAdmissions = <T>(run: () => Promise<T>): Promise<T> =>
-    heldAdmissions.reduce<() => Promise<T>>((inner, held) => () => held.run(inner), run)();
   let pendingRecovery: Awaited<ReturnType<typeof releaseMainSessionRecoveryOwner>> = undefined;
   let prepared: TPrepared | undefined;
   try {
@@ -231,72 +216,29 @@ export async function runWithAgentCommandRecoveryOwner<
       params.opts.sessionEffects !== "internal" &&
       !params.opts.mainRestartRecoveryAdmitted &&
       !params.opts.mainRestartRecoveryOwnerLease;
+    const ownerRelease = (owner: symbol) =>
+      getSessionWorkAdmissionOwnerRelease({
+        scope: target.storePath,
+        identities: [target.sessionKey, target.previousSessionId ?? target.sessionId],
+        owner,
+      });
     const recoveryOwnerRelease = () =>
-      mayWaitForRecovery
-        ? getSessionWorkAdmissionOwnerRelease({
-            scope: target.storePath,
-            identities: [target.sessionKey, target.previousSessionId ?? target.sessionId],
-            owner: MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER,
-          })
+      mayWaitForRecovery ? ownerRelease(MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER) : undefined;
+    const replyOwnerRelease = () =>
+      params.mode === "claim" && !params.opts.mainRestartRecoveryOwnerLease
+        ? ownerRelease(REPLY_WORK_ADMISSION_OWNER)
         : undefined;
-    let liveRunDeadline: number | undefined;
-    let liveRunClaimRetried = false;
-    const endedLiveRunIds = new Set<string>();
-    // A claim rejected only by the fence of a turn still running on this session waits for
-    // that turn like queued chat input does, then prepares and claims again unchanged.
-    // The wait is wrapped so awaiting the asynchronous fence read does not also await it.
-    const liveRunRelease = async (): Promise<{ settled: Promise<void> } | undefined> => {
-      if (params.mode !== "claim" || !target.sessionKey || target.timeoutMs === undefined) {
-        return undefined;
-      }
-      const fenceTarget = {
-        agentId: target.sessionAgentId,
-        sessionId: target.previousSessionId ?? target.sessionId,
-        sessionKey: target.sessionKey,
-        storePath: target.storePath,
-      };
-      const runIds = await resolveLiveRunFenceIds({
-        endedRunIds: endedLiveRunIds,
-        lifecycleGeneration: params.lifecycleGeneration,
-        runId: params.opts.runId,
-        target: fenceTarget,
-      });
-      liveRunDeadline ??= Date.now() + target.timeoutMs;
-      if (!runIds || Date.now() >= liveRunDeadline) {
-        return undefined;
-      }
-      if (runIds.length === 0) {
-        // The fence cleared after the claim read it. Claim again once; a second rejection
-        // without a live fence keeps the original error.
-        if (liveRunClaimRetried) {
-          return undefined;
-        }
-        liveRunClaimRetried = true;
-        return { settled: Promise.resolve() };
-      }
-      liveRunClaimRetried = false;
-      log.debug(
-        `admission waits for active run: session=${target.sessionKey} runs=${runIds.join(",")} runId=${params.opts.runId ?? "unknown"}`,
-      );
-      const settled = waitForLiveRunFences({
-        deadline: liveRunDeadline,
-        endedRunIds: endedLiveRunIds,
-        lifecycleGeneration: params.lifecycleGeneration,
-        runIds,
-        signal: params.opts.abortSignal,
-        target: fenceTarget,
-      });
-      return { settled };
+    const releaseCommandAdmission = () => {
+      commandAdmission?.release();
+      commandAdmission = undefined;
     };
     let pendingOwner = recoveryOwnerRelease();
     let acquired: AcquiredRecoveryOwner | undefined;
     for (;;) {
       if (pendingOwner) {
-        // Keep the accepted settle/announce turn (and its idempotency key) alive rather
-        // than returning a cached no-turn rejection to the durable delivery owner.
+        // Keep accepted input alive, then refresh preparation after the predecessor releases.
         await racePromiseWithAbortSignal(pendingOwner, params.opts.abortSignal);
-        params.opts.abortSignal?.throwIfAborted();
-        assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+        assertCurrent();
         await prepared.runLease?.release();
         prepared = undefined;
         prepared = await params.prepare(params.opts);
@@ -309,92 +251,60 @@ export async function runWithAgentCommandRecoveryOwner<
           throw createSessionWorkStartChangedError(target.sessionKey ?? target.sessionId);
         }
       }
-      if (mayWaitForRecovery) {
-        params.opts.abortSignal?.throwIfAborted();
-        assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+      assertCurrent();
+      if (!commandAdmission && params.opts.sessionEffects !== "internal") {
+        commandAdmission = await beginSessionWorkAdmission({
+          scope: prepared.storePath,
+          identities: [prepared.sessionKey, prepared.previousSessionId ?? prepared.sessionId],
+          owner: COMMAND_ADMISSION_OWNER,
+          serializeOwner: true,
+          signal: params.opts.abortSignal,
+          onInterrupt: (reason) => interrupted.abort(reason),
+          assertAllowed: assertCurrent,
+        });
       }
-      if (params.opts.sessionEffects !== "internal") {
-        const admissionTarget = prepared;
-        const begin = () =>
-          beginSessionWorkAdmission({
-            scope: admissionTarget.storePath ?? `agent:${admissionTarget.sessionAgentId}`,
-            identities: [
-              admissionTarget.sessionKey,
-              admissionTarget.previousSessionId ?? admissionTarget.sessionId,
-            ],
-            owner: COMMAND_ADMISSION_OWNER,
-            serializeOwner: true,
-            signal: params.opts.abortSignal,
-            onInterrupt: (reason) =>
-              interrupted.abort(
-                isAgentRunDirectAbortReason(reason) ? reason : createAgentRunRestartAbortError(),
-              ),
-            assertAllowed: () => {
-              params.opts.abortSignal?.throwIfAborted();
-              assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
-              params.opts.assertSourceCurrent?.();
-              params.opts.operatorAuthority?.assertCurrent();
-            },
-          });
-        // Nested under the kept admissions, so this command does not queue behind itself
-        // while every later command still queues behind the kept ones.
-        commandAdmission = await runUnderHeldAdmissions(begin);
-      }
+      // Keep the release if the reply finishes while the durable claim is in flight.
+      const pendingReply = replyOwnerRelease();
       try {
         pendingOwner = recoveryOwnerRelease();
         if (pendingOwner) {
-          commandAdmission?.release();
-          releaseHeldAdmissions();
+          releaseCommandAdmission();
           continue;
         }
         acquired = await claimAgentCommandRecoveryOwner({ ...params, prepared });
       } catch (error) {
-        // A recovery owner can start during the writer-ordered claim. Only a
-        // proven live owner makes this rejection waitable; stale/deleted rows
-        // and tombstones still fail through the unchanged durable guard.
-        const recoveryRelease =
-          error instanceof SessionWorkStartChangedError ? recoveryOwnerRelease() : undefined;
-        pendingOwner =
-          recoveryRelease ??
-          (error instanceof SessionWorkStartChangedError
-            ? (await liveRunRelease())?.settled
-            : undefined);
+        // A live owner can make this rejection waitable; retries still use the durable guard.
+        if (!(error instanceof SessionWorkStartChangedError)) {
+          throw error;
+        }
+        pendingOwner = recoveryOwnerRelease();
+        if (pendingOwner) {
+          releaseCommandAdmission();
+        } else {
+          // Only the reply owner is a predecessor. Later RPC admissions may already
+          // be acquired while their commands queue behind this command's FIFO lease.
+          pendingOwner = pendingReply ?? replyOwnerRelease();
+        }
         if (!pendingOwner) {
           throw error;
         }
-        if (recoveryRelease || !commandAdmission) {
-          // Recovery may need the session free of admitted work, as before.
-          commandAdmission?.release();
-          releaseHeldAdmissions();
-        } else {
-          // Keep FIFO custody through the wait: the serialized admission owner
-          // (https://github.com/openclaw/openclaw/pull/166597) holds later commands
-          // behind this one until it settles.
-          heldAdmissions.push(commandAdmission);
-        }
-        commandAdmission = undefined;
         continue;
       }
       pendingOwner = acquired ? undefined : recoveryOwnerRelease();
       if (!pendingOwner) {
         break;
       }
-      commandAdmission?.release();
-      releaseHeldAdmissions();
+      releaseCommandAdmission();
     }
     lease = acquired?.lease;
-    if (mayWaitForRecovery) {
-      params.opts.abortSignal?.throwIfAborted();
-      assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
-    }
+    assertCurrent();
     // Preparation uses a detached working copy. Carry the owner transaction's
     // exact row forward so successful settlement can consume the same recovery cycle.
     refreshPreparedRecoveryOwnerTarget(prepared, acquired);
     const admitted = prepared;
-    const admission = commandAdmission;
-    return await runUnderHeldAdmissions(() =>
-      admission ? admission.run(() => params.run(admitted)) : params.run(admitted),
-    );
+    return await (commandAdmission
+      ? commandAdmission.run(() => params.run(admitted))
+      : params.run(admitted));
   } finally {
     try {
       const releasedRecovery = await releaseMainSessionRecoveryOwner(lease);
@@ -406,7 +316,6 @@ export async function runWithAgentCommandRecoveryOwner<
       await prepared?.runLease?.release();
     } finally {
       commandAdmission?.release();
-      releaseHeldAdmissions();
       scheduleMainSessionRecoveryPendingTarget(pendingRecovery);
     }
   }

@@ -1,442 +1,234 @@
 import path from "node:path";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type MockInstance,
-} from "vitest";
-import { createDeferred } from "../../test/helpers/promise.js";
-import type { InternalSessionEntry as SessionEntry } from "../config/sessions.js";
-import * as sessionAccessor from "../config/sessions/session-accessor.js";
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../test/helpers/promise.js";
+import { admitReplyTurn } from "../auto-reply/reply/reply-turn-admission.js";
 import { loadSessionEntry, replaceSessionEntry } from "../config/sessions/session-accessor.js";
-import * as sessionEntryReadRuntime from "../config/sessions/session-entry-read-runtime.js";
+import { getAgentEventLifecycleGeneration } from "../infra/agent-events.js";
 import {
-  emitAgentEvent,
-  getAgentEventLifecycleGeneration,
-  rotateAgentEventLifecycleGeneration,
-} from "../infra/agent-events.js";
-import { claimAgentRunContext, releaseAgentRunContext } from "../infra/agent-run-registry.js";
+  beginSessionWorkAdmission,
+  getSessionWorkAdmissionRelease,
+  type SessionWorkAdmissionLease,
+} from "../sessions/session-lifecycle-admission.js";
 import { useSessionStoreTempDirs } from "../test-utils/session-state-cleanup.js";
-import { LIVE_RUN_FENCE_SETTLE_GRACE_MS } from "./agent-command-live-run-fence.js";
 import { runWithAgentCommandRecoveryOwner } from "./agent-command-recovery-owner.js";
-import type { AgentCommandOpts } from "./command/types.js";
-import {
-  clearActiveEmbeddedRun,
-  setActiveEmbeddedRun,
-  type EmbeddedAgentQueueHandle,
-} from "./embedded-agent-runner/runs.js";
+import * as recoveryStore from "./main-session-recovery/main-session-recovery-store.js";
 
-const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-agent-command-live-run-");
+const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-command-reply-admission-");
 const sessionKey = "agent:main:main";
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.clearAllMocks();
-  vi.useRealTimers();
 });
 
-function createTarget() {
-  const storePath = path.join(sessionDirs.make(), "sessions.json");
-  return {
+async function busyReply() {
+  const target = {
     sessionAgentId: "main",
     isNewSession: false,
     sessionId: "session-1",
     sessionKey,
-    storePath,
+    storePath: path.join(sessionDirs.make(), "sessions.json"),
+  };
+  const entry = { sessionId: target.sessionId, updatedAt: Date.now() };
+  await replaceSessionEntry(target, entry);
+  const reply = await admitReplyTurn({
+    ...target,
+    agentId: target.sessionAgentId,
+    expectedSessionId: target.sessionId,
+    kind: "visible",
+    resetTriggered: false,
+  });
+  if (reply.status !== "owned") {
+    throw new Error("Fixture requires an admitted reply");
+  }
+  const scope = { scope: target.storePath, identities: [sessionKey, target.sessionId] };
+  const replyReleased = getSessionWorkAdmissionRelease(scope);
+  if (!replyReleased) {
+    throw new Error("Reply admission must retain its lifecycle lease");
+  }
+  const lifecycleGeneration = getAgentEventLifecycleGeneration();
+  const fence = [{ runId: "busy-reply", lifecycleGeneration }];
+  await replaceSessionEntry(target, {
+    ...entry,
+    abortedLastRun: false,
+    restartRecoveryRuns: fence,
+    restartRecoveryDeliveryRunId: "busy-reply",
+  });
+  const controller = new AbortController();
+  const commands: Promise<unknown>[] = [];
+  const gateways: SessionWorkAdmissionLease[] = [];
+  type Command = Parameters<typeof runWithAgentCommandRecoveryOwner<typeof target, string>>[0];
+  return {
+    target,
+    controller,
+    fence,
+    read: () => loadSessionEntry(target),
+    finish: async (retainFence = false) => {
+      if (!retainFence) {
+        await replaceSessionEntry(target, { ...entry, status: "done" });
+      }
+      reply.operation.complete();
+      await replyReleased;
+    },
+    gateway: async () => {
+      const admission = await beginSessionWorkAdmission({ ...scope, assertAllowed: () => {} });
+      gateways.push(admission);
+      return admission;
+    },
+    command: (runId: string, overrides: Partial<Command> = {}) => {
+      const command = runWithAgentCommandRecoveryOwner({
+        lifecycleGeneration,
+        mode: "claim",
+        opts: { message: runId, runId, abortSignal: controller.signal },
+        prepare: async () => target,
+        run: async () => runId,
+        ...overrides,
+      });
+      commands.push(command);
+      void command.catch(() => {});
+      return command;
+    },
+    cleanup: async () => {
+      controller.abort();
+      reply.operation.complete();
+      gateways.forEach((gateway) => gateway.release());
+      await Promise.allSettled(commands);
+      await replyReleased;
+    },
   };
 }
 
-async function write(target: ReturnType<typeof createTarget>, entry: Partial<SessionEntry>) {
-  await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 100, ...entry });
+function pauseRejectedClaim(runId: string, release?: Promise<void>) {
+  const rejected = createDeferred();
+  const claim = recoveryStore.claimMainSessionRecoveryOwner;
+  vi.spyOn(recoveryStore, "claimMainSessionRecoveryOwner").mockImplementation(async (params) => {
+    const result = await claim(params);
+    if (params.runId === runId && result.kind === "invalidated") {
+      rejected.resolve();
+      await release;
+    }
+    return result;
+  });
+  return rejected.promise;
 }
 
-function read(target: ReturnType<typeof createTarget>) {
-  return loadSessionEntry(target);
-}
-
-function execute<T extends ReturnType<typeof createTarget>>(
-  target: T,
-  overrides: Partial<Parameters<typeof runWithAgentCommandRecoveryOwner<T, unknown>>[0]> = {},
-) {
-  return runWithAgentCommandRecoveryOwner({
-    lifecycleGeneration: getAgentEventLifecycleGeneration(),
-    mode: "claim",
-    opts: {} as AgentCommandOpts,
-    prepare: async () => target,
-    run: async () => "ran",
-    ...overrides,
-  });
-}
-
-describe("agent command admission while another turn is still running on the session", () => {
-  const activeRunId = "active-turn";
-  let readWorker: MockInstance<typeof sessionEntryReadRuntime.readSessionEntryReadOnlyInWorker>;
-  let workerReadsStarted = 0;
-  const workerReadWaiters = new Set<{ count: number; resolve: () => void }>();
-
-  // Resolves once the waiter has started this many worker reads; a cold worker may take seconds.
-  function workerReadsStartedAtLeast(count: number): Promise<void> {
-    if (workerReadsStarted >= count) {
-      return Promise.resolve();
-    }
-    const reached = createDeferred();
-    workerReadWaiters.add({ count, resolve: reached.resolve });
-    return reached.promise;
-  }
-
-  beforeEach(() => {
-    workerReadsStarted = 0;
-    workerReadWaiters.clear();
-    const readInWorker = sessionEntryReadRuntime.readSessionEntryReadOnlyInWorker;
-    readWorker = vi
-      .spyOn(sessionEntryReadRuntime, "readSessionEntryReadOnlyInWorker")
-      .mockImplementation((...args) => {
-        workerReadsStarted += 1;
-        for (const waiter of workerReadWaiters) {
-          if (workerReadsStarted >= waiter.count) {
-            workerReadWaiters.delete(waiter);
-            waiter.resolve();
-          }
-        }
-        return readInWorker(...args);
-      });
-  });
-
-  // The running turn's own lifecycle start records the fence on the session row. While the
-  // model streams it holds a runtime handle; while a tool runs it holds a run context claim.
-  function startActiveTurn(
-    lifecycleGeneration: string,
-    via: "runtime handle" | "run context" = "run context",
-  ) {
-    if (via === "runtime handle") {
-      const handle = {
-        runId: activeRunId,
-        queueMessage: async () => {},
-        isStreaming: () => true,
-        isCompacting: () => false,
-        abort: () => {},
-      } as unknown as EmbeddedAgentQueueHandle;
-      setActiveEmbeddedRun("session-1", handle, sessionKey);
-      return () => clearActiveEmbeddedRun("session-1", handle, sessionKey);
-    }
-    const claimId = claimAgentRunContext(
-      activeRunId,
-      { sessionKey, lifecycleGeneration },
-      { trackOwner: true },
-    );
-    return () => releaseAgentRunContext(activeRunId, claimId);
-  }
-
-  function activeFence(lifecycleGeneration: string): Partial<SessionEntry> {
-    return {
-      abortedLastRun: false,
-      lifecycleRunId: activeRunId,
-      restartRecoveryRuns: [{ runId: activeRunId, lifecycleGeneration }],
-    };
-  }
-
-  async function finishActiveTurn(
-    target: ReturnType<typeof createTarget>,
-    clear: () => void,
-    phase: "end" | "error" = "end",
-  ) {
-    emitAgentEvent({ runId: activeRunId, stream: "lifecycle", data: { phase } });
-    clear();
-    await write(target, { updatedAt: 300, status: phase === "end" ? "done" : "failed" });
-  }
-
-  async function settleTicks() {
-    for (let index = 0; index < 20; index += 1) {
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-    }
-  }
-
-  // Fake timers also freeze the worker transport; these cases read the row in-process instead.
-  function readRowInProcess() {
-    vi.spyOn(sessionEntryReadRuntime, "readSessionEntryReadOnlyInWorker").mockImplementation(
-      async (scope) => loadSessionEntry(scope),
-    );
-  }
-
-  it.each([
-    ["run context", false],
-    ["runtime handle", false],
-    ["runtime handle", true],
-  ] as const)(
-    "queues behind the active turn holding its %s (own delivery claim: %s) and runs once after it settles",
-    async (via, ownDeliveryClaim) => {
-      const target = { ...createTarget(), timeoutMs: 60_000 };
-      const lifecycleGeneration = getAgentEventLifecycleGeneration();
-      await write(target, {
-        ...activeFence(lifecycleGeneration),
-        // Operator and channel turns record their own delivery claim beside their fence.
-        ...(ownDeliveryClaim ? { restartRecoveryDeliveryRunId: activeRunId } : {}),
-      });
-      const clear = startActiveTurn(lifecycleGeneration, via);
-      const run = vi.fn(async () => "ran after active turn");
-      const prepare = vi.fn(async () => ({
-        ...target,
-        runLease: { release: vi.fn(async () => {}) },
-      }));
-      try {
-        const queued = execute(target, {
-          lifecycleGeneration,
-          opts: { runId: "queued-turn" } as AgentCommandOpts,
-          prepare,
-          run,
-        });
-        await settleTicks();
-        expect(run).not.toHaveBeenCalled();
-
-        await finishActiveTurn(target, clear);
-        await expect(queued).resolves.toBe("ran after active turn");
-        expect(run).toHaveBeenCalledOnce();
-        expect(prepare).toHaveBeenCalledTimes(2);
-        for (const result of prepare.mock.results) {
-          expect((await result.value).runLease.release).toHaveBeenCalledOnce();
-        }
-      } finally {
-        clear();
-      }
-    },
-  );
-
-  it.each<{ name: string; fields: Partial<SessionEntry> }>([
-    {
-      name: "an assigned recovery cycle",
-      fields: { mainRestartRecovery: { cycleId: "cycle-1", revision: 3, chargedAttempts: 1 } },
-    },
-    {
-      name: "an outstanding recovery delivery",
-      fields: { restartRecoveryDeliveryRunId: "delivery" },
-    },
-  ])("still rejects immediately when the row carries $name", async ({ fields }) => {
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, { ...activeFence(lifecycleGeneration), ...fields });
-    const clear = startActiveTurn(lifecycleGeneration);
-    const run = vi.fn();
-    try {
-      await expect(
-        execute(target, {
-          lifecycleGeneration,
-          opts: { runId: "queued-turn" } as AgentCommandOpts,
-          run,
-        }),
-      ).rejects.toMatchObject({ code: "SESSION_WORK_START_CHANGED" });
-      expect(run).not.toHaveBeenCalled();
-    } finally {
-      clear();
-    }
-  });
-
-  it("keeps FIFO order for two waiters when the earlier one prepares again slowly", async () => {
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    const order: string[] = [];
-    const slowSecondPreparation = createDeferred();
-    const firstPreparesAgain = createDeferred();
-    const preparations = { first: 0, second: 0 };
-    const waiter = (name: "first" | "second") =>
-      execute(target, {
-        lifecycleGeneration,
-        opts: { runId: `${name}-queued-turn` } as AgentCommandOpts,
+it("keeps two accepted commands in FIFO order behind a real reply admission", async ({
+  signal,
+}) => {
+  const fixture = await busyReply();
+  const refresh = createDeferred();
+  const refreshing = createDeferred();
+  const secondPrepared = createDeferred();
+  const rejected = pauseRejectedClaim("first");
+  const order: string[] = [];
+  let preparations = 0;
+  try {
+    // Both accepted RPCs hold outer admissions; the second command depends on the first.
+    const firstGateway = await fixture.gateway();
+    const secondGateway = await fixture.gateway();
+    const first = firstGateway.run(() =>
+      fixture.command("first", {
         prepare: async () => {
-          preparations[name] += 1;
-          if (name === "first" && preparations.first === 2) {
-            firstPreparesAgain.resolve();
-            await slowSecondPreparation.promise;
+          if (++preparations === 2) {
+            refreshing.resolve();
+            await refresh.promise;
           }
-          return target;
+          return fixture.target;
         },
         run: async () => {
-          order.push(name);
-          return name;
+          order.push("first");
+          return "first";
         },
-      });
-    try {
-      const first = waiter("first");
-      // The fence read resolved and the wait's own first check started: the first waiter waits.
-      await workerReadsStartedAtLeast(2);
-      const second = waiter("second");
-      await settleTicks();
-      expect(order).toEqual([]);
-
-      await finishActiveTurn(target, clear);
-      await firstPreparesAgain.promise;
-      // The later command stays queued behind the earlier one while it prepares again.
-      await settleTicks();
-      expect(order).toEqual([]);
-
-      slowSecondPreparation.resolve();
-      await expect(first).resolves.toBe("first");
-      await expect(second).resolves.toBe("second");
-      expect(order).toEqual(["first", "second"]);
-    } finally {
-      clear();
-    }
-  });
-
-  it("reads the session row only through the worker owner while it waits", async () => {
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    try {
-      const queued = execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn" } as AgentCommandOpts,
-      });
-      await workerReadsStartedAtLeast(2);
-      const syncRead = vi.spyOn(sessionAccessor, "loadSessionEntry");
-      const workerReads = workerReadsStarted;
-      // An unrelated row change wakes the waiter; it rechecks without a main-thread read.
-      await write(target, { ...activeFence(lifecycleGeneration), updatedAt: 250 });
-      await workerReadsStartedAtLeast(workerReads + 1);
-      expect(syncRead).not.toHaveBeenCalled();
-      syncRead.mockRestore();
-
-      await finishActiveTurn(target, clear);
-      await expect(queued).resolves.toBe("ran");
-      expect(readWorker).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionKey, storePath: target.storePath }),
-      );
-    } finally {
-      clear();
-    }
-  });
-
-  it("still rejects a retained fence whose run is no longer executing", async () => {
-    // A yielded or abandoned run keeps its fence without a live execution; that row stays fenced.
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, {
-      ...activeFence(lifecycleGeneration),
-      status: undefined,
-      endedAt: 1000,
-    });
-    const run = vi.fn();
-    await expect(
-      execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn" } as AgentCommandOpts,
-        run,
       }),
-    ).rejects.toMatchObject({ code: "SESSION_WORK_START_CHANGED" });
-    expect(run).not.toHaveBeenCalled();
-  });
+    );
+    await withinTest(
+      awaitGateBeforeSettlement(rejected, first, "Command skipped the busy claim"),
+      signal,
+    );
+    const second = secondGateway.run(() =>
+      fixture.command("second", {
+        prepare: async () => {
+          secondPrepared.resolve();
+          return fixture.target;
+        },
+        run: async () => {
+          order.push("second");
+          return "second";
+        },
+      }),
+    );
+    await withinTest(secondPrepared.promise, signal);
+    expect(order).toEqual([]);
+    await fixture.finish();
+    await withinTest(
+      awaitGateBeforeSettlement(
+        refreshing.promise,
+        first,
+        "Command did not refresh after the reply",
+      ),
+      signal,
+    );
+    expect(order).toEqual([]);
+    refresh.resolve();
+    await expect(withinTest(Promise.all([first, second]), signal)).resolves.toEqual([
+      "first",
+      "second",
+    ]);
+    expect(order).toEqual(["first", "second"]);
+  } finally {
+    refresh.resolve();
+    await fixture.cleanup();
+  }
+});
 
-  it("stops waiting when the queued turn is aborted", async () => {
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    const controller = new AbortController();
-    const release = vi.fn(async () => {});
-    const run = vi.fn();
+it.each(["cancelled", "retained fence"] as const)(
+  "does not execute the waiting command after %s",
+  async (outcome, { signal }) => {
+    const fixture = await busyReply();
+    const rejected = pauseRejectedClaim("waiting");
+    const run = vi.fn(async () => "ran");
     try {
-      const queued = execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn", abortSignal: controller.signal } as AgentCommandOpts,
-        prepare: async () => ({ ...target, runLease: { release } }),
-        run,
-      });
-      void queued.catch(() => {});
-      await settleTicks();
-      controller.abort();
-      await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+      const command = fixture.command("waiting", { run });
+      await withinTest(
+        awaitGateBeforeSettlement(rejected, command, "Command skipped the busy claim"),
+        signal,
+      );
+      if (outcome === "cancelled") {
+        fixture.controller.abort();
+      } else {
+        await fixture.finish(true);
+      }
+      await expect(withinTest(command, signal)).rejects.toMatchObject(
+        outcome === "cancelled" ? { name: "AbortError" } : { code: "SESSION_WORK_START_CHANGED" },
+      );
       expect(run).not.toHaveBeenCalled();
-      expect(release).toHaveBeenCalledOnce();
-      // The active turn keeps its own fence; the aborted waiter never touched the row.
-      expect(read(target)?.restartRecoveryRuns).toEqual([
-        { runId: activeRunId, lifecycleGeneration },
-      ]);
+      expect(fixture.read()?.restartRecoveryRuns).toEqual(fixture.fence);
     } finally {
-      clear();
+      await fixture.cleanup();
     }
-  });
+  },
+);
 
-  it("fails with the original error once its own timeout passes", async () => {
-    readRowInProcess();
-    vi.useFakeTimers();
-    const target = { ...createTarget(), timeoutMs: 5_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    const run = vi.fn();
-    try {
-      const queued = execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn" } as AgentCommandOpts,
-        run,
-      });
-      void queued.catch(() => {});
-      await vi.advanceTimersByTimeAsync(4_000);
-      expect(run).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1_000);
-      await expect(queued).rejects.toMatchObject({ code: "SESSION_WORK_START_CHANGED" });
-      expect(run).not.toHaveBeenCalled();
-    } finally {
-      clear();
-    }
-  });
-
-  it("stops after the settle grace when the finished turn keeps its fence", async () => {
-    readRowInProcess();
-    vi.useFakeTimers();
-    const target = { ...createTarget(), timeoutMs: 600_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    const run = vi.fn();
-    try {
-      const queued = execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn" } as AgentCommandOpts,
-        run,
-      });
-      void queued.catch(() => {});
-      await vi.advanceTimersByTimeAsync(10);
-      emitAgentEvent({ runId: activeRunId, stream: "lifecycle", data: { phase: "end" } });
-      clear();
-      await vi.advanceTimersByTimeAsync(LIVE_RUN_FENCE_SETTLE_GRACE_MS);
-      // The renewed claim uses the real store writer.
-      vi.useRealTimers();
-      await expect(queued).rejects.toMatchObject({ code: "SESSION_WORK_START_CHANGED" });
-      expect(run).not.toHaveBeenCalled();
-    } finally {
-      clear();
-    }
-  });
-
-  it("does not run after the Gateway lifecycle rotates during the wait", async () => {
-    const target = { ...createTarget(), timeoutMs: 60_000 };
-    const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    await write(target, activeFence(lifecycleGeneration));
-    const clear = startActiveTurn(lifecycleGeneration);
-    const run = vi.fn();
-    try {
-      const queued = execute(target, {
-        lifecycleGeneration,
-        opts: { runId: "queued-turn" } as AgentCommandOpts,
-        run,
-      });
-      void queued.catch(() => {});
-      await settleTicks();
-      rotateAgentEventLifecycleGeneration();
-      await finishActiveTurn(target, clear, "error");
-      await expect(queued).rejects.toThrow();
-      expect(run).not.toHaveBeenCalled();
-    } finally {
-      clear();
-    }
-  });
+it("keeps the reply release captured before its durable claim returns", async ({ signal }) => {
+  const fixture = await busyReply();
+  const returnClaim = createDeferred();
+  const rejected = pauseRejectedClaim("racing", returnClaim.promise);
+  const run = vi.fn(async () => "ran");
+  try {
+    const command = fixture.command("racing", { run });
+    await withinTest(
+      awaitGateBeforeSettlement(rejected, command, "Command skipped the busy claim"),
+      signal,
+    );
+    await fixture.finish();
+    returnClaim.resolve();
+    await expect(withinTest(command, signal)).resolves.toBe("ran");
+    expect(run).toHaveBeenCalledOnce();
+  } finally {
+    returnClaim.resolve();
+    await fixture.cleanup();
+  }
 });

@@ -14,6 +14,7 @@ import {
   getSessionWorkAdmissionOwnerRelease,
   type SessionWorkAdmissionLease,
 } from "../sessions/session-lifecycle-admission.js";
+import { resolveLiveRunFenceIds, waitForLiveRunFences } from "./agent-command-live-run-fence.js";
 import type { AgentCommandOpts } from "./command/types.js";
 import { MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER } from "./main-session-recovery/main-session-recovery-admission.js";
 import { repairMainSessionRecoveryMutation } from "./main-session-recovery/main-session-recovery-lifecycle.js";
@@ -40,6 +41,7 @@ type PreparedRecoveryOwnerTarget = {
   sessionEntry?: InternalSessionEntry;
   sessionStore?: Record<string, InternalSessionEntry>;
   storePath: string;
+  timeoutMs?: number;
   runLease?: { release: () => Promise<void> };
 };
 
@@ -227,6 +229,42 @@ export async function runWithAgentCommandRecoveryOwner<
             owner: MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER,
           })
         : undefined;
+    let liveRunDeadline: number | undefined;
+    const endedLiveRunIds = new Set<string>();
+    // A claim rejected only by the fence of a turn still running on this session waits for
+    // that turn like queued chat input does, then prepares and claims again unchanged.
+    const liveRunRelease = () => {
+      if (params.mode !== "claim" || !target.sessionKey || target.timeoutMs === undefined) {
+        return undefined;
+      }
+      const fenceTarget = {
+        agentId: target.sessionAgentId,
+        sessionId: target.previousSessionId ?? target.sessionId,
+        sessionKey: target.sessionKey,
+        storePath: target.storePath,
+      };
+      const runIds = resolveLiveRunFenceIds({
+        endedRunIds: endedLiveRunIds,
+        lifecycleGeneration: params.lifecycleGeneration,
+        runId: params.opts.runId,
+        target: fenceTarget,
+      });
+      liveRunDeadline ??= Date.now() + target.timeoutMs;
+      if (!runIds || Date.now() >= liveRunDeadline) {
+        return undefined;
+      }
+      log.debug(
+        `admission waits for active run: session=${target.sessionKey} runs=${runIds.join(",")} runId=${params.opts.runId ?? "unknown"}`,
+      );
+      return waitForLiveRunFences({
+        deadline: liveRunDeadline,
+        endedRunIds: endedLiveRunIds,
+        lifecycleGeneration: params.lifecycleGeneration,
+        runIds,
+        signal: params.opts.abortSignal,
+        target: fenceTarget,
+      });
+    };
     let pendingOwner = recoveryOwnerRelease();
     let acquired: AcquiredRecoveryOwner | undefined;
     for (;;) {
@@ -283,7 +321,9 @@ export async function runWithAgentCommandRecoveryOwner<
         // proven live owner makes this rejection waitable; stale/deleted rows
         // and tombstones still fail through the unchanged durable guard.
         pendingOwner =
-          error instanceof SessionWorkStartChangedError ? recoveryOwnerRelease() : undefined;
+          error instanceof SessionWorkStartChangedError
+            ? (recoveryOwnerRelease() ?? liveRunRelease())
+            : undefined;
         if (!pendingOwner) {
           throw error;
         }

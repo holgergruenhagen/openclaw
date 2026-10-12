@@ -44,6 +44,23 @@ async function withSocketServer(
   });
 }
 
+// Bind the module's node:timers imports to Vitest's fake clock so deadlines only
+// advance when a test says so.
+async function withControlledTimers(run: () => Promise<void>): Promise<void> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const schedule = vi.spyOn(timers, "setTimeout").mockImplementation(setTimeout);
+  const clear = vi.spyOn(timers, "clearTimeout").mockImplementation(clearTimeout);
+  syncBuiltinESMExports();
+  try {
+    await run();
+  } finally {
+    schedule.mockRestore();
+    clear.mockRestore();
+    vi.useRealTimers();
+    syncBuiltinESMExports();
+  }
+}
+
 function acceptDoneValue(msg: unknown): number | null | undefined {
   const value = msg as { type?: string; value?: number };
   return value.type === "done" ? (value.value ?? null) : undefined;
@@ -165,20 +182,30 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
     ).resolves.toBeNull();
   });
 
-  it("returns the caller's typed timeout result when provided", async () => {
+  it("returns the caller's typed timeout result after the request is submitted", async () => {
+    const received = createDeferred();
     const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       socket.resume();
+      // Keep the response side open after the request half-close.
+      socket.on("end", () => received.resolve());
     });
     await withSocketServer(server, async (socketPath) => {
-      await expect(
-        requestJsonlSocket({
+      await withControlledTimers(async () => {
+        const completed = vi.fn();
+        const pending = requestJsonlSocket({
           socketPath,
           requestLine: "{}",
           timeoutMs: 50,
           onTimeout: () => ({ kind: "timeout" as const }),
           accept: () => undefined,
-        }),
-      ).resolves.toEqual({ kind: "timeout" });
+        }).then(completed);
+        await received.promise;
+        await vi.advanceTimersByTimeAsync(49);
+        expect(completed).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await pending;
+        expect(completed).toHaveBeenCalledWith({ kind: "timeout" });
+      });
     });
   });
 
@@ -202,21 +229,29 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
   });
 
   it("can wait without a transport deadline when timeoutMs is zero", async () => {
-    const server = net.createServer((socket) => {
-      socket.on("data", () => {
-        socket.end('{"type":"done","value":7}\n');
-      });
+    const received = createDeferred<net.Socket>();
+    const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+      socket.resume();
+      socket.on("end", () => received.resolve(socket));
     });
     await withSocketServer(server, async (socketPath) => {
-      await expect(
-        requestJsonlSocket<number | { kind: "timeout" }>({
+      await withControlledTimers(async () => {
+        const completed = vi.fn();
+        const pending = requestJsonlSocket<number | { kind: "timeout" }>({
           socketPath,
           requestLine: "{}",
           timeoutMs: 0,
           onTimeout: () => ({ kind: "timeout" as const }),
           accept: acceptDoneValue,
-        }),
-      ).resolves.toBe(7);
+        }).then(completed);
+        const socket = await received.promise;
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+        expect(completed).not.toHaveBeenCalled();
+        socket.end('{"type":"done","value":7}\n');
+        await pending;
+        expect(completed).toHaveBeenCalledWith(7);
+      });
     });
   });
 
@@ -228,11 +263,7 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
     });
     await withSocketServer(server, async (socketPath) => {
       // Leave the deadline frozen: only the real socket close can settle this request.
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      const schedule = vi.spyOn(timers, "setTimeout").mockImplementation(setTimeout);
-      const clear = vi.spyOn(timers, "clearTimeout").mockImplementation(clearTimeout);
-      syncBuiltinESMExports();
-      try {
+      await withControlledTimers(async () => {
         const pending = requestJsonlSocket({
           socketPath,
           requestLine: "{}",
@@ -242,12 +273,7 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
         expect(vi.getTimerCount()).toBe(1);
         await expect(pending).resolves.toBeNull();
         expect(vi.getTimerCount()).toBe(0);
-      } finally {
-        schedule.mockRestore();
-        clear.mockRestore();
-        vi.useRealTimers();
-        syncBuiltinESMExports();
-      }
+      });
     });
   });
 });

@@ -39,9 +39,10 @@ function publish(registry: HighlightRegistry): void {
 const BLOCK_SELECTOR =
   "address, blockquote, dd, details, div, dl, dt, h1, h2, h3, h4, h5, h6, li, ol, p, pre, summary, table, td, th, tr, ul";
 
-// Inline images render without text; like the search projection, a phrase must
-// not match across them. The lightbox button wraps the image itself.
-const IMAGE_SELECTOR = "img, .markdown-inline-image-button";
+// Inline content images render without text; like the search projection, a phrase
+// must not match across them. The lightbox button wraps the image itself; link
+// favicons and avatars are decoration and stay transparent.
+const IMAGE_SELECTOR = "img.markdown-inline-image, .markdown-inline-image-button";
 const IMAGE_BARRIER = "￼";
 
 function readableNode(node: Node): number {

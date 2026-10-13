@@ -90,8 +90,16 @@ suite.define(() => {
     const artifactDir = createControlUiE2eArtifactDir("chat-search-highlight");
     await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
       const sessionKey = "agent:main:search-highlight";
+      await page.route("**/__openclaw__/link-favicon/example.com", (route) =>
+        route.fulfill({
+          body: Buffer.from(PIXEL_PNG.split(",")[1]!, "base64"),
+          contentType: "image/png",
+          status: 200,
+        }),
+      );
       await installMockGateway(page, {
         sessionKey,
+        automaticallyFetchFavicons: true,
         historyMessages: [
           {
             role: "user",
@@ -170,10 +178,16 @@ suite.define(() => {
         { text: "Next line", code: false },
       ]);
 
-      // An inline image separates the words around it.
-      await expect.poll(() => reply.locator(".chat-text img").count()).toBe(1);
+      // An inline image separates the words around it; a link favicon does not.
+      await expect.poll(() => reply.locator("img.markdown-inline-image").count()).toBe(1);
       await search.fill("chart below");
       await expect.poll(marked).toEqual([{ text: "chart below", code: false }]);
+      await expect.poll(() => reply.locator("img.markdown-link-favicon").count()).toBe(1);
+      await search.fill("see review notes");
+      await expect.poll(marked).toEqual([
+        { text: "see ", code: false },
+        { text: "review notes", code: false },
+      ]);
 
       // A mention renders its visible name inside a button; it is message text.
       await search.fill("Ada Lovelace");

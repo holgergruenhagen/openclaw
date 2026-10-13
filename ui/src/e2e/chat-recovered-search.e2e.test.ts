@@ -120,6 +120,7 @@ suite.define(() => {
               "```ts\nconst proof = 1;\n```",
               "Raw <b>html</b> stays literal.<br>Next line",
               `Chart ![chart](${PIXEL_PNG}) below, then chart below.`,
+              "Open `/tmp/src/foo.ts` now.",
             ].join("\n\n"),
             timestamp: 1_800_000_000_001,
             __openclaw: { id: "search-highlight-answer", seq: 2 },
@@ -188,6 +189,12 @@ suite.define(() => {
         { text: "see ", code: false },
         { text: "review notes", code: false },
       ]);
+
+      // File links render a shortened label; search follows the label on screen.
+      await search.fill("open foo.ts now");
+      await expect
+        .poll(async () => (await marked()).map(({ text }) => text).join(""))
+        .toBe("Open foo.ts now");
 
       // A mention renders its visible name inside a button; it is message text.
       await search.fill("Ada Lovelace");

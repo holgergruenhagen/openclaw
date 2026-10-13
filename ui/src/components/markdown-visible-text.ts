@@ -2,13 +2,16 @@ import type { MarkdownIt, Token } from "markdown-it";
 import { stripUnsupportedCitationControlMarkers } from "../../../src/shared/text/citation-control-markers.js";
 import { parseMarkdownJson } from "./markdown-json.ts";
 import { createMarkdownParser } from "./markdown-parser.ts";
-import { MARKDOWN_PARSE_LIMIT } from "./markdown-render-options.ts";
+import { MARKDOWN_PARSE_LIMIT, normalizeMarkdownRenderOptions } from "./markdown-render-options.ts";
 import { normalizeMarkdownLineBreaks } from "./markdown-text.ts";
 
 // Transcript search compares what a reader sees, not the syntax around it:
 // `Title: \`fix\`` must match "title: fix". Parse with the transcript's own
 // rules so raw HTML stays literal and disclosure summaries keep their inline text.
 let parser: MarkdownIt | undefined;
+// Every transcript bubble shortens file-link labels while parsing; per-message
+// options (mention names, repository context) stay with the source fallback.
+const PROJECTION_OPTIONS = { fileLinks: true, sessionLinks: true } as const;
 const visibleTexts = new WeakMap<object, { markdown: string; text: string }>();
 
 function collectVisibleText(tokens: readonly Token[], parts: string[]): void {
@@ -61,7 +64,10 @@ export function markdownVisibleText(owner: unknown, markdown: string): string {
   try {
     parser ??= createMarkdownParser();
     const source = normalizeMarkdownLineBreaks(stripUnsupportedCitationControlMarkers(markdown));
-    collectVisibleText(parser.parse(source, {}), parts);
+    collectVisibleText(
+      parser.parse(source, normalizeMarkdownRenderOptions(PROJECTION_OPTIONS)),
+      parts,
+    );
   } catch {
     // The renderer falls back to escaped source text when parsing fails.
     return markdown;

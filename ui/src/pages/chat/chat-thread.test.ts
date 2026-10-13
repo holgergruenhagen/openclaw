@@ -1712,6 +1712,7 @@ describe("buildCachedChatItems", () => {
     ["link label", "see the docs", "See [the docs](https://docs.openclaw.ai/chat)"],
     ["link target", "docs.openclaw.ai/chat", "See [the docs](https://docs.openclaw.ai/chat)"],
     ["html block", "proof steps", "<details>\n<summary>Proof</summary>\n\nsteps\n</details>"],
+    ["shortened file link", "open foo.ts now", "Open `/tmp/src/foo.ts` now"],
   ])("matches transcript search across %s", (_case, query, source) => {
     const texts = messageGroups({
       messages: [

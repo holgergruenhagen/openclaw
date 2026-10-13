@@ -95,6 +95,14 @@ export abstract class ChatPaneTaskSuggestions extends ChatPaneSharing {
     );
   }
 
+  // A started card is a local receipt; the gateway already resolved its suggestion.
+  private retireStartedTaskSuggestion(taskId: string): void {
+    this.taskSuggestionsRequestVersion += 1;
+    this.taskSuggestionOperations.delete(taskId);
+    this.setTaskSuggestions(this.taskSuggestions.filter((item) => item.id !== taskId));
+    this.requestUpdate();
+  }
+
   protected readonly navigateTaskSuggestion = (
     taskId: string,
     direction: "next" | "previous",
@@ -265,8 +273,14 @@ export abstract class ChatPaneTaskSuggestions extends ChatPaneSharing {
               operation.canDisplay() &&
               operation.outcome.phase === "started"
             ) {
-              this.onPaneSessionChange?.(this.paneId, operation.outcome.sessionKey);
+              if (this.onPaneSessionChange?.(this.paneId, operation.outcome.sessionKey) === false) {
+                return false;
+              }
+              // Opening the session completes the receipt; keeping it would resurface
+              // the card when this conversation is shown again.
+              this.retireStartedTaskSuggestion(suggestion.id);
             }
+            return true;
           }
         : undefined,
       sessionSuggestions: multiIdentity ? this.sessionSuggestions : [],
@@ -333,10 +347,7 @@ export abstract class ChatPaneTaskSuggestions extends ChatPaneSharing {
       }
       if (previous.outcome.phase === "started") {
         if (action === "dismiss") {
-          this.taskSuggestionsRequestVersion += 1;
-          this.taskSuggestionOperations.delete(suggestion.id);
-          this.setTaskSuggestions(this.taskSuggestions.filter((item) => item.id !== suggestion.id));
-          this.requestUpdate();
+          this.retireStartedTaskSuggestion(suggestion.id);
         }
         return;
       }

@@ -32,7 +32,8 @@ export type ChatTaskSuggestionTrayProps = {
   taskSuggestionBusyIds?: ReadonlySet<string>;
   taskSuggestionCopiedIds?: ReadonlySet<string>;
   taskSuggestionAcceptance?: (taskId: string) => TaskSuggestionAcceptance | undefined;
-  onOpenTaskSuggestion?: (suggestion: TaskSuggestion) => void;
+  /** Returns false when the pane refused navigation so the link can navigate natively. */
+  onOpenTaskSuggestion?: (suggestion: TaskSuggestion) => boolean;
   canOpenTaskSuggestions?: boolean;
   activeTaskSuggestionId?: string;
   taskSuggestionSwapDirection?: "next" | "previous";
@@ -197,9 +198,9 @@ export function renderChatTaskSuggestionTray(props: ChatTaskSuggestionTrayProps)
               </details>
               ${
                 acceptance?.phase === "started"
-                  ? html`<p class="task-suggestion__summary" role="status">
-                      ${t("chat.taskSuggestions.started")}
-                    </p>`
+                  ? html`<div class="callout success task-suggestion__started" role="status">
+                      ${icons.check}<span>${t("chat.taskSuggestions.started")}</span>
+                    </div>`
                   : acceptance?.phase === "failed"
                     ? html`<div class="callout danger" role="alert">
                         <span
@@ -264,10 +265,15 @@ export function renderChatTaskSuggestionTray(props: ChatTaskSuggestionTrayProps)
                       @click=${(event: MouseEvent) => {
                         if (!canOpen) {
                           event.preventDefault();
-                        } else if (onOpen && shouldHandleNavigationClick(event)) {
-                          event.preventDefault();
-                          onOpen(suggestion);
+                          return;
                         }
+                        if (onOpen && shouldHandleNavigationClick(event) && onOpen(suggestion)) {
+                          event.preventDefault();
+                          return;
+                        }
+                        // Native navigation (new tab or full load) also opens the session;
+                        // the started card has served its purpose either way.
+                        props.onDismissTaskSuggestion?.(suggestion);
                       }}
                       >${t("sessionsView.openSession")}</a
                     >`

@@ -247,14 +247,61 @@ describe("chat pane task suggestion lifecycle", () => {
     expect(
       request.mock.calls.filter(([method]) => method === "taskSuggestions.accept"),
     ).toHaveLength(1);
-    open?.click();
-    expect(navigate).toHaveBeenCalledExactlyOnceWith(pane.paneId, "agent:main:task");
     holdList = true;
     const refresh = pane.refreshTaskSuggestions();
-    await pane.resolveTaskSuggestion(suggestion, "dismiss");
+    open?.click();
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(pane.paneId, "agent:main:task");
+    // Opening the session completes the card; a stale list cannot bring it back.
+    expect(pane.taskSuggestions).toEqual([]);
     lateList.resolve({ suggestions: [suggestion] });
     await refresh;
     expect(pane.taskSuggestions).toEqual([]);
+    draw();
+    expect(container.querySelector(".task-suggestion")).toBeNull();
+    expect(
+      request.mock.calls.filter(([method]) => method === "taskSuggestions.dismiss"),
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    { name: "refused pane navigation", init: {}, refused: true },
+    { name: "a new-tab click", init: { metaKey: true }, refused: false },
+  ])("closes a started card when $name falls back to the native link", async (variant) => {
+    const request = createGatewayRequestMock((method) =>
+      method === "taskSuggestions.accept"
+        ? Promise.resolve({ taskId: suggestion.id, key: "agent:main:task" })
+        : Promise.resolve({ suggestions: [] }),
+    );
+    const { pane } = createTestChatPane({
+      client: createTestGatewayClient(request),
+      sessions: createSessionCapabilityFixture(),
+    });
+    const navigate = vi.fn(() => !variant.refused);
+    pane.onPaneSessionChange = navigate;
+    pane.taskSuggestions = [suggestion];
+    await pane.resolveTaskSuggestion(suggestion, "accept");
+    const container = document.createElement("div");
+    const draw = () =>
+      render(renderChatTaskSuggestionTray(pane.suggestionChatProps(true, false, false)), container);
+    draw();
+    const native: boolean[] = [];
+    container.addEventListener("click", (event) => {
+      native.push(!event.defaultPrevented);
+      // jsdom cannot follow links; the browser would open the session here.
+      event.preventDefault();
+    });
+
+    container
+      .querySelector(".task-suggestion__open")
+      ?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, ...variant.init }),
+      );
+
+    expect(native).toEqual([true]);
+    expect(navigate).toHaveBeenCalledTimes(variant.refused ? 1 : 0);
+    expect(pane.taskSuggestions).toEqual([]);
+    draw();
+    expect(container.querySelector(".task-suggestion")).toBeNull();
     expect(
       request.mock.calls.filter(([method]) => method === "taskSuggestions.dismiss"),
     ).toHaveLength(0);

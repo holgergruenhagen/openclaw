@@ -1846,6 +1846,21 @@ openclaw-chat-video-player {
   background: var(--task-suggestion-prompt-bg);
 }
 
+.task-suggestion__started {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  font-weight: 600;
+}
+
+.task-suggestion__started svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
 .task-suggestion__repository {
   display: grid;
   gap: 8px;

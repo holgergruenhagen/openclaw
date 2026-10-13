@@ -275,6 +275,77 @@ suite.define(() => {
     }
   });
 
+  it.each([
+    { mode: "local", key: "agent:main:session-b" },
+    { mode: "session", key: "agent:main:session-a" },
+  ] as const)("closes the started card after Open session ($mode)", async ({ mode, key }) => {
+    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
+    const page = await context.newPage();
+    const suggestion = {
+      id: "task_open",
+      title: "Remove stale adapter",
+      prompt: "Delete the stale adapter in src/example.ts and update tests.",
+      tldr: "The adapter is unreachable and adds maintenance cost.",
+      cwd: "/projects/example",
+      sessionKey: "agent:main:session-a",
+      agentId: "main",
+      createdAt: Date.now(),
+    };
+    const gateway = await installMockGateway(page, {
+      featureCapabilities: [GATEWAY_SERVER_CAPS.TASK_SUGGESTIONS_ACCEPT_MODES],
+      featureMethods: [
+        "chat.metadata",
+        "chat.startup",
+        "taskSuggestions.list",
+        "taskSuggestions.accept",
+        "taskSuggestions.dismiss",
+      ],
+      methodResponses: {
+        "sessions.list": chatSessionListResponse(),
+        "taskSuggestions.list": { suggestions: [suggestion] },
+        "taskSuggestions.accept": { taskId: suggestion.id, key },
+      },
+      sessionKey: "agent:main:session-a",
+    });
+
+    try {
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, "agent:main:session-a"));
+      const card = page.locator(`.task-suggestion[data-task-id="${suggestion.id}"]`);
+      await card.waitFor({ state: "visible", timeout: 10_000 });
+      await gateway.setMethodResponse("taskSuggestions.list", { suggestions: [] });
+      if (mode === "local") {
+        await card.getByRole("button", { name: "Start in a new session", exact: true }).click();
+      } else {
+        await card.getByRole("button", { name: "Choose where to start the task" }).click();
+        await card.getByRole("menuitem", { name: "Start in this session", exact: true }).click();
+      }
+      const started = card.getByRole("status").filter({ hasText: "Task started" });
+      await started.waitFor();
+      await captureUiProof(suite, page, "task-suggestions", `open-${mode}-started.png`);
+      expect(await started.evaluate((element) => element.classList.contains("success"))).toBe(true);
+
+      await card.getByRole("link", { name: "Open session", exact: true }).click();
+      if (mode === "local") {
+        await expect.poll(() => decodeURIComponent(page.url())).toContain("agent:main:session-b");
+        const lists = (await gateway.getRequests("taskSuggestions.list")).length;
+        await page
+          .locator(
+            '.sidebar-recent-session[data-session-key="agent:main:session-a"] a.sidebar-recent-session__link',
+          )
+          .click();
+        await waitForRequests(gateway, "taskSuggestions.list", lists + 1);
+        await expect.poll(() => decodeURIComponent(page.url())).toContain("agent:main:session-a");
+      }
+      await page.locator(".agent-chat__composer-combobox textarea").waitFor();
+      await captureUiProof(suite, page, "task-suggestions", `open-${mode}-after-open.png`);
+      await expect.poll(() => card.count()).toBe(0);
+      expect(await gateway.getRequests("taskSuggestions.accept")).toHaveLength(1);
+      expect(await gateway.getRequests("taskSuggestions.dismiss")).toHaveLength(0);
+    } finally {
+      await suite.closeBrowserContext(context);
+    }
+  });
+
   it("clears model-suggested follow-ups while switching sessions", async () => {
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();

@@ -326,7 +326,7 @@ suite.define(() => {
 
       await card.getByRole("link", { name: "Open session", exact: true }).click();
       if (mode === "local") {
-        await expect.poll(() => decodeURIComponent(page.url())).toContain("agent:main:session-b");
+        await expect.poll(() => new URL(page.url()).pathname).toBe("/chat/main/session-b");
         const lists = (await gateway.getRequests("taskSuggestions.list")).length;
         await page
           .locator(
@@ -334,9 +334,11 @@ suite.define(() => {
           )
           .click();
         await waitForRequests(gateway, "taskSuggestions.list", lists + 1);
-        await expect.poll(() => decodeURIComponent(page.url())).toContain("agent:main:session-a");
+        await expect.poll(() => new URL(page.url()).pathname).toBe("/chat/main/session-a");
       }
-      await page.locator(".agent-chat__composer-combobox textarea").waitFor();
+      await page
+        .locator(`openclaw-chat-pane[aria-hidden="false"][data-mcp-app-owner-key*="session-a"]`)
+        .waitFor();
       await captureUiProof(suite, page, "task-suggestions", `open-${mode}-after-open.png`);
       await expect.poll(() => card.count()).toBe(0);
       expect(await gateway.getRequests("taskSuggestions.accept")).toHaveLength(1);

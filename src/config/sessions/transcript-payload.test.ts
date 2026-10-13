@@ -2,10 +2,12 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { observeSqliteReadSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
 import * as nodeSqlite from "../../infra/node-sqlite.js";
+import { admitSqliteSchema } from "../../infra/sqlite-schema-facts.js";
 import { resolveZstdCodec } from "../../infra/zstd-codec.js";
 import {
   getMessageRangeReaders,
@@ -18,9 +20,11 @@ import {
 } from "./session-model-context-projection.js";
 import {
   createTranscriptEventInserter,
+  createTranscriptPayloadUpdater,
   prepareTranscriptPayload,
   prepareTranscriptPayloadForReuse,
   readTranscriptPayload,
+  readTranscriptStorageEncoding,
   transcriptEventJsonSql,
   transcriptEventModelBytesSql,
   transcriptEventModelNavigationSql,
@@ -29,6 +33,10 @@ import {
   transcriptEventWithoutCustomDataBytesSql,
   type TranscriptPayloadRecord,
 } from "./transcript-payload.js";
+import {
+  deriveTranscriptPredicateFields,
+  type TranscriptPredicateFields,
+} from "./transcript-predicate-fields.js";
 
 type PayloadDatabase = { transcript_events: TranscriptPayloadRecord & { seq: number } };
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -41,14 +49,40 @@ function createTable(database: DatabaseSync): void {
   // Deliberately omit production constraints so reads also exercise corrupted persisted records.
   database.exec(`CREATE TABLE transcript_events (
     seq INTEGER PRIMARY KEY, event_json TEXT, event_zstd BLOB,
-    event_utf8_bytes INTEGER, navigation_json TEXT
+    event_utf8_bytes INTEGER, navigation_json TEXT,
+    navigation_type TEXT, navigation_custom_type TEXT, navigation_display INTEGER NOT NULL DEFAULT 0,
+    message_role TEXT, navigation_last_type TEXT, navigation_last_custom_type TEXT,
+    navigation_valid INTEGER NOT NULL DEFAULT 1
   ) STRICT`);
+  admitSqliteSchema(database);
 }
 
-function insert(database: DatabaseSync, seq: number, row: TranscriptPayloadRecord): void {
+type PayloadFixture = Omit<TranscriptPayloadRecord, keyof TranscriptPredicateFields> &
+  Partial<TranscriptPredicateFields>;
+
+function insert(database: DatabaseSync, seq: number, row: PayloadFixture): void {
+  const fields = {
+    ...deriveTranscriptPredicateFields(row.event_json ?? row.navigation_json ?? "null"),
+    ...row,
+  };
   database
-    .prepare("INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?)")
-    .run(seq, row.event_json, row.event_zstd, row.event_utf8_bytes, row.navigation_json);
+    .prepare(`INSERT INTO transcript_events (seq, event_json, event_zstd, event_utf8_bytes, navigation_json,
+      navigation_type, navigation_custom_type, navigation_display, message_role, navigation_last_type,
+      navigation_last_custom_type, navigation_valid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(
+      seq,
+      row.event_json,
+      row.event_zstd,
+      row.event_utf8_bytes,
+      row.navigation_json,
+      fields.navigation_type,
+      fields.navigation_custom_type,
+      fields.navigation_display,
+      fields.message_role,
+      fields.navigation_last_type,
+      fields.navigation_last_custom_type,
+      fields.navigation_valid,
+    );
 }
 
 function readBody(database: DatabaseSync, seq: number, mode: "sql" | "row" = "sql") {
@@ -68,7 +102,7 @@ function readBody(database: DatabaseSync, seq: number, mode: "sql" | "row" = "sq
   )?.body;
 }
 
-function compressedRecord(bytes: Uint8Array, rawBytes = bytes.byteLength): TranscriptPayloadRecord {
+function compressedRecord(bytes: Uint8Array, rawBytes = bytes.byteLength): PayloadFixture {
   const codec = resolveZstdCodec();
   if (!codec) {
     throw new Error("Transcript compression boundary tests require native zstd support");
@@ -82,77 +116,159 @@ function compressedRecord(bytes: Uint8Array, rawBytes = bytes.byteLength): Trans
 }
 
 describe("transcript payload storage boundary", () => {
-  it.each([["UTF-16le", "UTF-8"]])(
-    "recomputes a prepared %s frame for %s storage",
-    (sourceEncoding, targetEncoding) => {
-      const source = openNodeSqliteDatabase(":memory:");
-      const target = openNodeSqliteDatabase(":memory:");
-      try {
-        source.exec(`PRAGMA encoding = '${sourceEncoding}'`);
-        target.exec(`PRAGMA encoding = '${targetEncoding}'`);
-        createTable(source);
-        createTable(target);
-        target.exec(`ALTER TABLE transcript_events ADD COLUMN session_id TEXT;
+  it("publishes predicate columns with inserts and rewrites and rolls both back together", () => {
+    const database = openNodeSqliteDatabase(":memory:");
+    try {
+      createTable(database);
+      database.exec(`ALTER TABLE transcript_events ADD COLUMN session_id TEXT;
         ALTER TABLE transcript_events ADD COLUMN created_at INTEGER`);
-        const eventJson = `{"type":"custom","id":"first","id":"last","data":"${"fixture".repeat(1024)}"}`;
-        const prepared = prepareTranscriptPayloadForReuse(source, eventJson);
-        expect(prepared.storageEncoding).toBe(sourceEncoding);
-        const insertEvent = createTranscriptEventInserter(target, "session");
-        insertEvent({
-          seq: 1,
-          eventJson,
-          createdAt: 1,
-          preparedPayload: prepared,
-        });
-        const stored = target
-          .prepare(
-            "SELECT event_json, event_zstd, event_utf8_bytes, navigation_json FROM transcript_events",
-          )
+      const write = createTranscriptEventInserter(database, "session");
+      write({
+        seq: 1,
+        createdAt: 1,
+        eventJson: '{"type":"message","message":{"role":"user","role":"assistant"}}',
+      });
+      const read = () =>
+        database
+          .prepare(`SELECT navigation_type, navigation_last_type,
+        navigation_display, message_role, navigation_valid FROM transcript_events WHERE seq = 1`)
           .get();
-        expect(readBody(target, 1)).toBe(eventJson);
-        expect(readBody(target, 1, "row")).toBe(eventJson);
-        if (targetEncoding === "UTF-8") {
-          expect(stored?.event_json).toBeNull();
-          expect(stored?.event_zstd).toBeInstanceOf(Uint8Array);
-          expect(stored?.event_utf8_bytes).toBe(Buffer.byteLength(eventJson));
-        } else {
-          expect(stored).toEqual({
-            event_json: eventJson,
-            event_zstd: null,
-            event_utf8_bytes: null,
-            navigation_json: null,
-          });
-        }
+      expect(read()).toEqual({
+        navigation_type: "message",
+        navigation_last_type: "message",
+        navigation_display: 0,
+        message_role: "user",
+        navigation_valid: 1,
+      });
+      database.exec("BEGIN");
+      createTranscriptPayloadUpdater(
+        database,
+        "session",
+      )({
+        seq: 1,
+        ...prepareTranscriptPayload(
+          database,
+          '{"type":"custom_message","type":"reset","display":true}',
+        ),
+      });
+      expect(read()).toEqual({
+        navigation_type: "custom_message",
+        navigation_last_type: "reset",
+        navigation_display: 1,
+        message_role: null,
+        navigation_valid: 1,
+      });
+      database.exec("ROLLBACK");
+      expect(read()).toEqual({
+        navigation_type: "message",
+        navigation_last_type: "message",
+        navigation_display: 0,
+        message_role: "user",
+        navigation_valid: 1,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    ["UTF-16le", "UTF-8"],
+    ["UTF-8", "UTF-16le"],
+  ])("recomputes a prepared %s frame for %s storage", (sourceEncoding, targetEncoding) => {
+    const source = openNodeSqliteDatabase(":memory:");
+    const target = openNodeSqliteDatabase(":memory:");
+    try {
+      source.exec(`PRAGMA encoding = '${sourceEncoding}'`);
+      target.exec(`PRAGMA encoding = '${targetEncoding}'`);
+      createTable(source);
+      createTable(target);
+      const observation = observeSqliteReadSql(
+        nodeSqlite.requireNodeSqlite().StatementSync.prototype,
+      );
+      try {
+        expect(readTranscriptStorageEncoding(source)).toBe(sourceEncoding);
+        expect(readTranscriptStorageEncoding(target)).toBe(targetEncoding);
+        expect(observation.queries).toEqual([]);
       } finally {
-        source.close();
-        target.close();
+        observation.restore();
       }
-    },
-  );
+      target.exec(`ALTER TABLE transcript_events ADD COLUMN session_id TEXT;
+        ALTER TABLE transcript_events ADD COLUMN created_at INTEGER`);
+      const eventJson = `{"type":"custom","id":"first","id":"last","data":"${"fixture".repeat(1024)}"}`;
+      const prepared = prepareTranscriptPayloadForReuse(source, eventJson);
+      expect(prepared.storageEncoding).toBe(sourceEncoding);
+      const insertEvent = createTranscriptEventInserter(target, "session");
+      insertEvent({
+        seq: 1,
+        eventJson,
+        createdAt: 1,
+        preparedPayload: prepared,
+      });
+      const stored = target
+        .prepare(
+          "SELECT event_json, event_zstd, event_utf8_bytes, navigation_json FROM transcript_events",
+        )
+        .get();
+      expect(readBody(target, 1)).toBe(eventJson);
+      expect(readBody(target, 1, "row")).toBe(eventJson);
+      if (targetEncoding === "UTF-8") {
+        expect(stored?.event_json).toBeNull();
+        expect(stored?.event_zstd).toBeInstanceOf(Uint8Array);
+        expect(stored?.event_utf8_bytes).toBe(Buffer.byteLength(eventJson));
+      } else {
+        expect(stored).toEqual({
+          event_json: eventJson,
+          event_zstd: null,
+          event_utf8_bytes: null,
+          navigation_json: null,
+        });
+      }
+    } finally {
+      source.close();
+      target.close();
+    }
+  });
 
   it("keeps malformed, giant and oversized-navigation identities usable without the codec", () => {
     const database = openNodeSqliteDatabase(":memory:");
     try {
       createTable(database);
       const originals = [
-        "",
-        '{"type":"custom", invalid',
-        `{"type":"custom","data":"${"x".repeat(2048)}`,
-        `{"type":"custom","data":${"[".repeat(1001)}0${"]".repeat(1001)}}`,
-        `{"type":"message","id":"nested","parentId":null,"appendMode":${"[".repeat(998)}0${"]".repeat(998)},"message":{"role":"user","content":"${"x".repeat(12 * 1024)}"}}`,
-        `{"type":"custom","data":"${"x".repeat(4 * 1024 * 1024)}"}`,
-        `{"type":"message","message":{"provenance":{"extra":"${"x".repeat(17 * 1024)}"}}}`,
-        '{"type":"custom","id":"\\ud800","data":"a\\u0000b"}',
-        '{"type":"custom","data":"literal\0nul"}',
-        "null",
-      ];
-      for (const [seq, original] of originals.entries()) {
+        ["", null, null, 0],
+        ['{"type":"custom", invalid', null, null, 0],
+        [`{"type":"custom","data":"${"x".repeat(2048)}`, null, null, 0],
+        [`{"type":"custom","data":${"[".repeat(1001)}0${"]".repeat(1001)}}`, null, null, 0],
+        [
+          `{"type":"message","id":"nested","parentId":null,"appendMode":${"[".repeat(998)}0${"]".repeat(998)},"message":{"role":"user","content":"${"x".repeat(12 * 1024)}"}}`,
+          "message",
+          "user",
+          1,
+        ],
+        [`{"type":"custom","data":"${"x".repeat(4 * 1024 * 1024)}"}`, "custom", null, 1],
+        [
+          `{"type":"message","message":{"provenance":{"extra":"${"x".repeat(17 * 1024)}"}}}`,
+          "message",
+          null,
+          1,
+        ],
+        ['{"type":"custom","id":"\\ud800","data":"a\\u0000b"}', "custom", null, 1],
+        ['{"type":"custom","data":"literal\0nul"}', null, null, 0],
+        ["null", null, null, 1],
+      ] as const;
+      for (const [seq, [original, type, role, valid]] of originals.entries()) {
         const prepared = prepareTranscriptPayload(database, original);
         expect(prepared).toEqual({
           event_json: original,
           event_zstd: null,
           event_utf8_bytes: Buffer.byteLength(original),
           navigation_json: null,
+          navigation_type: type,
+          navigation_custom_type: null,
+          navigation_display: 0,
+          message_role: role,
+          navigation_last_type: type,
+          navigation_last_custom_type: null,
+          navigation_valid: valid,
         });
         insert(database, seq, prepared);
         expect(readBody(database, seq)).toBe(original);
@@ -166,6 +282,7 @@ describe("transcript payload storage boundary", () => {
   it.each([[3]])("keeps a genuine large header in identity storage with version %j", (version) => {
     const database = openNodeSqliteDatabase(":memory:");
     try {
+      admitSqliteSchema(database);
       const original = JSON.stringify({
         type: "session",
         id: "header",
@@ -178,6 +295,13 @@ describe("transcript payload storage boundary", () => {
         event_zstd: null,
         event_utf8_bytes: Buffer.byteLength(original),
         navigation_json: null,
+        navigation_type: "session",
+        navigation_custom_type: null,
+        navigation_display: 0,
+        message_role: null,
+        navigation_last_type: "session",
+        navigation_last_custom_type: null,
+        navigation_valid: 1,
       });
     } finally {
       database.close();

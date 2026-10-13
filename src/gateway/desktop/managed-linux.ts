@@ -141,29 +141,21 @@ async function readDisplaySocketNames(
     }
     names = [];
   }
-  return [...names, ...(await readBoundDisplaySocketNames(socketDir, unixSocketTable))];
-}
-
-// X servers also bind an abstract socket per display. It lives in the network namespace,
-// so a server with a private /tmp (for example a systemd PrivateTmp service) still owns
-// the display although its socket file is invisible here.
-async function readBoundDisplaySocketNames(
-  socketDir: string,
-  unixSocketTable: string,
-): Promise<string[]> {
   let table: string;
   try {
+    // Read the Gateway's network namespace, including X servers with a private /tmp.
     table = await fs.readFile(unixSocketTable, "utf8");
   } catch {
-    // The socket directory stays authoritative when the kernel table is unreadable.
-    return [];
+    return names;
   }
   const prefix = `${socketDir}/`;
-  return table.split("\n").flatMap((line) => {
-    // Columns: Num RefCount Protocol Flags Type St Inode Path; abstract paths start with "@".
+  for (const line of table.split("\n")) {
     const socketPath = line.trim().split(/\s+/u)[7]?.replace(/^@/u, "");
-    return socketPath?.startsWith(prefix) ? [socketPath.slice(prefix.length)] : [];
-  });
+    if (socketPath?.startsWith(prefix)) {
+      names.push(socketPath.slice(prefix.length));
+    }
+  }
+  return names;
 }
 
 function binaryError(
@@ -215,7 +207,7 @@ export function createManagedLinuxDesktop(
   const tempRoot = params.runtime?.tempRoot ?? os.tmpdir();
   const pickPort = params.runtime?.tryListenOnPort ?? tryListenOnPort;
   const x11SocketDir = params.runtime?.x11SocketDir ?? "/tmp/.X11-unix";
-  const unixSocketTable = params.runtime?.unixSocketTable ?? "/proc/net/unix";
+  const unixSocketTable = params.runtime?.unixSocketTable ?? "/proc/self/net/unix";
   const scopeKey = `host-desktop-managed-linux:${crypto.randomUUID()}`;
 
   let status: ManagedLinuxDesktopStatus = { state: "not-started" };

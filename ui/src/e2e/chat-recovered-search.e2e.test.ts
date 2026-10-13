@@ -135,7 +135,7 @@ suite.define(() => {
       const marked = () =>
         page.evaluate(() =>
           Array.from(CSS.highlights.get("openclaw-chat-search") ?? [], (range) => ({
-            text: range.toString(),
+            text: range instanceof Range ? range.toString() : "",
             code: Boolean(range.startContainer.parentElement?.closest(".chat-text code")),
           })),
         );

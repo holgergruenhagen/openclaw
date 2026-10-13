@@ -13,13 +13,14 @@ import {
 } from "../../app/question-prompt.ts";
 import { loadSettings } from "../../app/settings.ts";
 import { readPresenceEntries } from "../../app/user-profile.ts";
+import type { BoardProvider } from "../../lib/board/provider.ts";
 import { isGatewayAvailable } from "../../lib/gateway-availability.ts";
 import { createGatewayConnectionLifecycle } from "../../lib/gateway-connection-lifecycle.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
 import { modelAuthEventInvalidates } from "../../lib/model-auth-request-state.ts";
 import { isSessionRunActive } from "../../lib/session-run-state.ts";
 import { parseCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
-import { resolveSessionKey } from "../../lib/sessions/index.ts";
+import { resolveSessionKey, scopedAgentParamsForSession } from "../../lib/sessions/index.ts";
 import {
   buildAgentMainSessionKey,
   canonicalUiSessionKeyForPersistence,
@@ -62,13 +63,28 @@ import {
   replayPendingChatAbort,
 } from "./run-lifecycle.ts";
 import { cancelChatScroll } from "./scroll.ts";
-import { clearChatMessagesFromCache, readChatSessionSnapshot } from "./session-message-cache.ts";
+import {
+  clearChatMessagesFromCache,
+  createChatWidgetLayout,
+  readChatSessionSnapshot,
+} from "./session-message-cache.ts";
 import { migrateLegacyDockVisibility } from "./sidebar-layout-legacy-migration.ts";
 import { normalizeSidebarLayout } from "./sidebar-layout.ts";
 import { maybeResetToolStream } from "./stream-reconciliation.ts";
 import { reconcileWaitingApprovalsFromSnapshot } from "./tool-stream-status.ts";
 
 export abstract class ChatPaneContext extends ChatPaneLifecycle {
+  protected widgetRenderOptions(state: ChatPageHost, boardProvider: BoardProvider | undefined) {
+    return {
+      canvasPluginSurfaceUrl: state.canvasPluginSurfaceUrl,
+      boardProvider,
+      widgetLayout: createChatWidgetLayout(state.chatMessagesBySession, state, {
+        sessionKey: state.sessionKey,
+        ...scopedAgentParamsForSession(state, state.sessionKey),
+      }),
+    };
+  }
+
   protected transcriptSessionProps(selectedSession: GatewaySessionRow | undefined) {
     const state = this.state;
     if (!state || parseCatalogSessionKey(state.sessionKey)) {
@@ -109,20 +125,22 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
 
   constructor() {
     super();
-    void new SubscriptionsController(this).effect(
-      () => this.context?.gateway,
-      (gateway) =>
-        gateway.subscribeEvents((event) => {
-          const state = this.state;
-          if (!state || !modelAuthEventInvalidates(event)) {
-            return;
-          }
-          state.modelAuthStatusResult = null;
-          state.modelAuthStatusError = null;
-          this.requestUpdate();
-          void refreshChatModelAuthStatus(state).finally(() => this.requestUpdate());
-        }),
-    );
+    void new SubscriptionsController(this)
+      .watchStore(() => this.context?.navigation)
+      .effect(
+        () => this.context?.gateway,
+        (gateway) =>
+          gateway.subscribeEvents((event) => {
+            const state = this.state;
+            if (!state || !modelAuthEventInvalidates(event)) {
+              return;
+            }
+            state.modelAuthStatusResult = null;
+            state.modelAuthStatusError = null;
+            this.requestUpdate();
+            void refreshChatModelAuthStatus(state).finally(() => this.requestUpdate());
+          }),
+      );
   }
 
   protected placementComposerPresentation(
@@ -379,7 +397,7 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       return;
     }
     // Upload controls read the live config capability; refresh every policy publication.
-    state.requestUpdate?.();
+    this.chatState.requestBackgroundUpdate();
     const previousTerminalAvailable = state.terminalAvailable;
     state.terminalAvailable =
       config.terminalEnabled &&
@@ -397,7 +415,6 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
     state.embedSandboxMode = config.embedSandboxMode;
     state.allowExternalEmbedUrls = config.allowExternalEmbedUrls;
     state.automaticallyFetchFavicons = config.automaticallyFetchFavicons;
-    state.requestUpdate?.();
   }
 
   protected applyGatewaySnapshot(snapshot: ApplicationGatewaySnapshot) {
@@ -476,7 +493,6 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
         // Gateway uses the same session key. Never bind its offline Stop to them.
         reconcileChatRunLifecycle(state, {
           clearLocalRun: true,
-          clearChatStream: true,
           clearToolStream: true,
           clearRunStatus: true,
           requestUpdate: false,
@@ -646,7 +662,7 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
         if (agentsList) {
           applyChatAgentsList(state, agentsList, startupClient);
         }
-        state.requestUpdate?.();
+        this.chatState.requestBackgroundUpdate();
       };
       this.connectedClient = startupClient;
       setQuestionPromptClient(this.questionPromptState, startupClient);
@@ -683,6 +699,6 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       void resumeStoredChatOutboxes(state);
     }
     this.reconcileWaitingApprovalSnapshot();
-    state.requestUpdate?.();
+    this.chatState.requestBackgroundUpdate();
   }
 }

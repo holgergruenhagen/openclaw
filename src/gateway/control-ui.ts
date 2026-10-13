@@ -6,10 +6,6 @@ import { isWithinDir } from "@openclaw/fs-safe/path";
 import { detectMime, kindFromMime } from "@openclaw/media-core/mime";
 import { isControlUiFocusPath } from "@openclaw/session-url-contract";
 import { startsWithSvgRootElement } from "../../packages/gateway-protocol/src/svg-image.js";
-import {
-  type AgentAvatarResolution,
-  resolvePublicAgentAvatarSource,
-} from "../agents/identity-avatar.js";
 import { resolveGatewayPublicOrigin } from "../config/gateway-public-origin.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveDevInstallGitBranch } from "../infra/dev-install-branch.js";
@@ -28,6 +24,8 @@ import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveRuntimeServiceBuildId, resolveRuntimeServiceVersion } from "../version.js";
 import {
+  controlUiAvatarResolutionMeta,
+  type ControlUiAvatarMeta,
   gatewayAssistantAvatarUrl,
   prepareGatewayAssistantAvatar,
   resolveGatewayAssistantAvatar,
@@ -112,25 +110,6 @@ type ControlUiRequestOptions = Partial<GatewayHttpRequestAuthOptions> & {
 };
 
 const CONTROL_UI_NAMESPACE_PREFIX = "/__openclaw__/";
-type ControlUiAvatarMeta = {
-  avatarUrl: string | null;
-  avatarSource: string | null;
-  avatarStatus: AgentAvatarResolution["kind"] | null;
-  avatarReason: string | null;
-};
-
-function controlUiAvatarResolutionMeta(
-  resolved: AgentAvatarResolution | null,
-): Omit<ControlUiAvatarMeta, "avatarUrl"> {
-  if (!resolved) {
-    return { avatarSource: null, avatarStatus: null, avatarReason: null };
-  }
-  return {
-    avatarSource: resolvePublicAgentAvatarSource(resolved) ?? null,
-    avatarStatus: resolved.kind,
-    avatarReason: resolved.kind === "none" ? resolved.reason : null,
-  };
-}
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -177,7 +156,7 @@ function normalizeAssistantMediaSource(source: string): string | null {
   return trimmed;
 }
 
-type AssistantMediaPolicy = NonNullable<ReturnType<typeof resolveAssistantMediaPolicy>>;
+type AssistantMediaPolicy = NonNullable<Awaited<ReturnType<typeof resolveAssistantMediaPolicy>>>;
 type AssistantMediaFile = NonNullable<AssistantMediaTicketPayload["file"]>;
 
 function sameAssistantMediaFile(actual: AssistantMediaFile, expected: AssistantMediaFile) {
@@ -267,7 +246,12 @@ async function resolveAssistantMediaAvailability(
       mimeType && (mediaKind === "audio" || mediaKind === "video")
         ? await resolvePlaybackMetadataForSource({
             sourcePath: opened.realPath,
-            sourceStat: opened.stat,
+            sourceStat: {
+              size: opened.stat.size,
+              mtimeMs: opened.stat.mtimeMs,
+              ctimeMs: opened.stat.ctimeMs,
+              exactIdentity: opened.exactIdentity,
+            },
             mimeType,
             kind: mediaKind,
             signal,
@@ -365,7 +349,7 @@ export async function handleControlUiAssistantMediaRequest(
     }
   }
   const policyParams = { config: opts?.config ?? {}, sessionKey, agentId };
-  const policy = resolveAssistantMediaPolicy({
+  const policy = await resolveAssistantMediaPolicy({
     ...policyParams,
     requestAuth: requestAuth ?? undefined,
     reader: isMetaRequest ? undefined : ticketCandidate?.reader,
@@ -374,6 +358,7 @@ export async function handleControlUiAssistantMediaRequest(
     respondControlUiNotFound(res);
     return true;
   }
+  using mediaPolicy = { ...policy, [Symbol.dispose]: () => policy.placementRead?.release() };
   if (relativeSource) {
     if (policy.remote || !policy.executionCwd || !path.isAbsolute(policy.executionCwd)) {
       respondControlUiNotFound(res);
@@ -403,7 +388,7 @@ export async function handleControlUiAssistantMediaRequest(
   const assertCurrentPolicy = () =>
     assertAssistantMediaPolicyCurrent(
       policyParams,
-      policy,
+      mediaPolicy,
       Boolean(allowance),
       requestAuth ?? undefined,
     );
@@ -459,7 +444,12 @@ export async function handleControlUiAssistantMediaRequest(
     ) {
       const playback = await resolvePlaybackTranscode({
         sourcePath: opened.realPath,
-        sourceStat: opened.stat,
+        sourceStat: {
+          size: opened.stat.size,
+          mtimeMs: opened.stat.mtimeMs,
+          ctimeMs: opened.stat.ctimeMs,
+          exactIdentity: opened.exactIdentity,
+        },
         mimeType: contentType,
         kind: mediaKind,
         signal: byteStream.signal,
@@ -597,6 +587,8 @@ export async function handleControlUiAvatarRequest(
     }
 
     if (resolved?.kind !== "local" || !projection.file) {
+      res.setHeader("Cache-Control", "private, max-age=60");
+      res.setHeader("Vary", "Authorization, Cookie");
       respondControlUiNotFound(res);
       return true;
     }
@@ -681,21 +673,33 @@ async function prepareControlUiBootstrapConfig(
     return { config: undefined, requestAuth };
   }
   const config = opts?.config;
-  const resolvedIdentity = config
-    ? await resolveAssistantIdentity({ cfg: config, agentId: opts?.agentId })
-    : undefined;
-  const identity = resolvedIdentity ?? DEFAULT_ASSISTANT_IDENTITY;
-  const assistantAgentId = resolvedIdentity?.agentId;
-  const avatarProjection =
-    config && resolvedIdentity
-      ? await resolveGatewayAssistantAvatar({
-          cfg: config,
-          identity: resolvedIdentity,
-          httpBasePath: basePath,
-        })
-      : { avatar: identity.avatar, resolution: null };
+  const [assistant, pluginControlUiModules, devGitBranch] = await Promise.all([
+    (async () => {
+      const resolvedIdentity = config
+        ? await resolveAssistantIdentity({ cfg: config, agentId: opts?.agentId })
+        : undefined;
+      const identity = resolvedIdentity ?? DEFAULT_ASSISTANT_IDENTITY;
+      const avatarProjection =
+        config && resolvedIdentity
+          ? await resolveGatewayAssistantAvatar({
+              cfg: config,
+              identity: resolvedIdentity,
+              httpBasePath: basePath,
+            })
+          : { avatar: identity.avatar, resolution: null };
+      return { identity, agentId: resolvedIdentity?.agentId, avatarProjection };
+    })(),
+    import("./control-ui-plugin-assets.js").then(({ listControlUiPluginCatalog }) =>
+      listControlUiPluginCatalog().then(
+        ({ plugins }) => plugins,
+        // The post-connect plugins.controlUi.list RPC owns user-visible catalog errors.
+        () => [],
+      ),
+    ),
+    resolveDevInstallGitBranch(),
+  ]);
+  const { identity, agentId: assistantAgentId, avatarProjection } = assistant;
   const avatarMeta = controlUiAvatarResolutionMeta(avatarProjection.resolution);
-  const devGitBranch = (await resolveDevInstallGitBranch()) ?? undefined;
   requestAuth.assertCurrent();
   const bootstrapConfig = {
     basePath,
@@ -710,11 +714,12 @@ async function prepareControlUiBootstrapConfig(
       config?.gateway?.controlUi?.root === undefined
         ? (resolveRuntimeServiceBuildId() ?? undefined)
         : undefined,
-    devGitBranch,
+    devGitBranch: devGitBranch ?? undefined,
     ...resolveControlUiBootstrapPresentation(config),
     terminalEnabled,
     cliAgentsEnabled: config?.gateway?.cliAgents?.enabled !== false,
     pluginAssetsRequireAuth: opts?.auth !== undefined && opts.auth.mode !== "none",
+    pluginControlUiModules,
     pluginFrameGrants: pluginFrameGrants.map(({ pluginId, path: grantPath, match }) => ({
       pluginId,
       path: grantPath,

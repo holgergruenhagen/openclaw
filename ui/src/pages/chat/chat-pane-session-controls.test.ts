@@ -25,6 +25,7 @@ import {
   type GatewayRequestHandler,
 } from "../../test-helpers/gateway-client.ts";
 import { sessionMutationGatewayHello } from "../../test-helpers/gateway-methods.ts";
+import { flush } from "../../test-helpers/solid-settle.ts";
 import { makeChatHost } from "./chat-host.test-support.ts";
 import { admitQueuedMessageForSession } from "./chat-outbox-admission.test-support.ts";
 import {
@@ -377,6 +378,9 @@ describe("chat pane composer controls", () => {
       canSelectFull: false,
     });
     render(renderChatPermissionPicker(controls.permissionPicker), container);
+    expect(container.querySelector("wa-dropdown-item")).toBeNull();
+    container.querySelector("wa-dropdown")!.dispatchEvent(new Event("wa-show"));
+    flush();
 
     const heading = container.querySelector<HTMLElement>(".chat-controls__permission-heading");
     expect(heading?.textContent?.trim()).toBe("Execution permissions");
@@ -734,7 +738,7 @@ describe("chat pane model controls", () => {
     await vi.waitFor(() => expect(state.chatSending).toBe(false));
     expect(state.chatRunId).toBe("next-run");
     expectFallbackExecution();
-    reconcileChatRunLifecycle(state, { clearLocalRun: true, clearChatStream: true });
+    reconcileChatRunLifecycle(state, { clearLocalRun: true });
     expect(state.chatRunId).toBeNull();
   });
 

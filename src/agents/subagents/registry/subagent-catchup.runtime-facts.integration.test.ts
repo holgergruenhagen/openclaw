@@ -201,9 +201,10 @@ describe("parent runtime facts from retained completion obligations", () => {
         delivery: { status: scenario === "requester final pending" ? "delivered" : "pending" },
         ...(scenario === "requester final pending"
           ? {
+              // A wake that has not started dispatching still owes the requester its results.
               requesterSettleWake: {
-                status: "dispatching" as const,
-                attemptCount: 1,
+                status: "pending" as const,
+                attemptCount: 0,
                 requesterYieldBatch: true as const,
                 rearmGeneration: 1,
                 batchRunIds: ["catchup-original"],

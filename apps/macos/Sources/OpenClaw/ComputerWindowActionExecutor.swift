@@ -86,15 +86,21 @@ final class ComputerWindowActionExecutor {
     private let windows: WindowManagementService
     private let menu: MenuService
     private let observationService: DesktopObservationService
-    private let snapshotManager: InMemorySnapshotManager
+    private let artifactDirectory: URL
     private var lifecycleGeneration: UInt64?
     private var appRefs: [String: ServiceApplicationInfo] = [:]
     private var windowRefs: [String: WindowTarget] = [:]
     private var observation: ObservationState?
     private var executionAuthority: ComputerActionExecutionAuthority?
 
+    /// Owned window snapshots carry a capture file; the manager deletes it with
+    /// the snapshot instead of leaving it in the temporary directory.
+    static var snapshotManagerOptions: InMemorySnapshotManager.Options {
+        InMemorySnapshotManager.Options(deleteArtifactsOnCleanup: true)
+    }
+
     init() {
-        let snapshotManager = InMemorySnapshotManager()
+        let snapshotManager = InMemorySnapshotManager(options: Self.snapshotManagerOptions)
         let automation = UIAutomationService(snapshotManager: snapshotManager)
         let applications = ApplicationService()
         let menu = MenuService(applicationService: applications)
@@ -102,7 +108,8 @@ final class ComputerWindowActionExecutor {
         self.applications = applications
         self.windows = WindowManagementService(applicationService: applications)
         self.menu = menu
-        self.snapshotManager = snapshotManager
+        self.artifactDirectory = WindowObservationArtifacts.processDirectory
+            .appendingPathComponent(self.executionID, isDirectory: true)
         self.observationService = DesktopObservationService(
             screenCapture: ScreenCaptureService(loggingService: LoggingService()),
             automation: automation,
@@ -274,6 +281,26 @@ final class ComputerWindowActionExecutor {
         ])
     }
 
+    /// A detection-only observation returns a transient UUID that the snapshot
+    /// manager rejects as a snapshot reference. Saving the snapshot lets
+    /// Peekaboo reserve, store, and publish an owned `ps1_` reference instead;
+    /// its capture file goes into the executor-owned directory.
+    static func windowStateObservationRequest(
+        windowID: CGWindowID,
+        traversalBudget: AXTraversalBudget,
+        outputDirectory: URL) -> DesktopObservationRequest
+    {
+        DesktopObservationRequest(
+            target: .windowID(windowID),
+            capture: DesktopCaptureOptions(focus: .background),
+            detection: DesktopDetectionOptions(
+                mode: .accessibility,
+                traversalBudget: traversalBudget),
+            output: DesktopObservationOutputOptions(
+                path: outputDirectory.path + "/",
+                saveSnapshot: true))
+    }
+
     private func getWindowState(
         _ params: OpenClawComputerActParams) async throws -> OpenClawComputerActResult
     {
@@ -287,21 +314,22 @@ final class ComputerWindowActionExecutor {
         guard let windowID = CGWindowID(exactly: target.window.windowID) else {
             throw ComputerActionService.ComputerActionError.staleObservation
         }
-        let request = DesktopObservationRequest(
-            target: .windowID(windowID),
-            capture: DesktopCaptureOptions(focus: .background),
-            detection: DesktopDetectionOptions(
-                mode: .accessibility,
-                traversalBudget: limits))
-        let result = try await self.withExecutionAuthority {
-            try await self.observationService.observe(request)
-        }
-        if let elements = result.elements {
-            try await self.withExecutionAuthority {
-                try await self.snapshotManager.storeDetectionResult(
-                    snapshotId: elements.snapshotId,
-                    result: elements)
+        let request = Self.windowStateObservationRequest(
+            windowID: windowID,
+            traversalBudget: limits,
+            outputDirectory: self.artifactDirectory)
+        try WindowObservationArtifacts.prepare(self.artifactDirectory)
+        let observationStartedAt = Date()
+        let result: DesktopObservationResult
+        do {
+            result = try await self.withExecutionAuthority {
+                try await self.observationService.observe(request)
             }
+        } catch {
+            WindowObservationArtifacts.discardArtifacts(
+                writtenSince: observationStartedAt,
+                in: self.artifactDirectory)
+            throw error
         }
         let observedWindow = result.capture.metadata.windowInfo ?? target.window
         guard observedWindow.windowID == target.window.windowID else {

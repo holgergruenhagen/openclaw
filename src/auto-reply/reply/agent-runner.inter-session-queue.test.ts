@@ -1,6 +1,5 @@
 // Tests queued chat input behind an embedded run that holds the session lane without a
 // reply operation, as inter-session (sessions_send) turns do.
-import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import {
@@ -14,9 +13,8 @@ import type { TemplateContext } from "../templating.js";
 import type * as AgentRunnerExecution from "./agent-runner-execution.js";
 import { runReplyAgent } from "./agent-runner-run.js";
 import { createTestFollowupRun } from "./agent-runner.test-fixtures.js";
-import { getFollowupQueueDepth } from "./queue.js";
 import { clearFollowupDrainCallback } from "./queue/drain.js";
-import { clearFollowupQueue } from "./queue/state.js";
+import { clearFollowupQueue, getExistingFollowupQueue } from "./queue/state.js";
 import { testing as replyRunTesting } from "./reply-run-registry.test-support.js";
 import { createMockTypingController } from "./test-helpers.js";
 
@@ -135,7 +133,19 @@ function fixture() {
     vi
       .mocked(context.broadcast)
       .mock.calls.flatMap(([event, payload]) => (event === "chat" ? [payload] : []));
-  return { send, withdraw, terminals, endEmbeddedRun: embeddedRun.resolve };
+  const retainedTerminal = createDeferred();
+  vi.mocked(context.broadcast).mockImplementation((event, payload) => {
+    if (event === "chat" && (payload as { runId?: string }).runId === "retained-input") {
+      retainedTerminal.resolve();
+    }
+  });
+  return {
+    send,
+    withdraw,
+    terminals,
+    endEmbeddedRun: embeddedRun.resolve,
+    retainedTerminal: retainedTerminal.promise,
+  };
 }
 
 describe("runReplyAgent queued chat input behind an inter-session run", () => {
@@ -143,7 +153,7 @@ describe("runReplyAgent queued chat input behind an inter-session run", () => {
     replyRunTesting.resetReplyRunRegistry();
     mocks.executeAgentTurn.mockReset().mockImplementation(async () => ({
       runId: "queued-execution",
-      outcome: { kind: "rejected", payload: { text: "queued reply" } },
+      outcome: { kind: "rejected", payload: { text: "retained reply" } },
     }));
   });
 
@@ -155,23 +165,27 @@ describe("runReplyAgent queued chat input behind an inter-session run", () => {
   });
 
   it("keeps queued input withdrawable and runs only the retained input after the run ends", async () => {
-    const { send, withdraw, terminals, endEmbeddedRun } = fixture();
+    const { send, withdraw, terminals, endEmbeddedRun, retainedTerminal } = fixture();
     await send("withdrawn-input");
     await send("retained-input");
-    // Gives an eagerly scheduled drain time to reach followup admission.
-    await sleep(20);
 
-    expect(mocks.executeAgentTurn).not.toHaveBeenCalled();
+    // Nothing may claim the queue while the inter-session run holds the lane.
+    expect(getExistingFollowupQueue(sessionKey)?.draining).toBe(false);
     expect(withdraw("withdrawn-input")).toBe(true);
     expect(terminals()).toEqual([
       expect.objectContaining({ runId: "withdrawn-input", state: "aborted" }),
     ]);
 
     endEmbeddedRun();
-    await vi.waitFor(() => expect(getFollowupQueueDepth(sessionKey)).toBe(0));
-    await vi.waitFor(() => expect(mocks.executeAgentTurn).toHaveBeenCalledOnce());
+    await retainedTerminal;
+    // The mocked turn settles as a rejected reply; its text proves this run consumed the input.
+    expect(mocks.executeAgentTurn).toHaveBeenCalledOnce();
     expect(mocks.executeAgentTurn.mock.calls[0]?.[0]).toMatchObject({
       followupRun: expect.objectContaining({ prompt: "retained-input" }),
     });
+    expect(terminals()).toEqual([
+      expect.objectContaining({ runId: "withdrawn-input", state: "aborted" }),
+      expect.objectContaining({ runId: "retained-input", errorMessage: "retained reply" }),
+    ]);
   });
 });

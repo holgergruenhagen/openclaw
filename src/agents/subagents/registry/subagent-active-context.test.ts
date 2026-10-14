@@ -312,4 +312,65 @@ describe("buildActiveSubagentRuntimeContext", () => {
       }
     },
   );
+
+  it.each([
+    {
+      name: "dispatching after delivery",
+      delivery: "delivered",
+      wake: { status: "dispatching" },
+      outstanding: false,
+    },
+    {
+      name: "dispatching after a yielded batch",
+      delivery: "pending",
+      wake: { status: "dispatching" },
+      outstanding: false,
+    },
+    {
+      name: "awaiting transport replay",
+      delivery: "pending",
+      wake: { status: "dispatching", replayCount: 1, nextAttemptAt: Date.now() + 30_000 },
+      outstanding: true,
+    },
+    {
+      name: "awaiting retry",
+      delivery: "pending",
+      wake: { status: "pending", nextAttemptAt: Date.now() + 30_000 },
+      outstanding: true,
+    },
+  ] as const)("projects a settle batch $name", async ({ delivery, wake, outstanding }) => {
+    const endedAt = Date.now() - 20_000;
+    for (const child of ["a", "b"]) {
+      seedSubagentRunForReadTest({
+        runId: `settle-batch-${child}`,
+        childSessionKey: `agent:main:subagent:settle-batch-${child}`,
+        controllerSessionKey: "agent:main:main",
+        requesterSessionKey: "agent:main:main",
+        task: `batch task ${child}`,
+        execution: { status: "terminal", endedAt },
+        completion: { required: true, resultText: `batch result ${child}` },
+        delivery: { status: delivery },
+        requesterSettleWake: {
+          attemptCount: 1,
+          rearmGeneration: 1,
+          batchRunIds: ["settle-batch-a", "settle-batch-b"],
+          ...wake,
+        },
+      });
+    }
+
+    // The continuation turn re-reads this snapshot before every model call.
+    const prompt = await buildActiveSubagentRuntimeContext({
+      cfg: {},
+      controllerSessionKey: "agent:main:main",
+      includeSpawnContext: false,
+    });
+    if (outstanding) {
+      expect(prompt).toContain("## Child results awaiting delivery");
+      expect(prompt).toContain("batch result a");
+      expect(prompt).toContain("batch result b");
+    } else {
+      expect(prompt).toBeUndefined();
+    }
+  });
 });

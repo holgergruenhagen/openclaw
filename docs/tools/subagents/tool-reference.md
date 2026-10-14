@@ -442,6 +442,9 @@ minutes ago, a newer execution exists, or the current turn cannot spawn. It
 includes at most eight results, oldest first, with each result limited to 2,000
 characters. Omitted entries and truncated results are marked. Result text is
 quoted as data. Reading this context does not acknowledge or retry delivery.
+While a settled batch is dispatching to the requester, its continuation turn
+already carries those results, so the block omits them until a replay or retry
+is scheduled.
 
 ## Tool: `subagents`
 

@@ -39,7 +39,13 @@ function hasOutstandingCompletion(entry: SubagentRunRecord): boolean {
     return false;
   }
   if (entry.requesterSettleWake) {
-    return true;
+    // A dispatching wake already carries these results as the continuation turn's
+    // input. Repeating them on every model call of that turn re-feeds delivered
+    // work; a scheduled replay or retry has no such turn and stays listed.
+    return (
+      entry.requesterSettleWake.status !== "dispatching" ||
+      entry.requesterSettleWake.nextAttemptAt !== undefined
+    );
   }
   // Give-up cleanup is terminal unless a requester settle wake still owns delivery.
   if (entry.delivery?.status === "failed" && typeof entry.cleanupCompletedAt === "number") {

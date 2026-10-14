@@ -1,9 +1,10 @@
 import type { GatewaySessionRow } from "../../api/types.ts";
 import type { QuestionPrompt } from "../../app/question-prompt.ts";
-import { resolveSidebarSessionParentKey } from "../../components/app-sidebar-session-parent.ts";
+import { isImplicitHomeLinkedRoot } from "../../components/app-sidebar-session-parent.ts";
 import { resolveSessionDisplayName } from "../../lib/session-display.ts";
 import {
   areUiSessionKeysEquivalent,
+  resolveUiSessionNavigationParentKey,
   uiConversationMatches,
   type UiSessionDefaultsHost,
 } from "../../lib/sessions/session-key.ts";
@@ -66,16 +67,15 @@ export function projectChildSessionQuestions(
   if (!parentKey) {
     return { prompts, sources };
   }
-  // The roster can hold seeded rows and the parent itself. The implicit Home
-  // link of operator-created roots does not make them children of Home.
+  // The roster can hold seeded rows and the parent itself. Lineage, not sidebar
+  // placement, decides: a promoted child still asks for its parent, while the
+  // implicit Home link of operator-created roots is not ancestry.
   const children = (roster ?? []).filter(
     (row) =>
       !row.archived &&
       !areUiSessionKeysEquivalent(row.key, parentKey) &&
-      areUiSessionKeysEquivalent(
-        resolveSidebarSessionParentKey(row, new Set([parentKey])),
-        parentKey,
-      ),
+      areUiSessionKeysEquivalent(resolveUiSessionNavigationParentKey(row), parentKey) &&
+      !isImplicitHomeLinkedRoot(row),
   );
   for (const prompt of questions) {
     if (prompt.status !== "pending") {

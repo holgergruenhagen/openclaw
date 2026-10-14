@@ -386,13 +386,13 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
     };
   }
 
-  // Reads the same child roster as the subagent rows; it holds no other sessions.
+  // Reads the same child roster and owner-qualified ancestry key as the subagent rows.
   private projectChildQuestions(state: ChatPageHost) {
-    const target = this.resolveChatReadTarget();
+    const roster = this.projectChildRoster(this.resolveChatReadTarget());
     return projectChildSessionQuestions(
       state,
-      target?.sessionKey,
-      this.projectChildRoster(target).subagentSessions,
+      roster.subagentParentKey,
+      roster.subagentSessions,
       this.questionPrompts,
     );
   }

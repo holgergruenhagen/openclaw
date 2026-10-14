@@ -91,6 +91,14 @@ describe("projectChildSessionQuestions", () => {
     expect(reuseQuestionProjection(first, [own], children())).not.toBe(first);
   });
 
+  it("keeps a child promoted to a sidebar root", () => {
+    const promoted = { ...visibleChild, sidebarRoot: true };
+    const asked = prompt("promoted", promoted.key);
+    expect(projectChildSessionQuestions(host, parentKey, [promoted], [asked]).prompts).toEqual([
+      asked,
+    ]);
+  });
+
   it("does not treat operator roots linked to Home as children", () => {
     const home = "agent:main:main";
     const operatorRoot = row("agent:main:dashboard:root", {

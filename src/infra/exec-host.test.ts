@@ -130,7 +130,8 @@ describe("requestExecHostViaSocket", () => {
   });
 
   it.each([
-    [30_000, 35_000],
+    [30_000, 50_000],
+    [1_000, 21_000],
     [0, 0],
     [undefined, 20_000],
   ])(

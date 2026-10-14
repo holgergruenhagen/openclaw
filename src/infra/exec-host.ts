@@ -5,6 +5,9 @@ import type { NodePermissionDetails } from "../../packages/gateway-protocol/src/
 import type { ExecApprovalPolicySnapshot } from "./exec-approvals.js";
 import { requestJsonlSocket } from "./jsonl-socket.js";
 
+// The companion may hold a request for its approval prompt (execApprovalsSocketTimeoutMs
+// in the macOS app) before request.timeoutMs starts.
+const EXEC_HOST_APPROVAL_WINDOW_MS = 15_000;
 const EXEC_HOST_RESPONSE_GRACE_MS = 5_000;
 
 // Exec host requests cross the local JSONL socket boundary into a privileged
@@ -55,13 +58,17 @@ export async function requestExecHostViaSocket(params: {
   if (!socketPath || !token) {
     return null;
   }
-  // The companion enforces request.timeoutMs; wait a little longer for its reply.
-  // A disabled command timeout (0) disables the transport deadline too.
+  // The companion enforces request.timeoutMs after any approval prompt; wait for
+  // both plus a little grace. A disabled command timeout (0) disables the
+  // transport deadline too.
   const timeoutMs =
     params.timeoutMs ??
     (request.timeoutMs === 0
       ? 0
-      : addTimerTimeoutGraceMs(request.timeoutMs, EXEC_HOST_RESPONSE_GRACE_MS)) ??
+      : addTimerTimeoutGraceMs(
+          request.timeoutMs,
+          EXEC_HOST_APPROVAL_WINDOW_MS + EXEC_HOST_RESPONSE_GRACE_MS,
+        )) ??
     20_000;
   const requestJson = JSON.stringify(request);
   const nonce = crypto.randomBytes(16).toString("hex");

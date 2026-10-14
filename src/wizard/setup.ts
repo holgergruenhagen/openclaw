@@ -399,7 +399,7 @@ async function runSetupWizardOnce(
     : null;
   if (remoteProbeAuth?.warning) {
     await prompter.note(
-      ["Could not resolve remote gateway SecretRef for setup probe.", remoteProbeAuth.warning].join(
+      ["Could not resolve remote gateway SecretRef for setup check.", remoteProbeAuth.warning].join(
         "\n",
       ),
       "Gateway auth",
@@ -616,6 +616,14 @@ async function runSetupWizardOnce(
   if (!usedImportFlow) {
     const { runSetupMemoryImportStep } = await import("./setup.memory-import.js");
     await runSetupMemoryImportStep({ config: nextConfig, prompter, runtime });
+  }
+
+  if (!opts.nonInteractive) {
+    const { runMemorySetupFlow } = await import("../flows/memory-setup.js");
+    nextConfig = await runMemorySetupFlow(nextConfig, prompter, {
+      agentDir: onboardingTarget.agentDir,
+      secretInputMode: opts.secretInputMode,
+    });
   }
 
   if (opts.skipSearch) {

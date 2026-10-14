@@ -55,7 +55,7 @@ describe("auditGatewayServiceConfig runtime", () => {
     async (sqliteSelectionError) => {
       const sqliteVersion = sqliteSelectionError ? null : "3.51.2";
       resolveBunRuntimeInfoMock.mockResolvedValue({
-        version: sqliteSelectionError ? "1.4.2" : "1.4.0",
+        version: sqliteSelectionError ? "1.4.3" : "1.4.0",
         sqliteVersion,
         sqliteProbe: {
           available: !sqliteSelectionError,
@@ -72,7 +72,9 @@ describe("auditGatewayServiceConfig runtime", () => {
       expect(result.issues).toContainEqual(
         expect.objectContaining({
           code: codes.gatewayRuntimeBun,
-          message: expect.stringContaining("Bun 1.4+ with WAL-reset-safe node:sqlite is required"),
+          message: expect.stringContaining(
+            "Bun 1.4.3+ with WAL-reset-safe node:sqlite is required",
+          ),
           detail: sqliteSelectionError
             ? `/opt/homebrew/bin/bun: ${sqliteSelectionError}`
             : "/opt/homebrew/bin/bun",
@@ -118,7 +120,7 @@ describe("auditGatewayServiceConfig runtime", () => {
   });
 
   it("reports a capable vendor Node as a note without requesting migration", async () => {
-    const note = "Node 24.15.0: unsupported version, capability probe passed.";
+    const note = "Node 24.15.0: unsupported version, capability check passed.";
     resolveNodeRuntimeInfoMock.mockResolvedValue({
       version: "24.15.0",
       sqliteVersion: "3.53.4",
@@ -134,7 +136,7 @@ describe("auditGatewayServiceConfig runtime", () => {
   });
 
   it("preserves Node probe failure and timeout without requesting migration", async () => {
-    const error = new Error("Node runtime probe failed: access denied");
+    const error = new Error("Node runtime check failed: access denied");
     resolveNodeRuntimeInfoMock.mockResolvedValue({ status: "probe-failed", error });
     const result = await audit({ environment: undefined }, { timeoutMs: 1234 });
     expect(resolveNodeRuntimeInfoMock).toHaveBeenCalledWith(

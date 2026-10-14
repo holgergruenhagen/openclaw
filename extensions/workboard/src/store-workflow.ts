@@ -5,7 +5,6 @@ import type {
   WorkboardCard,
   WorkboardClaim,
   WorkboardMetadata,
-  WorkboardNotification,
   WorkboardRunAttempt,
 } from "@openclaw/workboard-contract";
 import {
@@ -30,7 +29,6 @@ import {
   DEFAULT_CLAIM_TTL_MS,
   isWorkboardClaimReclaimable,
   MAX_CARD_ARTIFACTS,
-  MAX_CARD_NOTIFICATIONS,
   secondsToDurationMs,
 } from "./store-constants.js";
 import type {
@@ -59,6 +57,14 @@ import {
   normalizeStringList,
 } from "./store-normalizers.js";
 import { WorkboardPromoteStore } from "./store-promote.js";
+
+class WorkboardClaimRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    // The name lets Gateway tool invocation return the actionable message.
+    this.name = "ToolInputError";
+  }
+}
 
 function assertClaimIdentity(claim: WorkboardClaim, input: WorkboardHeartbeatInput): void {
   const token = normalizeOptionalString(input.token);
@@ -120,21 +126,26 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
           (guarded.status === "running" && !isWorkboardClaimReclaimable(existingClaim, now)))
           ? existingClaim
           : undefined;
-      if (cardParentIds(guarded).length > 0 && guarded.status !== "ready" && !activeClaim) {
-        throw new Error(
-          guarded.status === "blocked"
-            ? "card is blocked; use workboard_unblock before claiming."
-            : "card dependencies are not done.",
-        );
+      const parentIds = cardParentIds(guarded);
+      if (parentIds.length > 0 && guarded.status !== "ready" && !activeClaim) {
+        if (guarded.status === "blocked") {
+          throw new WorkboardClaimRefusedError(
+            "card is blocked; use workboard_unblock before claiming.",
+          );
+        }
+        // Dependency promotion skips review and running cards, so judge the parents.
+        if (!(await this.parentsDone(parentIds))) {
+          throw new WorkboardClaimRefusedError("card dependencies are not done.");
+        }
       }
       if (guarded.status === "scheduled") {
-        throw new Error("card is scheduled for later.");
+        throw new WorkboardClaimRefusedError("card is scheduled for later.");
       }
       if (retryBudgetExhausted(guarded)) {
-        throw new Error("card exhausted its retry budget.");
+        throw new WorkboardClaimRefusedError("card exhausted its retry budget.");
       }
       if (activeClaim) {
-        throw new Error(`card already claimed by ${activeClaim.ownerId}.`);
+        throw new WorkboardClaimRefusedError(`card already claimed by ${activeClaim.ownerId}.`);
       }
       const metadata = clearDiagnostics(guarded.metadata, ["stranded_ready"]);
       const card = await this.updateCard(
@@ -163,7 +174,7 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
 
   async heartbeat(id: string, input: WorkboardHeartbeatInput): Promise<WorkboardCard> {
     const note = normalizeBoundedString(input.note, undefined, 400, "heartbeat note");
-    const card = await this.updateMetadata(id, (existing) => {
+    return await this.updateMetadata(id, (existing) => {
       const claim = existing.metadata?.claim;
       if (!claim) {
         throw new Error("card is not claimed.");
@@ -192,7 +203,6 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
         comments: appendComment(metadata.comments, note, now),
       };
     });
-    return card;
   }
 
   async releaseClaim(
@@ -201,10 +211,7 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
   ): Promise<WorkboardCard> {
     return await this.enqueueMutation(async () => {
       const existing = await this.requireCard(id);
-      const status =
-        input.status === undefined
-          ? existing.status
-          : normalizeStatus(input.status, existing.status);
+      const status = normalizeStatus(input.status, existing.status);
       const claim = existing.metadata?.claim;
       if (claim) {
         assertClaimIdentity(claim, input);
@@ -225,7 +232,7 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
     input: WorkboardCompleteInput = {},
     scope: WorkboardMutationScope | null | undefined = input,
   ): Promise<WorkboardCard> {
-    return await this.enqueueMutation(async () => await this.completeDirect(id, input, scope));
+    return await this.enqueueMutation(() => this.completeDirect(id, input, scope));
   }
 
   private async completeDirect(
@@ -262,30 +269,20 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
           .filter((artifact): artifact is WorkboardArtifact => artifact !== null)
           .slice(-MAX_CARD_ARTIFACTS)
       : [];
-    const metadata = clearDiagnostics(existing.metadata, ["missing_proof"]);
-    const notification: WorkboardNotification = {
-      id: randomUUID(),
+    const finished = this.finishRun(existing, "done", now);
+    const metadata = clearDiagnostics(finished.metadata, ["missing_proof"]);
+    const notifications = this.appendNotification(metadata, now, {
       kind: "completed",
-      createdAt: now,
-      sequence: this.nextNotificationSequence(now),
       message: capText(summary, 240) ?? "Workboard card completed.",
       ...(cardSessionKey(existing) ? { sessionKey: cardSessionKey(existing) } : {}),
       ...(cardRunId(existing) ? { runId: cardRunId(existing) } : {}),
-    };
-    const execution =
-      existing.execution?.status === "running"
-        ? { ...existing.execution, status: "done" as const, updatedAt: now }
-        : existing.execution;
+    });
     return await this.updateCard(
       await this.requireCard(id),
       {
-        status: "done",
-        ...(execution ? { execution } : {}),
+        ...finished,
         metadata: {
           ...metadata,
-          claim: undefined,
-          attempts: closeRunningAttempts(metadata.attempts, now, "succeeded"),
-          failureCount: 0,
           automation: normalizeAutomation(
             {
               ...metadata.automation,
@@ -299,14 +296,13 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
           artifacts: artifacts.length
             ? [...(metadata.artifacts ?? []), ...artifacts].slice(-MAX_CARD_ARTIFACTS)
             : metadata.artifacts,
-          notifications: [...(metadata.notifications ?? []), notification].slice(
-            -MAX_CARD_NOTIFICATIONS,
-          ),
+          notifications,
         },
       },
       {
         enforceStatusHolds: true,
         preserveProofId: proofId ?? proof?.id,
+        preserveNotificationId: notifications.at(-1)?.id,
       },
     );
   }
@@ -317,36 +313,23 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
     now: number,
     options: { clearExecutionAssociation?: boolean } = {},
   ): WorkboardCardPatch & { metadata: WorkboardMetadata } {
-    const metadata = existing.metadata ?? {};
-    const notification: WorkboardNotification = {
-      id: randomUUID(),
+    const finished = this.finishRun(existing, "blocked", now, reason);
+    const metadata = finished.metadata;
+    const notifications = this.appendNotification(metadata, now, {
       kind: "failed",
-      createdAt: now,
-      sequence: this.nextNotificationSequence(now),
       message: capText(reason, 240) ?? "Workboard card blocked.",
       ...(cardSessionKey(existing) ? { sessionKey: cardSessionKey(existing) } : {}),
       ...(cardRunId(existing) ? { runId: cardRunId(existing) } : {}),
-    };
-    const execution =
-      existing.execution?.status === "running"
-        ? { ...existing.execution, status: "blocked" as const, updatedAt: now }
-        : existing.execution;
+    });
     return {
-      status: "blocked",
+      ...finished,
       ...(options.clearExecutionAssociation
         ? { sessionKey: null, runId: null, execution: null }
-        : execution
-          ? { execution }
-          : {}),
+        : {}),
       metadata: {
         ...metadata,
-        claim: undefined,
-        attempts: closeRunningAttempts(metadata.attempts, now, "blocked", reason),
-        failureCount: (metadata.failureCount ?? 0) + 1,
         comments: appendComment(metadata.comments, reason, now),
-        notifications: [...(metadata.notifications ?? []), notification].slice(
-          -MAX_CARD_NOTIFICATIONS,
-        ),
+        notifications,
       },
     };
   }
@@ -393,10 +376,7 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
       assertCanMutateClaimedCard(existing, scope === null ? undefined : scope);
       const agentId =
         input.agentId === undefined ? existing.agentId : normalizeOptionalString(input.agentId);
-      const status =
-        input.status === undefined
-          ? existing.status
-          : normalizeStatus(input.status, existing.status);
+      const status = normalizeStatus(input.status, existing.status);
       const reason = normalizeBoundedString(input.reason, undefined, 1000, "reassign reason");
       const shouldResetFailures = input.resetFailures !== false;
       const baseMetadata = shouldResetFailures

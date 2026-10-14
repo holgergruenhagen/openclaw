@@ -281,13 +281,13 @@ function shouldAllowPrivateImageEndpoint(req: {
 
 type OpenAIImageModelAuth = Pick<
   OpenClawPluginApi["runtime"]["modelAuth"],
-  "ensureAuthProfileStore" | "listProfilesForProvider" | "isProviderApiKeyConfigured"
+  "ensureAuthProfileStoreAsync" | "listProfilesForProvider" | "isProviderApiKeyConfiguredAsync"
 >;
 
-function resolveRequestAuthStore(
+async function resolveRequestAuthStore(
   req: { authStore?: AuthProfileStore; agentDir?: string },
   modelAuth: OpenAIImageModelAuth,
-): AuthProfileStore | undefined {
+): Promise<AuthProfileStore | undefined> {
   if (req.authStore) {
     return req.authStore;
   }
@@ -295,26 +295,15 @@ function resolveRequestAuthStore(
   if (!agentDir) {
     return undefined;
   }
-  return modelAuth.ensureAuthProfileStore(agentDir, {
+  return modelAuth.ensureAuthProfileStoreAsync(agentDir, {
     allowKeychainPrompt: false,
   });
 }
 
-function hasDirectOpenAIImageApiKeyAuth(
-  params: { cfg?: OpenClawConfig; agentDir?: string },
+function hasOpenAIImageApiKeyProfile(
+  store: AuthProfileStore | undefined,
   modelAuth: OpenAIImageModelAuth,
 ): boolean {
-  if (hasExplicitOpenAIImageApiKeyConfig(params.cfg)) {
-    return true;
-  }
-  if (process.env.OPENAI_API_KEY?.trim()) {
-    return true;
-  }
-  const store = params.agentDir
-    ? modelAuth.ensureAuthProfileStore(params.agentDir, {
-        allowKeychainPrompt: false,
-      })
-    : undefined;
   if (!store) {
     return false;
   }
@@ -326,10 +315,9 @@ function hasDirectOpenAIImageApiKeyAuth(
 }
 
 function hasCodexResponseTransportProfileConfigured(
-  req: { authStore?: AuthProfileStore; agentDir?: string },
+  store: AuthProfileStore | undefined,
   modelAuth: OpenAIImageModelAuth,
 ): boolean {
-  const store = resolveRequestAuthStore(req, modelAuth);
   if (!store) {
     return false;
   }
@@ -350,6 +338,26 @@ function hasCodexResponseTransportProfileConfigured(
 function hasExplicitOpenAIImageApiKeyConfig(cfg: OpenClawConfig | undefined): boolean {
   const providerConfig = cfg?.models?.providers?.openai;
   return providerConfig?.apiKey !== undefined || providerConfig?.auth === "api-key";
+}
+
+function hasDirectOpenAIImageRoute(cfg: OpenClawConfig | undefined): boolean {
+  return (
+    isPublicOpenAIImageBaseUrl(resolveConfiguredOpenAIBaseUrl(cfg)) ||
+    hasExplicitOpenAIImageApiKeyConfig(cfg) ||
+    Boolean(process.env.OPENAI_API_KEY?.trim())
+  );
+}
+
+function hasOpenAIImageProfileRoute(
+  cfg: OpenClawConfig | undefined,
+  authStore: AuthProfileStore | undefined,
+  modelAuth: OpenAIImageModelAuth,
+): boolean {
+  return (
+    hasOpenAIImageApiKeyProfile(authStore, modelAuth) ||
+    (hasChatGPTImageRouteConfig(cfg) &&
+      hasCodexResponseTransportProfileConfigured(authStore, modelAuth))
+  );
 }
 
 function hasExplicitDirectOpenAIImageConfig(cfg: OpenClawConfig | undefined): boolean {
@@ -415,16 +423,20 @@ function inferImageUploadFileName(params: {
   return `image-${params.index + 1}.${ext}`;
 }
 
-async function resolveOptionalApiKeyForProvider(
-  params: Parameters<typeof resolveApiKeyForProvider>[0],
-) {
+async function resolveOptionalImageAuth(req: OpenAIImageRequest, apiKeyOnly = false) {
   const { resolveApiKeyForProvider } = await import("openclaw/plugin-sdk/provider-auth-runtime");
   try {
-    return await resolveApiKeyForProvider(params);
+    return await resolveApiKeyForProvider({
+      provider: "openai",
+      capability: "image-generation",
+      cfg: apiKeyOnly ? forceOpenAIImageApiKeyAuth(req.cfg) : req.cfg,
+      agentDir: req.agentDir,
+      store: req.authStore,
+      ...(apiKeyOnly ? { credentialPrecedence: "env-first" } : {}),
+    });
   } catch (error) {
-    const provider = params?.provider ?? "";
     const message = error instanceof Error ? error.message : "";
-    if (!message.startsWith(`No API key found for provider "${provider}".`)) {
+    if (!message.startsWith('No API key found for provider "openai".')) {
       throw error;
     }
     return null;
@@ -452,25 +464,6 @@ function resolveCodexImageResponsesModels(cfg: OpenClawConfig | undefined): [str
   return [DEFAULT_OPENAI_CODEX_IMAGE_RESPONSES_MODEL, ...retryModels];
 }
 
-async function logCodexImageAuthSelected(params: {
-  req: Parameters<ImageGenerationProvider["generateImage"]>[0];
-  authMode?: unknown;
-  timeoutMs: number;
-}) {
-  const { createSubsystemLogger } = await import("openclaw/plugin-sdk/logging-core");
-  const log = createSubsystemLogger("image-generation/openai");
-  const model = resolveOpenAIImageRequestModel(params.req, {
-    allowTransparentDefaultReroute: true,
-  });
-  log.info(
-    `image auth selected: provider=openai mode=${sanitizeLogValue(
-      params.authMode,
-    )} transport=codex-responses requestedModel=${sanitizeLogValue(
-      model,
-    )} responsesModel=${DEFAULT_OPENAI_CODEX_IMAGE_RESPONSES_MODEL} timeoutMs=${params.timeoutMs}`,
-  );
-}
-
 function isCodexModelUnavailableBody(body: string | undefined, model: string): boolean {
   if (!body) {
     return false;
@@ -490,9 +483,23 @@ function isCodexModelUnavailableBody(body: string | undefined, model: string): b
 }
 
 async function generateOpenAICodexImage(params: {
-  req: Parameters<ImageGenerationProvider["generateImage"]>[0];
+  req: OpenAIImageRequest;
   apiKey: string;
+  authMode?: unknown;
 }): Promise<ImageGenerationResult> {
+  const { req, apiKey } = params;
+  const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs);
+  const { createSubsystemLogger: createLogger } = await import("openclaw/plugin-sdk/logging-core");
+  const model = resolveOpenAIImageRequestModel(req, {
+    allowTransparentDefaultReroute: true,
+  });
+  createLogger("image-generation/openai").info(
+    `image auth selected: provider=openai mode=${sanitizeLogValue(
+      params.authMode,
+    )} transport=codex-responses requestedModel=${sanitizeLogValue(
+      model,
+    )} responsesModel=${DEFAULT_OPENAI_CODEX_IMAGE_RESPONSES_MODEL} timeoutMs=${timeoutMs}`,
+  );
   const [
     {
       ProviderHttpError,
@@ -510,7 +517,6 @@ async function generateOpenAICodexImage(params: {
     import("openclaw/plugin-sdk/media-generation-runtime"),
     import("./image-generation-codex-response.js"),
   ]);
-  const { req, apiKey } = params;
   const inputImages = req.inputImages ?? [];
   const openAIProviderConfig = req.cfg?.models?.providers?.openai;
   const codexProviderConfig =
@@ -530,9 +536,6 @@ async function generateOpenAICodexImage(params: {
       transport: "http",
     });
 
-  const model = resolveOpenAIImageRequestModel(req, {
-    allowTransparentDefaultReroute: true,
-  });
   const count = resolveIntegerOption(req.count, 1, { min: 1, max: OPENAI_MAX_IMAGE_RESULTS });
   const sizeResolution = resolveOpenAIImageRequestSize(
     {
@@ -543,7 +546,6 @@ async function generateOpenAICodexImage(params: {
     resolveClosestSize,
   );
   const size = sizeResolution.size;
-  const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs);
   headers.set("Content-Type", "application/json");
   const content: Array<Record<string, unknown>> = [
     { type: "input_text", text: req.prompt },
@@ -678,17 +680,20 @@ export function buildOpenAIImageGenerationProvider(
         backgrounds: [...OPENAI_BACKGROUNDS],
       },
     },
-    isConfigured: ({ cfg, agentDir }) =>
-      modelAuth.isProviderApiKeyConfigured({
+    async isConfiguredAsync({ cfg, agentDir }) {
+      const directRoute = hasDirectOpenAIImageRoute(cfg);
+      const authStore = directRoute
+        ? undefined
+        : await resolveRequestAuthStore({ agentDir }, modelAuth);
+      const configured = await modelAuth.isProviderApiKeyConfiguredAsync({
         provider: "openai",
         agentDir,
         cfg,
+        store: authStore,
         capability: "image-generation",
-      }) &&
-      (isPublicOpenAIImageBaseUrl(resolveConfiguredOpenAIBaseUrl(cfg)) ||
-        hasDirectOpenAIImageApiKeyAuth({ cfg, agentDir }, modelAuth) ||
-        (hasChatGPTImageRouteConfig(cfg) &&
-          hasCodexResponseTransportProfileConfigured({ agentDir }, modelAuth))),
+      });
+      return configured && (directRoute || hasOpenAIImageProfileRoute(cfg, authStore, modelAuth));
+    },
     async generateImage(req) {
       const inputImages = req.inputImages ?? [];
       const isEdit = inputImages.length > 0;
@@ -703,67 +708,51 @@ export function buildOpenAIImageGenerationProvider(
       const useCodexResponseTransportRoute =
         (publicOpenAIBaseUrl || chatGPTBaseUrl || codexResponsesConfigured) &&
         !explicitDirectOpenAIConfig &&
-        hasCodexResponseTransportProfileConfigured(req, modelAuth);
-      let preResolvedImageAuth:
+        hasCodexResponseTransportProfileConfigured(
+          await resolveRequestAuthStore(req, modelAuth),
+          modelAuth,
+        );
+      let imageAuth:
         | NonNullable<Awaited<ReturnType<typeof resolveApiKeyForProvider>>>
         | null
         | undefined;
       if (explicitOpenAIApiKeyConfig) {
-        const directAuth = await resolveOptionalApiKeyForProvider({
-          provider: "openai",
-          capability: "image-generation",
-          cfg: forceOpenAIImageApiKeyAuth(req.cfg),
-          agentDir: req.agentDir,
-          store: req.authStore,
-          credentialPrecedence: "env-first",
-        });
-        preResolvedImageAuth =
+        const directAuth = await resolveOptionalImageAuth(req, true);
+        imageAuth =
           directAuth?.apiKey && (directAuth.mode === undefined || directAuth.mode === "api-key")
             ? directAuth
             : null;
       }
       if (useCodexResponseTransportRoute) {
-        const codexAuth = await resolveOptionalApiKeyForProvider({
-          provider: "openai",
-          capability: "image-generation",
-          cfg: req.cfg,
-          agentDir: req.agentDir,
-          store: req.authStore,
-        });
+        const codexAuth = await resolveOptionalImageAuth(req);
         if (!codexAuth?.apiKey) {
           throw new Error("OpenAI Codex OAuth missing");
         }
         if (codexAuth.mode === "api-key") {
-          preResolvedImageAuth = codexAuth;
+          imageAuth = codexAuth;
         } else {
-          const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs);
-          await logCodexImageAuthSelected({ req, authMode: codexAuth.mode, timeoutMs });
-          return generateOpenAICodexImage({ req, apiKey: codexAuth.apiKey });
+          return generateOpenAICodexImage({
+            req,
+            apiKey: codexAuth.apiKey,
+            authMode: codexAuth.mode,
+          });
         }
       }
 
-      let imageAuth:
-        | NonNullable<Awaited<ReturnType<typeof resolveApiKeyForProvider>>>
-        | null
-        | undefined =
-        preResolvedImageAuth !== undefined
-          ? preResolvedImageAuth
-          : await resolveOptionalApiKeyForProvider({
-              provider: "openai",
-              capability: "image-generation",
-              cfg: req.cfg,
-              agentDir: req.agentDir,
-              store: req.authStore,
-            });
+      if (imageAuth === undefined) {
+        imageAuth = await resolveOptionalImageAuth(req);
+      }
       if (
         !explicitDirectOpenAIConfig &&
         imageAuth?.apiKey &&
         isCodexSubscriptionAuthMode(imageAuth.mode)
       ) {
         if (publicOpenAIBaseUrl) {
-          const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs);
-          await logCodexImageAuthSelected({ req, authMode: imageAuth.mode, timeoutMs });
-          return generateOpenAICodexImage({ req, apiKey: imageAuth.apiKey });
+          return generateOpenAICodexImage({
+            req,
+            apiKey: imageAuth.apiKey,
+            authMode: imageAuth.mode,
+          });
         }
         imageAuth = undefined;
       }
@@ -775,18 +764,17 @@ export function buildOpenAIImageGenerationProvider(
       }
       const [
         {
-          assertOkOrThrowHttpError,
+          createProviderOperationDeadline,
           postJsonRequest,
           postMultipartRequest,
-          readProviderJsonResponse,
           resolveProviderHttpRequestConfig,
           sanitizeConfiguredModelProviderRequest,
         },
-        { parseOpenAiCompatibleImageResponse, resolveInlineImageJsonResponseMaxBytes },
+        { readOpenAIImageGenerationResponse },
         { resolveClosestSize, resolveGeneratedMediaMaxBytes },
       ] = await Promise.all([
         import("openclaw/plugin-sdk/provider-http"),
-        import("openclaw/plugin-sdk/image-generation"),
+        import("./image-generation-response.js"),
         import("openclaw/plugin-sdk/media-generation-runtime"),
       ]);
       const isAzure = isAzureOpenAIBaseUrl(rawBaseUrl);
@@ -813,6 +801,8 @@ export function buildOpenAIImageGenerationProvider(
       });
       const count = resolveIntegerOption(req.count, 1, { min: 1, max: OPENAI_MAX_IMAGE_RESULTS });
       const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs, { isAzure });
+      const operation = isEdit ? "OpenAI image edit" : "OpenAI image generation";
+      const deadline = createProviderOperationDeadline({ timeoutMs, label: operation });
       const sizeResolution = isValidFlexibleOpenAIImageSize(model, req.size)
         ? { size: req.size }
         : resolveOpenAIImageRequestSize(
@@ -868,50 +858,19 @@ export function buildOpenAIImageGenerationProvider(
         : await postJsonRequest({ ...requestOptions, body });
       const { response, release } = requestResult;
       try {
-        try {
-          await assertOkOrThrowHttpError(
-            response,
-            isEdit ? "OpenAI image edit failed" : "OpenAI image generation failed",
-          );
-        } catch (error) {
-          annotateDirectImageAuthFailure(error, {
-            url,
-            authMode: imageAuth.mode,
-            authSource: imageAuth.source,
-            authOverridden: isAzure
-              ? requestOptions.headers.get("api-key") !== imageAuth.apiKey
-              : requestOptions.headers.get("authorization") !== `Bearer ${imageAuth.apiKey}`,
-            oauthAvailable:
-              explicitDirectOpenAIConfig &&
-              hasCodexResponseTransportProfileConfigured(req, modelAuth),
-          });
-          throw error;
-        }
-
-        const data = await readProviderJsonResponse(response, "openai.image-generation", {
-          maxBytes: resolveInlineImageJsonResponseMaxBytes(
-            count,
-            resolveGeneratedMediaMaxBytes(req.cfg, "image"),
-          ),
+        const images = await readOpenAIImageGenerationResponse(response, {
+          operation,
+          providerUrl: url,
+          deadline,
+          timeoutMs,
+          maxImages: count,
+          maxDownloads: OPENAI_MAX_IMAGE_RESULTS,
+          maxBytes: resolveGeneratedMediaMaxBytes(req.cfg, "image"),
+          defaultMimeType: resolveOutputMime(req.outputFormat).mimeType,
+          allowPrivateNetwork,
+          ssrfPolicy: req.ssrfPolicy,
+          dispatcherPolicy,
         });
-        const output = resolveOutputMime(req.outputFormat);
-        const images = parseOpenAiCompatibleImageResponse(data, {
-          defaultMimeType: output.mimeType,
-          malformedResponseError: isEdit
-            ? "OpenAI image edit response malformed"
-            : "OpenAI image generation response malformed",
-        }).map((image, index) =>
-          Object.assign(image, {
-            fileName: `image-${index + 1}.${output.extension}`,
-          }),
-        );
-        if (images.length === 0) {
-          throw new Error(
-            isEdit
-              ? "OpenAI image edit response missing image data"
-              : "OpenAI image generation response missing image data",
-          );
-        }
 
         return {
           images,

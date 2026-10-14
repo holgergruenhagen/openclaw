@@ -13,18 +13,23 @@ import { resolveRequestedSessionAgentId } from "./session-request-agent.js";
 import {
   create as createSessionRow,
   sort as sortSessionRows,
-  type SelectionChange,
 } from "./session-row-projection-record.js";
+import { createSessionRowProjectionRevisions } from "./session-row-projection-revisions.js";
 import { createSessionRowProjection, type SessionRowProjection } from "./session-row-projection.js";
 import { resolveStoredSessionKeyForAgentStore } from "./session-store-key.js";
 import type { SessionListRowContext } from "./session-utils-contracts.js";
-import { projectGatewaySessionRunState } from "./session-utils-display.js";
+import { deriveSessionTitle } from "./session-utils-core.js";
+import {
+  projectGatewaySessionRunState,
+  resolveGatewaySessionDisplayName,
+} from "./session-utils-display.js";
 import { buildSessionListRowMetadataContext } from "./session-utils-projection.js";
 import {
   materializeSessionRow,
   presentSessionRow,
   readSessionRowInputs,
 } from "./session-utils-row.js";
+import type { SessionTitleFields } from "./session-utils.types.js";
 
 type Row = NonNullable<ReturnType<SessionRowProjection["describe"]>>;
 
@@ -37,12 +42,13 @@ export function createSessionRowProjectionFixture(params: {
   modelCatalog?: Parameters<typeof readSessionRowInputs>[0]["modelCatalog"];
   targetsBySessionKey?: GatewayStoredSessionTargets;
   rowContext?: SessionListRowContext;
+  titleFieldsBySessionKey?: ReadonlyMap<string, SessionTitleFields>;
 }) {
   const { cfg, modelCatalog } = params;
   const storePath = params.storePath ?? "";
   const rowContext = params.rowContext ?? buildSessionListRowMetadataContext({ now: Date.now() });
   const rows = new Map<string, Row>();
-  const selectionListeners = new Set<(change: SelectionChange) => void>();
+  const revisions = createSessionRowProjectionRevisions(rows, new Map());
   const store = { ...params.store };
   let revision = 0;
   let revisionToken = {};
@@ -83,14 +89,14 @@ export function createSessionRowProjectionFixture(params: {
     delete store[key];
     revision++;
     revisionToken = {};
-    for (const listener of selectionListeners) {
-      listener({ kind: "reset" });
-    }
+    revisions.publishSelection();
+    revisions.publishFacts();
     if (!entry || entry.incognito || isIncognitoSessionKey(key)) {
       rows.delete(id(fields));
       return;
     }
     store[key] = entry;
+    const titleFields = params.titleFieldsBySessionKey?.get(fields.key);
     const { inputs, presentation } = readSessionRowInputs({
       cfg,
       storePath,
@@ -101,9 +107,14 @@ export function createSessionRowProjectionFixture(params: {
       agentId,
       modelCatalog,
       rowContext,
-      includeDerivedTitles: true,
-      includeLastMessage: true,
-      skipTranscriptUsageFallback: true,
+      preparedTitle: {
+        derivedTitle: deriveSessionTitle(
+          entry,
+          titleFields?.firstUserMessage,
+          resolveGatewaySessionDisplayName(fields.key, entry),
+        ),
+        lastMessagePreview: titleFields?.lastMessagePreview ?? undefined,
+      },
       modelSource: { entry, readSourceEntry: (parentKey) => store[parentKey] },
     });
     rows.set(id(fields), {
@@ -157,9 +168,11 @@ export function createSessionRowProjectionFixture(params: {
     return sortSessionRows(selected, query.sortBy);
   };
   const projection: SessionRowProjection = {
-    onSelectionChange(listener) {
-      selectionListeners.add(listener);
+    async readLookup() {
+      throw new Error("Indexed lookup requires a real session row projection");
     },
+    onSelectionChange: revisions.onSelectionChange,
+    onFactsChange: revisions.onFactsChange,
     observeGeneration() {
       const observedRevision = revision;
       let active = true;
@@ -197,7 +210,7 @@ export function createSessionRowProjectionFixture(params: {
     modelFacts: (query) => describe(query)!.materialized.source,
     withPreparedExactRows: async (queries, consume) => {
       queries(cfg);
-      return { kind: "complete", value: consume(projection) };
+      return consume(projection);
     },
     present: (record, options) => {
       const now = options?.now ?? Date.now();
@@ -248,6 +261,21 @@ export function createSessionRowProjectionFixture(params: {
           }
         : null;
     },
+    readCapabilityEntry(query) {
+      if (query.key !== undefined) {
+        const row = describe(query);
+        return { entry: row?.key === query.key ? row.entry : undefined };
+      }
+      const candidates = [...rows.values()]
+        .filter(
+          (row) => row.agentId === query.agentId && row.storeTarget.storePath === query.storePath,
+        )
+        .toSorted((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+      const row =
+        candidates.find((candidate) => candidate.entry.sessionId === query.sessionId) ??
+        candidates.find((candidate) => candidate.entry.sessionId.trim() === query.sessionId);
+      return { entry: row?.entry };
+    },
     sharingTargetState(query) {
       const target = projection.sharingTarget(query);
       return target ? { status: "ready", target } : { status: "missing" };
@@ -297,10 +325,7 @@ export function createSessionRowProjectionFixture(params: {
       revision++;
       revisionToken = {};
       rows.clear();
-      for (const listener of selectionListeners) {
-        listener({ kind: "reset" });
-      }
-      selectionListeners.clear();
+      revisions.dispose();
     },
   };
   return Object.assign(projection, { setEntry });

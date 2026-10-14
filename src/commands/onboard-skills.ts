@@ -5,6 +5,7 @@ import { resolveBrewExecutable } from "../infra/brew.js";
 import { isContainerEnvironment } from "../infra/container-environment.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { buildWorkspaceSkillStatus } from "../skills/discovery/status.js";
+import type { SkillStatusEntry } from "../skills/discovery/status.types.js";
 import {
   installSkill,
   MIN_AUTO_GO_VERSION,
@@ -19,14 +20,8 @@ import type { NodeManagerChoice } from "./onboard-types.js";
 
 const SKIPPED_INSTALL_NAME_LIMIT = 8;
 
-type OnboardInstallSkill = {
-  name: string;
-  description?: string;
-  install: Array<{ kind: string; label: string }>;
-};
-
 type SkippedInstall = {
-  skill: OnboardInstallSkill;
+  skill: Pick<SkillStatusEntry, "name">;
   reason: SkillInstallSkipReason;
   detail?: string;
 };
@@ -40,10 +35,7 @@ function summarizeInstallFailure(message: string): string | undefined {
   return cleaned.length > maxLen ? `${truncateUtf16Safe(cleaned, maxLen - 1)}…` : cleaned;
 }
 
-function formatSkillHint(skill: {
-  description?: string;
-  install: Array<{ label: string }>;
-}): string {
+function formatSkillHint(skill: Pick<SkillStatusEntry, "description" | "install">): string {
   const desc = skill.description?.trim();
   const installLabel = skill.install[0]?.label?.trim();
   const combined = desc && installLabel ? `${desc} — ${installLabel}` : desc || installLabel;
@@ -154,17 +146,6 @@ export async function setupSkills(
     }
   }
   const candidateInstallable = installable;
-  const readinessBySkillName = new Map<string, SkillInstallReadiness>();
-  for (const skill of candidateInstallable) {
-    // Onboarding intentionally executes only the primary recipe below. Keep
-    // readiness aligned with that recipe instead of silently changing methods.
-    const primaryInstall = skill.install[0];
-    if (!primaryInstall) {
-      continue;
-    }
-    const readiness = await resolveKindReadinessOnce(primaryInstall.kind);
-    readinessBySkillName.set(skill.name, readiness);
-  }
   let next: OpenClawConfig = cfg;
   if (candidateInstallable.length === 0 && missing.length === 0) {
     await prompter.note(
@@ -200,8 +181,12 @@ export async function setupSkills(
     const selectedReadySkills: typeof selectedSkills = [];
     const selectedSkippedInstallable: SkippedInstall[] = [];
     for (const skill of selectedSkills) {
-      const readiness = readinessBySkillName.get(skill.name);
-      if (readiness?.ready !== false) {
+      const primaryInstall = skill.install[0];
+      if (!primaryInstall) {
+        continue;
+      }
+      const readiness = await resolveKindReadinessOnce(primaryInstall.kind);
+      if (readiness.ready) {
         selectedReadySkills.push(skill);
       } else {
         selectedSkippedInstallable.push({ skill, reason: readiness.reason });

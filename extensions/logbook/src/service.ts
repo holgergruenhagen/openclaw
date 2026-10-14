@@ -26,7 +26,7 @@ import {
   OBSERVATION_JSON_SCHEMA,
 } from "./prompts.js";
 import { LogbookStore } from "./store.js";
-import type { LogbookBatch, LogbookStatus } from "./types.js";
+import type { LogbookBatch } from "./types.js";
 
 const ANALYSIS_TICK_MS = 60 * 1000;
 const PRUNE_TICK_MS = 60 * 60 * 1000;
@@ -311,7 +311,7 @@ export class LogbookService {
 
   private resolveVisionModel(): {
     ref?: { provider: string; model: string; profile?: string; preferredProfile?: string };
-    source: LogbookStatus["visionModelSource"];
+    source: "config" | "media-defaults" | "missing";
   } {
     if (this.config.visionModel) {
       const ref = parseModelRef(this.config.visionModel);
@@ -357,7 +357,6 @@ export class LogbookService {
     }
     this.analysisInFlight = true;
     return this.trackOperation(async () => {
-      let handedOff = false;
       try {
         // Explicit user action is the retry path for failed batches; automatic
         // retries could loop model spend on a persistently failing batch.
@@ -369,15 +368,11 @@ export class LogbookService {
           }
         }
         this.requireStore();
-        this.analysisInFlight = false;
-        void this.analysisTick();
-        handedOff = true;
-        return { started: true };
       } finally {
-        if (!handedOff) {
-          this.analysisInFlight = false;
-        }
+        this.analysisInFlight = false;
       }
+      void this.analysisTick();
+      return { started: true };
     });
   }
 
@@ -572,10 +567,7 @@ export class LogbookService {
     });
   }
 
-  async standup(
-    day: string,
-    refresh: boolean,
-  ): Promise<{ day: string; text: string; updatedMs: number }> {
+  async standup(day: string, refresh: boolean) {
     const store = this.requireStore();
     return this.trackOperation(async () => {
       if (!refresh) {
@@ -651,7 +643,7 @@ export class LogbookService {
     return this.trackOperation(() => store.framesInRange(startMs, endMs));
   }
 
-  async status(): Promise<LogbookStatus> {
+  async status() {
     const store = this.requireStore();
     return this.trackOperation(async () => {
       const today = dayKeyFor(Date.now());

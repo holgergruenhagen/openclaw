@@ -99,23 +99,45 @@ final class ComputerWindowActionExecutor {
         InMemorySnapshotManager.Options(deleteArtifactsOnCleanup: true)
     }
 
-    init() {
+    convenience init() {
         let snapshotManager = InMemorySnapshotManager(options: Self.snapshotManagerOptions)
         let automation = UIAutomationService(snapshotManager: snapshotManager)
         let applications = ApplicationService()
         let menu = MenuService(applicationService: applications)
+        self.init(
+            automation: automation,
+            applications: applications,
+            menu: menu,
+            observationService: DesktopObservationService(
+                screenCapture: ScreenCaptureService(loggingService: LoggingService()),
+                automation: automation,
+                applications: applications,
+                menu: menu,
+                snapshotManager: snapshotManager))
+    }
+
+    /// `automation` and `observationService` must share one snapshot manager so
+    /// element actions resolve the snapshots that observations publish.
+    /// Captures go into `artifactDirectory`, by default a directory of this
+    /// executor below the per-process directory.
+    init(
+        automation: UIAutomationService,
+        applications: ApplicationService,
+        menu: MenuService,
+        observationService: DesktopObservationService,
+        artifactDirectory: URL? = nil)
+    {
         self.automation = automation
         self.applications = applications
         self.windows = WindowManagementService(applicationService: applications)
         self.menu = menu
-        self.artifactDirectory = WindowObservationArtifacts.processDirectory
-            .appendingPathComponent(self.executionID, isDirectory: true)
-        self.observationService = DesktopObservationService(
-            screenCapture: ScreenCaptureService(loggingService: LoggingService()),
-            automation: automation,
-            applications: applications,
-            menu: menu,
-            snapshotManager: snapshotManager)
+        if let artifactDirectory {
+            self.artifactDirectory = artifactDirectory
+        } else {
+            self.artifactDirectory = WindowObservationArtifacts.processDirectory
+                .appendingPathComponent(self.executionID, isDirectory: true)
+        }
+        self.observationService = observationService
     }
 
     func perform(
@@ -281,26 +303,6 @@ final class ComputerWindowActionExecutor {
         ])
     }
 
-    /// A detection-only observation returns a transient UUID that the snapshot
-    /// manager rejects as a snapshot reference. Saving the snapshot lets
-    /// Peekaboo reserve, store, and publish an owned `ps1_` reference instead;
-    /// its capture file goes into the executor-owned directory.
-    static func windowStateObservationRequest(
-        windowID: CGWindowID,
-        traversalBudget: AXTraversalBudget,
-        outputDirectory: URL) -> DesktopObservationRequest
-    {
-        DesktopObservationRequest(
-            target: .windowID(windowID),
-            capture: DesktopCaptureOptions(focus: .background),
-            detection: DesktopDetectionOptions(
-                mode: .accessibility,
-                traversalBudget: traversalBudget),
-            output: DesktopObservationOutputOptions(
-                path: outputDirectory.path + "/",
-                saveSnapshot: true))
-    }
-
     private func getWindowState(
         _ params: OpenClawComputerActParams) async throws -> OpenClawComputerActResult
     {
@@ -314,10 +316,19 @@ final class ComputerWindowActionExecutor {
         guard let windowID = CGWindowID(exactly: target.window.windowID) else {
             throw ComputerActionService.ComputerActionError.staleObservation
         }
-        let request = Self.windowStateObservationRequest(
-            windowID: windowID,
-            traversalBudget: limits,
-            outputDirectory: self.artifactDirectory)
+        // A detection-only observation returns a transient UUID that the snapshot
+        // manager rejects as a snapshot reference. Saving the snapshot lets
+        // Peekaboo reserve, store, and publish an owned `ps1_` reference instead;
+        // its capture file goes into the executor-owned directory.
+        let request = DesktopObservationRequest(
+            target: .windowID(windowID),
+            capture: DesktopCaptureOptions(focus: .background),
+            detection: DesktopDetectionOptions(
+                mode: .accessibility,
+                traversalBudget: limits),
+            output: DesktopObservationOutputOptions(
+                path: self.artifactDirectory.path + "/",
+                saveSnapshot: true))
         try WindowObservationArtifacts.prepare(self.artifactDirectory)
         let observationStartedAt = Date()
         let result: DesktopObservationResult

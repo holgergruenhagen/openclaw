@@ -430,6 +430,19 @@ describe("session cost usage refresh", () => {
             sessions: [{ sessionFile }],
             requestRefresh: false,
           });
+          let settled = false;
+          void reading.then(
+            () => {
+              settled = true;
+            },
+            () => {
+              settled = true;
+            },
+          );
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 150);
+          });
+          expect(settled).toBe(false);
           releaseFirstBatch.resolve("refreshed");
           const result = await withinTest(reading, signal);
           expect(result.summaries[0]).toMatchObject({
@@ -449,6 +462,129 @@ describe("session cost usage refresh", () => {
       });
     },
   );
+
+  it.each(["completes", "slow", "cancelled"] as const)(
+    "bounds publication waiting when the request is %s without adopting background work",
+    async (phase) => {
+      await withRefreshFixture(async ({ agentId, sessionFiles }) => {
+        const refreshOwner = new AsyncWorkScope();
+        const requestOwner = new AsyncWorkScope();
+        const release = createDeferredCore<"refreshed">();
+        const refresh = vi.mocked(refreshCostUsageCacheForAgent).mockReturnValue(release.promise);
+        const reason = new Error("usage client disconnected");
+        refreshOwner.run(() =>
+          requestCostUsageCacheRefresh({
+            config,
+            agentId,
+            storePath: path.dirname(sessionFiles[0]),
+            sessionFiles: [sessionFiles[0]],
+            coalesce: true,
+          }),
+        );
+        const reading = requestOwner.track(() =>
+          loadSessionCostSummariesFromCache({
+            config,
+            agentId,
+            sessions: [{ sessionFile: sessionFiles[0] }],
+            requestRefresh: false,
+            maxPublicationWaitMs: 100,
+          }),
+        );
+        // Observe rejection immediately; scope cancellation must not become an
+        // unhandled rejection while the fake clock advances other work.
+        const result = Promise.allSettled([reading]);
+        try {
+          await vi.advanceTimersByTimeAsync(0);
+          expect(refresh).toHaveBeenCalledOnce();
+          if (phase === "completes") {
+            release.resolve("refreshed");
+          } else if (phase === "cancelled") {
+            requestOwner.beginClose(reason);
+          } else {
+            await vi.advanceTimersByTimeAsync(100);
+          }
+          const [outcome] = await result;
+          if (phase === "cancelled") {
+            expect(outcome).toMatchObject({ status: "rejected", reason });
+          } else {
+            expect(outcome).toMatchObject({
+              status: "fulfilled",
+              value: { summaries: [null], cacheStatus: { status: "stale" } },
+            });
+          }
+          if (phase !== "completes") {
+            expect(refreshOwner.hasPendingWork).toBe(true);
+            expect(refreshOwner.signal.aborted).toBe(false);
+          }
+          expect(vi.getTimerCount(), describePendingFakeTimers()).toBe(0);
+        } finally {
+          release.resolve("refreshed");
+          await result;
+          await refreshOwner.drain();
+          await requestOwner.drain();
+        }
+      });
+    },
+  );
+
+  it("keeps an exact logical-selector read pending across a deferred rebuild", async () => {
+    await withRefreshFixture(async ({ agentId, sessionFiles }) => {
+      const scope = new AsyncWorkScope();
+      const storePath = path.dirname(sessionFiles[0]);
+      const logical = `sqlite:${agentId}:selected:${path.join(storePath, "sessions.json")}`;
+      const canonical = `sqlite:${agentId}:selected:${path.join(storePath, "openclaw-agent.sqlite")}`;
+      const row = { key: canonical, valueJson: "{}", updatedAt: 1 };
+      const releaseFirst = createDeferredCore<"refreshed">();
+      const releaseSecond = createDeferredCore<"refreshed">();
+      const refresh = vi.mocked(refreshCostUsageCacheForAgent);
+      refresh.mockImplementationOnce(async (params) => {
+        await releaseFirst.promise;
+        params.onRemaining?.([{ sessionFile: logical, rollupId: canonical }]);
+        return "refreshed";
+      });
+      refresh.mockReturnValueOnce(releaseSecond.promise);
+      refresh.mockResolvedValue("refreshed");
+      let reading: ReturnType<typeof loadSessionCostSummariesFromCache> | undefined;
+      try {
+        scope.run(() =>
+          requestCostUsageCacheRefresh({
+            config,
+            agentId,
+            storePath,
+            sessionFiles: [logical],
+            rebuildRows: [row],
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        reading = loadSessionCostSummariesFromCache({
+          config,
+          agentId,
+          sessions: [{ sessionFile: logical }],
+          requestRefresh: false,
+        });
+        let settled = false;
+        void reading.then(() => {
+          settled = true;
+        });
+        releaseFirst.resolve("refreshed");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(refresh.mock.calls[1]?.[0]).toMatchObject({
+          sessionFiles: [logical],
+          rebuildRows: [row],
+        });
+        expect(settled).toBe(false);
+        releaseSecond.resolve("refreshed");
+        await vi.advanceTimersByTimeAsync(1);
+        await reading;
+      } finally {
+        releaseFirst.resolve("refreshed");
+        releaseSecond.resolve("refreshed");
+        scope.beginClose();
+        await vi.advanceTimersByTimeAsync(1);
+        await Promise.allSettled([reading, scope.drain()]);
+      }
+    });
+  });
 
   it("bounds pending backfill batches and preserves queued rebuilds across a busy retry", async () => {
     await withRefreshFixture(async ({ agentId, sessionFiles }) => {
@@ -493,12 +629,14 @@ describe("session cost usage refresh", () => {
         expect(refresh.mock.calls[1]?.[0].sessionFiles).toEqual(pending.slice(0, 50));
         await vi.advanceTimersByTimeAsync(52);
         const accepted = refresh.mock.calls.slice(2).map(([params]) => params);
-        expect(accepted.map((params) => params.sessionFiles?.length)).toEqual([50, 50, 22]);
+        expect(accepted.map((params) => params.sessionFiles?.length)).toEqual([50, 50, 23]);
         expect(accepted.flatMap((params) => params.sessionFiles ?? [])).toEqual([
-          ...pending.map((file, index) => (index === 80 ? rollupIds[index]! : file)),
+          ...pending.slice(0, 81),
+          rollupIds[80]!,
+          ...pending.slice(81),
           late,
         ]);
-        expect(accepted.map((params) => params.rebuildRows)).toEqual([[], [rebuild], []]);
+        expect(accepted.map((params) => params.rebuildRows)).toEqual([[rebuild], [rebuild], []]);
         expect(vi.getTimerCount(), describePendingFakeTimers()).toBe(0);
       } finally {
         scope.beginClose();

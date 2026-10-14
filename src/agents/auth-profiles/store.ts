@@ -270,7 +270,7 @@ export function isSharedMainAuthProfileAgentDir(agentDir?: string): boolean {
   return resolveAgentAuthPath(effectiveAgentDir) === mainPath;
 }
 
-/** @deprecated Use findPersistedAuthProfileCredentialAsync. Removed at the next Plugin SDK major. */
+/** @deprecated Use findPersistedAuthProfileCredentialAsync. Retained until an announced stable removal window. */
 export function findPersistedAuthProfileCredential(params: {
   agentDir?: string;
   profileId: string;
@@ -310,7 +310,7 @@ export function findPersistedAuthProfileCredential(params: {
 
 /**
  * Resolve which agent dir owns a persisted profile, accounting for inherited OAuth.
- * @deprecated Use resolvePersistedAuthProfileOwnerAgentDirAsync. Removed at the next Plugin SDK major.
+ * @deprecated Use resolvePersistedAuthProfileOwnerAgentDirAsync. Retained until an announced stable removal window.
  */
 export function resolvePersistedAuthProfileOwnerAgentDir(params: {
   agentDir?: string;
@@ -733,7 +733,7 @@ export function restoreAuthProfileStorePersistenceSnapshot(
       );
       deferSqlitePostCommitPublication(database.db, () => {
         noteAuthProfileFileWrite(owner.databasePath);
-        recordRuntimeAuthProfilePersistedStore(owner.databasePath, persisted, owner.env);
+        recordRuntimeAuthProfilePersistedStore(owner.databasePath, persisted);
       });
       const publication: RuntimeSnapshotPublication = {
         ...(agentDir ? { agentDir } : {}),
@@ -907,7 +907,6 @@ export function createAuthProfileStoreRuntime(
     recordRuntimeAuthProfilePersistedStore(
       agentDir ? resolveAgentAuthPath(agentDir) : resolveSharedAuthPath(),
       store,
-      getScopedAuthProfileEnv(),
     );
     observeCanonicalAuthProfileCredentials(
       agentDir ? resolveAgentAuthPath(agentDir) : resolveSharedAuthPath(),
@@ -986,7 +985,7 @@ export function createAuthProfileStoreRuntime(
     }
     const store = readStore();
     if (!preparedRows && !effectiveOptions?.database) {
-      recordRuntimeAuthProfilePersistedStore(databasePath, store, env);
+      recordRuntimeAuthProfilePersistedStore(databasePath, store);
     }
     if (store) {
       observeCanonicalAuthProfileCredentials(
@@ -1445,7 +1444,7 @@ export function createAuthProfileStoreRuntime(
     });
   }
 
-  /** @deprecated Use ensureAuthProfileStoreForLocalUpdateAsync. Removed at the next Plugin SDK major. */
+  /** @deprecated Use ensureAuthProfileStoreForLocalUpdateAsync. Retained until an announced stable removal window. */
   function ensureAuthProfileStoreForLocalUpdate(agentDir?: string): AuthProfileStore {
     warnPluginSdkDeprecation({
       family: "auth-profiles",
@@ -1586,7 +1585,7 @@ export function createAuthProfileStoreRuntime(
       );
       const publishSource = () => {
         noteAuthProfileFileWrite(savedAuthPath);
-        recordRuntimeAuthProfilePersistedStore(savedAuthPath, persisted, owner.env);
+        recordRuntimeAuthProfilePersistedStore(savedAuthPath, persisted);
       };
       if (!deferSqlitePostCommitPublication(database.db, publishSource)) {
         publishSource();

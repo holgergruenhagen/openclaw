@@ -63,7 +63,7 @@ const executePhase: {
     scope: TransportScope,
     input: SessionActorCommandContext &
       SessionActorPhaseInputs[Phase] & { target: SessionActorTarget },
-  ) => Promise<SessionActorOutcome<SessionActorPhaseResults[Phase]>>;
+  ) => Promise<SessionActorOperations[`session.actor.${Phase}`]["output"]>;
 } = {
   acceptInput: (scope, input) => scope.execute({ type: "session.actor.acceptInput", input }),
   adoptRun: (scope, input) => scope.execute({ type: "session.actor.adoptRun", input }),
@@ -278,6 +278,8 @@ export function createSqliteSessionActorExecutor(
                 receipt.phaseId === captured.phaseId &&
                 receipt.phase === name
               ) {
+                // Register the shared postimage first so receipt freezing and replica settlement reuse it.
+                freezeJsonSnapshot(receipt.postimage);
                 // SAFETY: The paired worker constructs the typed result; native admission validates its settlement envelope.
                 committed = freezeJsonSnapshot(evidence) as Extract<Outcome, { kind: "committed" }>;
                 if (!reply.ok) {

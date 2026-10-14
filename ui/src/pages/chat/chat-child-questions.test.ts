@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { GatewaySessionRow } from "../../api/types.ts";
 import type { QuestionPrompt } from "../../app/question-prompt.ts";
-import { projectChildSessionQuestions } from "./chat-child-questions.ts";
+import {
+  EMPTY_QUESTION_PROJECTION,
+  projectChildSessionQuestions,
+  reuseQuestionProjection,
+} from "./chat-child-questions.ts";
 
 const host = { assistantAgentId: "main" };
 const parentKey = "agent:main:dashboard:parent";
@@ -40,12 +44,12 @@ describe("projectChildSessionQuestions", () => {
   it("docks a pending question from a direct child with the child's name", () => {
     const own = prompt("own", parentKey);
     const asked = prompt("child", visibleChild.key);
-    const result = projectChildSessionQuestions({
+    const result = projectChildSessionQuestions(
       host,
       parentKey,
-      children: [row(parentKey), visibleChild],
-      prompts: [own, asked],
-    });
+      [row(parentKey), visibleChild],
+      [own, asked],
+    );
     expect(result.prompts).toEqual([asked]);
     expect([...result.sources]).toEqual([["child", "Release checks"]]);
   });
@@ -60,19 +64,31 @@ describe("projectChildSessionQuestions", () => {
       spawnDepth: 1,
       archived: true,
     });
-    const result = projectChildSessionQuestions({
+    const result = projectChildSessionQuestions(
       host,
       parentKey,
-      children: [visibleChild, grandchild, archived],
-      prompts: [
+      [visibleChild, grandchild, archived],
+      [
         prompt("answered", visibleChild.key, { status: "answered" }),
         prompt("other-agent", visibleChild.key, { agentId: "ops" }),
         prompt("unrelated", "agent:main:dashboard:unrelated"),
         prompt("grandchild", grandchild.key),
         prompt("archived", archived.key),
       ],
-    });
+    );
     expect(result.prompts).toEqual([]);
+  });
+
+  it("keeps the conversation's own questions first and reuses an unchanged projection", () => {
+    const own = prompt("own", parentKey);
+    const asked = prompt("child", visibleChild.key);
+    const children = () =>
+      projectChildSessionQuestions(host, parentKey, [visibleChild], [asked, own]);
+    const first = reuseQuestionProjection(EMPTY_QUESTION_PROJECTION, [own], children());
+    expect(first.prompts).toEqual([own, asked]);
+    expect(reuseQuestionProjection(first, [own], children())).toBe(first);
+    asked.revision += 1;
+    expect(reuseQuestionProjection(first, [own], children())).not.toBe(first);
   });
 
   it("does not treat operator roots linked to Home as children", () => {
@@ -87,12 +103,12 @@ describe("projectChildSessionQuestions", () => {
       createdVia: "operator",
       spawnDepth: 1,
     });
-    const result = projectChildSessionQuestions({
+    const result = projectChildSessionQuestions(
       host,
-      parentKey: home,
-      children: [operatorRoot, spawnedFromHome],
-      prompts: [prompt("root", operatorRoot.key), prompt("spawned", spawnedFromHome.key)],
-    });
+      home,
+      [operatorRoot, spawnedFromHome],
+      [prompt("root", operatorRoot.key), prompt("spawned", spawnedFromHome.key)],
+    );
     expect(result.prompts.map(({ id }) => id)).toEqual(["spawned"]);
   });
 });

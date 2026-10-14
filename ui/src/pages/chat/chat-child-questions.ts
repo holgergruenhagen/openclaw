@@ -8,6 +8,46 @@ import {
   type UiSessionDefaultsHost,
 } from "../../lib/sessions/session-key.ts";
 
+type ChildSessionQuestions = { prompts: QuestionPrompt[]; sources: ReadonlyMap<string, string> };
+
+export type QuestionProjection = ChildSessionQuestions & { revisions: number[] };
+
+export const EMPTY_QUESTION_PROJECTION: QuestionProjection = {
+  prompts: [],
+  revisions: [],
+  sources: new Map(),
+};
+
+/**
+ * The conversation's own questions followed by its children's, keeping the
+ * previous projection while nothing it shows changed. Question records mutate
+ * in place; their revisions own transcript-cache invalidation.
+ */
+export function reuseQuestionProjection(
+  previous: QuestionProjection,
+  own: QuestionPrompt[],
+  asked: ChildSessionQuestions | undefined,
+): QuestionProjection {
+  const prompts = asked
+    ? [...own, ...asked.prompts.filter((prompt) => !own.includes(prompt))]
+    : own;
+  const unchanged =
+    prompts.length === previous.prompts.length &&
+    prompts.every(
+      (prompt, index) =>
+        prompt === previous.prompts[index] &&
+        prompt.revision === previous.revisions[index] &&
+        asked?.sources.get(prompt.id) === previous.sources.get(prompt.id),
+    );
+  return unchanged
+    ? previous
+    : {
+        prompts,
+        revisions: prompts.map((prompt) => prompt.revision),
+        sources: asked?.sources ?? EMPTY_QUESTION_PROJECTION.sources,
+      };
+}
+
 /**
  * Pending questions asked by the conversation's direct child sessions. A visible
  * spawned session is an ordinary session that can call `ask_user`; without this
@@ -15,21 +55,20 @@ import {
  * Answered questions stay in the child's own transcript, so only pending ones
  * dock here, and answers still resolve through the child question's id.
  */
-export function projectChildSessionQuestions(params: {
-  host: UiSessionDefaultsHost;
-  parentKey: string | undefined;
-  children: readonly GatewaySessionRow[] | undefined;
-  prompts: readonly QuestionPrompt[];
-}): { prompts: QuestionPrompt[]; sources: Map<string, string> } {
+export function projectChildSessionQuestions(
+  host: UiSessionDefaultsHost,
+  parentKey: string | undefined,
+  roster: readonly GatewaySessionRow[] | undefined,
+  questions: readonly QuestionPrompt[],
+): ChildSessionQuestions {
   const prompts: QuestionPrompt[] = [];
   const sources = new Map<string, string>();
-  const { parentKey } = params;
   if (!parentKey) {
     return { prompts, sources };
   }
   // The roster can hold seeded rows and the parent itself. The implicit Home
   // link of operator-created roots does not make them children of Home.
-  const children = (params.children ?? []).filter(
+  const children = (roster ?? []).filter(
     (row) =>
       !row.archived &&
       !areUiSessionKeysEquivalent(row.key, parentKey) &&
@@ -38,12 +77,12 @@ export function projectChildSessionQuestions(params: {
         parentKey,
       ),
   );
-  for (const prompt of params.prompts) {
+  for (const prompt of questions) {
     if (prompt.status !== "pending") {
       continue;
     }
     const child = children.find((row) =>
-      uiConversationMatches(params.host, row.key, prompt.sessionKey, prompt.agentId),
+      uiConversationMatches(host, row.key, prompt.sessionKey, prompt.agentId),
     );
     if (child) {
       prompts.push(prompt);

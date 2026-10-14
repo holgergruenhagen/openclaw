@@ -3565,6 +3565,7 @@ export const en: TranslationMap & {
       summaryLabel: "Question outcome",
       ownAnswerFor: "Your own answer for {header}",
       storeRequestedBy: "Requested by {agent} · {session}",
+      requestedBySession: "Asked by session {session}",
       storeEntry: "Stores {name} as {kind}",
       storeReplacement: "Replaces {name} — last updated {updated}",
       storeReplacementBy: "Replaces {name} — last updated {updated} by {updatedBy}",

@@ -86,7 +86,8 @@ export class ChatPane extends ChatPaneLayoutRender {
     const selectionConnectionGeneration = this.connectionGeneration;
     const selectedSession = selectedChatSessionRow(state);
     const providerPaused = Boolean(selectedSession?.providerReview);
-    const childRoster = this.projectChildRoster(this.resolveChatReadTarget());
+    const readTarget = this.resolveChatReadTarget();
+    const childRoster = this.projectChildRoster(readTarget);
     const progressPresentation = this.progressCardPresentation;
     const selectedSessionArchived = this.isCurrentSessionArchived(state);
     const mutationAccess = readChatPaneMutationAccess(
@@ -373,11 +374,13 @@ export class ChatPane extends ChatPaneLayoutRender {
     const mentionsUnsupported = Boolean(
       catalogKey || suggestionViewer || selectedSession?.incognito || !selfProfileId,
     );
-    const { gatewayQuestionPrompts, inlineApproval } = this.projectConversationAttention(
-      state,
-      currentAgentId,
-      !catalogKey && !sessionParticipationBlocked,
-    );
+    const { gatewayQuestionPrompts, gatewayQuestionSources, inlineApproval } =
+      this.projectConversationAttention(
+        state,
+        currentAgentId,
+        !catalogKey && !sessionParticipationBlocked,
+        { parentKey: readTarget?.sessionKey, sessions: childRoster.subagentSessions },
+      );
     const props: ChatProps = {
       applicationContext: this.context,
       transcript: this.transcript,
@@ -430,6 +433,7 @@ export class ChatPane extends ChatPaneLayoutRender {
       },
       onDismissProgressCard: progressPresentation ? this.hideProgressCard.bind(this) : undefined,
       gatewayQuestionPrompts,
+      gatewayQuestionSources,
       asyncQuestionStorage:
         !catalogKey && !suggestionViewer ? this.chatState.composerPersistence.durableScope : null,
       ...createChatQuestionActions({

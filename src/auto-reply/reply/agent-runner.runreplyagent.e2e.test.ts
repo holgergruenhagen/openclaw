@@ -381,6 +381,7 @@ function createMinimalRun(params?: {
   blockStreamingEnabled?: boolean;
   isActive?: boolean;
   isRunActive?: () => boolean;
+  waitForRunEnd?: () => Promise<void>;
   shouldSteer?: boolean;
   shouldFollowup?: boolean;
   resolvedQueueMode?: string;
@@ -525,6 +526,7 @@ function createMinimalRun(params?: {
         shouldFollowup: params?.shouldFollowup ?? false,
         isActive: params?.isActive ?? false,
         isRunActive: params?.isRunActive,
+        waitForRunEnd: params?.waitForRunEnd,
         opts,
         typing,
         sessionEntry: params?.sessionEntry,
@@ -1797,6 +1799,30 @@ describe("runReplyAgent heartbeat followup guard", () => {
     expect(vi.mocked(scheduleFollowupDrain)).not.toHaveBeenCalled();
 
     active.complete();
+
+    expect(vi.mocked(scheduleFollowupDrain)).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the drain dormant behind an embedded run without a reply lane owner", async () => {
+    // Inter-session turns hold the session lane without a reply operation.
+    const runEnd = createDeferred();
+    const { run } = createMinimalRun({
+      opts: { isHeartbeat: false },
+      isActive: true,
+      isRunActive: () => true,
+      waitForRunEnd: () => runEnd.promise,
+      shouldFollowup: true,
+      resolvedQueueMode: "collect",
+    });
+
+    await run();
+
+    expect(vi.mocked(enqueueFollowupRun)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(scheduleFollowupDrain)).not.toHaveBeenCalled();
+
+    runEnd.resolve();
+    await runEnd.promise;
+    await Promise.resolve();
 
     expect(vi.mocked(scheduleFollowupDrain)).toHaveBeenCalledTimes(1);
   });

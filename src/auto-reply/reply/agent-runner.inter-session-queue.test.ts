@@ -11,6 +11,7 @@ import { createDirectChatContext } from "../../gateway/server-chat.agent-events.
 import { createChatSendTurnAdoptionLifecycle } from "../../gateway/server-methods/chat-send-turn-adoption.js";
 import type { TemplateContext } from "../templating.js";
 import type * as AgentRunnerExecution from "./agent-runner-execution.js";
+import type * as AgentRunnerMemory from "./agent-runner-memory.js";
 import { runReplyAgent } from "./agent-runner-run.js";
 import { createTestFollowupRun } from "./agent-runner.test-fixtures.js";
 import { clearFollowupDrainCallback } from "./queue/drain.js";
@@ -20,7 +21,8 @@ import { createMockTypingController } from "./test-helpers.js";
 
 const mocks = vi.hoisted(() => ({ executeAgentTurn: vi.fn() }));
 
-vi.mock("./agent-runner-memory.js", () => ({
+vi.mock("./agent-runner-memory.js", async () => ({
+  ...(await vi.importActual<typeof AgentRunnerMemory>("./agent-runner-memory.js")),
   runSessionCompactionIfNeeded: async () => undefined,
   runMemoryFlushIfNeeded: async () => ({ sessionEntry: undefined, outcome: "skipped" }),
 }));

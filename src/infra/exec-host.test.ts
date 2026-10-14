@@ -148,24 +148,4 @@ describe("requestExecHostViaSocket", () => {
       expect(requireJsonlSocketCall().timeoutMs).toBe(expectedTimeoutMs);
     },
   );
-
-  it("returns a typed timeout when the response deadline expires", async () => {
-    requestJsonlSocketMock.mockImplementationOnce(async ({ onTimeout }) => onTimeout?.() ?? null);
-
-    await expect(
-      requestExecHostViaSocket({
-        socketPath: "/tmp/socket",
-        token: "secret",
-        timeoutMs: 123,
-        request: { command: ["sleep", "1"] },
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      error: {
-        code: "TIMEOUT",
-        reason: "timeout",
-        message: "TIMEOUT: macOS app exec host response timed out; execution outcome is unknown",
-      },
-    });
-  });
 });

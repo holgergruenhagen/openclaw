@@ -6,7 +6,7 @@ const baseParams = {
   url: "https://proxy.example.test/v1/images/edits?token=secret",
   authMode: "api-key",
   authOverridden: false,
-  oauthAvailable: false,
+  explicitDirectRoute: false,
 };
 
 describe("annotateDirectImageAuthFailure", () => {
@@ -39,7 +39,7 @@ describe("annotateDirectImageAuthFailure", () => {
     ["errors without status", new Error("network down")],
   ])("leaves %s unchanged", (_label, error) => {
     const message = error.message;
-    annotateDirectImageAuthFailure(error, { ...baseParams, oauthAvailable: true });
+    annotateDirectImageAuthFailure(error, { ...baseParams, explicitDirectRoute: true });
     expect(error.message).toBe(message);
   });
 });

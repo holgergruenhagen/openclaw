@@ -27,6 +27,7 @@ export function sanitizeLogValue(value: unknown): string {
 
 // Direct Images API auth failures look like account or model problems unless the
 // message names the route OpenClaw picked; an unused OAuth profile is the common cause.
+// Only the message changes, so the original error class, status, and detail survive.
 export function annotateDirectImageAuthFailure(
   error: unknown,
   params: {
@@ -35,7 +36,8 @@ export function annotateDirectImageAuthFailure(
     authSource?: unknown;
     // Configured headers or request auth replaced the resolved credential before sending.
     authOverridden: boolean;
-    oauthAvailable: boolean;
+    // Explicit models.providers.openai settings pin this route even when an OAuth profile exists.
+    explicitDirectRoute: boolean;
   },
 ): void {
   if (
@@ -53,8 +55,8 @@ export function annotateDirectImageAuthFailure(
     : `credential=${sanitizeLogValue(params.authMode ?? "api-key")} source=${sanitizeLogValue(
         params.authSource,
       )}`;
-  const hint = params.oauthAvailable
-    ? `; a ChatGPT/Codex OAuth profile exists but explicit models.providers.openai settings select the direct Images API. To use that profile, set baseUrl "${OPENAI_CODEX_RESPONSES_BASE_URL}" and api "openai-chatgpt-responses", without apiKey, auth "api-key", or auth headers`
+  const hint = params.explicitDirectRoute
+    ? `; explicit models.providers.openai settings select the direct Images API. To use a ChatGPT/Codex OAuth profile instead, set baseUrl "${OPENAI_CODEX_RESPONSES_BASE_URL}" and api "openai-chatgpt-responses", without apiKey, auth "api-key", or auth headers`
     : "";
   error.message = `${error.message} (route=images-api url=${sanitizeLogValue(endpoint)} ${credential}${hint})`;
 }

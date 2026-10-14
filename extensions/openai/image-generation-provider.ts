@@ -870,6 +870,21 @@ export function buildOpenAIImageGenerationProvider(
           allowPrivateNetwork,
           ssrfPolicy: req.ssrfPolicy,
           dispatcherPolicy,
+        }).catch((error: unknown) => {
+          // Only the Images API status gets route diagnostics, not later image URL downloads.
+          // Build them from facts resolved before the request; a failed request never reads auth.
+          if (!response.ok) {
+            annotateDirectImageAuthFailure(error, {
+              url,
+              authMode: imageAuth.mode,
+              authSource: imageAuth.source,
+              authOverridden: isAzure
+                ? requestOptions.headers.get("api-key") !== imageAuth.apiKey
+                : requestOptions.headers.get("authorization") !== `Bearer ${imageAuth.apiKey}`,
+              explicitDirectRoute: explicitDirectOpenAIConfig,
+            });
+          }
+          throw error;
         });
 
         return {

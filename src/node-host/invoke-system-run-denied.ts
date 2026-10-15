@@ -20,6 +20,12 @@ export type SystemRunDeniedReason =
   | "cwd-unavailable"
   | "permission:screenRecording";
 
+const transportErrorCodes: Partial<Record<SystemRunDeniedReason, string>> = {
+  "companion-unavailable": "UNAVAILABLE",
+  timeout: "TIMEOUT",
+  "response-lost": "UNKNOWN",
+};
+
 export function normalizeDeniedReason(reason: string | null | undefined): SystemRunDeniedReason {
   switch (reason) {
     case "security=deny":
@@ -63,13 +69,7 @@ export async function sendSystemRunDenied(
     error: {
       code: permissionDetails
         ? "PERMISSION_MISSING"
-        : reason === "companion-unavailable"
-          ? "UNAVAILABLE"
-          : reason === "timeout"
-            ? "TIMEOUT"
-            : reason === "response-lost"
-              ? "UNKNOWN"
-              : "SYSTEM_RUN_DENIED",
+        : (transportErrorCodes[reason] ?? "SYSTEM_RUN_DENIED"),
       message,
       ...(permissionDetails ? { details: permissionDetails } : {}),
     },

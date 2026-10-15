@@ -500,7 +500,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     expect(result.runCommand).not.toHaveBeenCalled();
   });
 
-  it("keeps a lost companion response ambiguous", async () => {
+  it("reports an unreachable companion without local replay", async () => {
     const result = await runMac();
     expect(result.requestExecHost).toHaveBeenCalledOnce();
     expect(result.runCommand).not.toHaveBeenCalled();
@@ -548,29 +548,6 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
       error: {
         code: "TIMEOUT",
         message: "TIMEOUT: macOS app exec host response timed out; execution outcome is unknown",
-      },
-    });
-    expect(result.runCommand).not.toHaveBeenCalled();
-  });
-
-  it("keeps a submitted companion command from falling back after response loss", async () => {
-    const result = await runMac({
-      runViaResponse: {
-        ok: false,
-        error: {
-          code: "UNKNOWN",
-          reason: "response-lost",
-          message: "UNKNOWN: macOS app exec host response was lost; execution outcome is unknown",
-        },
-      },
-    });
-
-    expectExecDeniedEvent(result.sendNodeEvent, "response-lost");
-    expect(invokeResult(result.sendInvokeResult)).toMatchObject({
-      ok: false,
-      error: {
-        code: "UNKNOWN",
-        message: "UNKNOWN: macOS app exec host response was lost; execution outcome is unknown",
       },
     });
     expect(result.runCommand).not.toHaveBeenCalled();

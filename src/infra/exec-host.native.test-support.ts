@@ -147,7 +147,7 @@ try {
       message: "UNKNOWN: macOS app exec host response was lost; execution outcome is unknown",
     },
   });
-  order.push("client-null");
+  order.push("client-outcome-unknown");
   assert.equal(await fs.readFile(marker, "utf8"), "START\n");
   await fs.writeFile(release, "finish\n");
   // Keep draining the native connection: its terminal reply proves the executor
@@ -165,7 +165,7 @@ try {
     "request-half-closed",
     "native-started",
     "response-dropped",
-    "client-null",
+    "client-outcome-unknown",
     "native-completed",
   ]);
   assert.deepEqual(errors, []);

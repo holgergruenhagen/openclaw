@@ -36,17 +36,16 @@ export async function requestJsonlSocket<T>(params: JsonlSocketRequest<T>): Prom
         return;
       }
       settled = true;
-      if (timer) {
-        clearNodeTimeout(timer);
-      }
+      clearNodeTimeout(timer);
       abortListener?.[Symbol.dispose]();
       client.destroy();
       resolve(value);
     };
 
+    const finishPeerLoss = () => finish(requestSent ? (params.onResponseLost?.() ?? null) : null);
     const appendLineChunk = (chunk: Buffer): boolean => {
       if (lineBytes + chunk.byteLength > JSONL_SOCKET_MAX_LINE_BYTES) {
-        finish(null);
+        finishPeerLoss();
         return false;
       }
       if (chunk.byteLength > 0) {
@@ -70,7 +69,6 @@ export async function requestJsonlSocket<T>(params: JsonlSocketRequest<T>): Prom
       return;
     }
 
-    const finishPeerLoss = () => finish(requestSent ? (params.onResponseLost?.() ?? null) : null);
     client.on("error", finishPeerLoss);
     client.on("end", finishPeerLoss);
     client.on("close", finishPeerLoss);

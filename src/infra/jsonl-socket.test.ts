@@ -123,7 +123,7 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
       const pending = requestJsonlSocket({
         socketPath,
         requestLine: '{"hello":"world"}',
-        timeoutMs: 10_000,
+        timeoutMs: 0,
         accept: acceptDoneValue,
         signal: controller.signal,
       }).then(completed);
@@ -164,7 +164,7 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
     await withSocketServer(server, async (socketPath) => {
       closedSocketPath = socketPath;
       await expect(
-        requestJsonlSocket<number | { kind: "timeout" }>({
+        requestJsonlSocket({
           socketPath,
           requestLine: "{}",
           timeoutMs: 50,
@@ -221,6 +221,24 @@ describe.runIf(process.platform !== "win32")("requestJsonlSocket", () => {
           socketPath,
           requestLine: "{}",
           timeoutMs: 500,
+          onResponseLost: () => ({ kind: "response-lost" as const }),
+          accept: () => undefined,
+        }),
+      ).resolves.toEqual({ kind: "response-lost" });
+    });
+  });
+
+  it("classifies an oversized reply as response loss after submission", async () => {
+    const server = net.createServer((socket) => {
+      socket.on("error", () => {});
+      socket.on("data", () => socket.end("x".repeat(16 * 1024 * 1024 + 1)));
+    });
+    await withSocketServer(server, async (socketPath) => {
+      await expect(
+        requestJsonlSocket({
+          socketPath,
+          requestLine: "{}",
+          timeoutMs: 0,
           onResponseLost: () => ({ kind: "response-lost" as const }),
           accept: () => undefined,
         }),

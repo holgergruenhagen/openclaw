@@ -32,6 +32,13 @@ Auth methods can return `agentRuntimeId` with `defaultModel` when sign-in belong
 to a native harness. Model Setup applies that runtime to the selected agent's
 model entry, not to global model defaults.
 
+`ProviderAuthContext.agentId` identifies the target agent when the caller has one.
+Native sign-in methods may use it to check previously remembered permissions.
+After explicit user consent, return `ProviderAuthResult.nativeRuntimeConsent`
+with the accepted harness IDs. Model Setup stages those permissions on that
+agent in the same verified config commit as the runtime routing and plugin enable.
+Do not write a separate permission store or infer consent from successful login.
+
 ## Import an existing credential during sign-in
 
 An auth method can declare `credentialImport` with a `migrationProviderId`,
@@ -338,7 +345,7 @@ a saved policy is not proof that the running Gateway applied it.
     from `openclaw/plugin-sdk/agent-runtime`. It reads persisted profiles in a
     database worker and preserves the optional third `env` argument for
     service-owned state directories. The synchronous `loadAuthProfileStoreForRuntime`
-    is deprecated and will be removed at the next Plugin SDK major.
+    is deprecated through 2026-12-31 and will be removed in the first January 2027 stable release.
 
     `createProviderApiKeyAuthMethod` accepts an optional `validateApiKey` callback.
     Return an error message to reject a resolved key before any auth profile is
@@ -553,6 +560,20 @@ This keeps shared request shaping and output normalization active, including
 MiMo reasoning replay and final-answer handling. Without the flag, a replacement
 stream keeps the existing behavior of taking ownership of those compatibility
 policies. Returning the original stream or no wrapper also preserves them.
+
+Local provider transports can report a transient wait through the optional
+`StreamOptions.onProviderWait` callback. Pass `"response"` while waiting for a
+response, or `"slot"` only when backend evidence correlates the current request
+with a slot wait. Pass `null` to clear it. This is status metadata, never assistant
+text or evidence that cancellation released a backend slot.
+
+`createProviderWaitObserver` from `openclaw/plugin-sdk/provider-transport-runtime`
+provides the shared delayed status lifecycle. Call `start()` when dispatching the
+prepared request and `stop()` at the first response event and in cleanup. It emits
+the generic response wait after one second and clears it on cancellation or
+`stop()`. It creates no timer when the caller does not observe waits. A provider
+with request-correlated evidence can call `report("slot")`. Any backend probes
+must be bounded by that request's lifetime; do not add an always-on polling loop.
 
 ## Next steps
 

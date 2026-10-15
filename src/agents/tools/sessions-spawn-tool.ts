@@ -311,6 +311,10 @@ function resolveAcpUnavailableMessage(opts?: { sandboxed?: boolean; config?: Ope
 export function createSessionsSpawnTool(
   opts?: SessionsSpawnToolOptions & { workerPlacement?: boolean },
 ): AnyAgentTool {
+  const requesterThinkingExplicit =
+    // SAFETY: The host forwards this optional runtime bit; public callers can omit it.
+    (opts as (typeof opts & { requesterThinkingExplicit?: boolean }) | undefined)
+      ?.requesterThinkingExplicit;
   const requestOwners = captureExecRequestOwners({
     runId: opts?.requesterTurnRunId,
     sessionId: opts?.expectedParentSessionId,
@@ -588,6 +592,8 @@ export function createSessionsSpawnTool(
           agentTo: opts?.agentTo,
           agentThreadId: opts?.agentThreadId,
           currentChannelId: opts?.currentChannelId,
+          currentThreadTs: opts?.currentThreadTs,
+          currentConversationOrigin: opts?.currentConversationOrigin,
           currentMessageId: opts?.currentMessageId,
           agentGroupSpace: opts?.agentGroupSpace,
           agentMemberRoleIds: opts?.agentMemberRoleIds,
@@ -680,6 +686,7 @@ export function createSessionsSpawnTool(
               {
                 ...inheritedSpawnContext(),
                 requesterThinkingLevel: opts?.requesterThinkingLevel,
+                requesterThinkingExplicit,
                 requesterModel: opts?.requesterModel,
                 currentMessagingTarget: opts?.currentMessagingTarget ?? opts?.currentChannelId,
                 agentGroupId: opts?.agentGroupId,

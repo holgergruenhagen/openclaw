@@ -14,6 +14,8 @@ export type {
   ControlUiDashboardProps,
   ControlUiDialogProps,
 } from "./control-ui-components.js";
+export type { AgentsWorkspaceGetResult } from "@openclaw/gateway-protocol";
+export type { MemorySearchResponse } from "../../packages/memory-host-sdk/src/host/types.js";
 export type ControlUiDisposer = () => void;
 
 export type ControlUiConnection = {
@@ -185,7 +187,7 @@ export type ControlUiAction = {
 export type ControlUiAccessory = {
   id: string;
   placement: "session-header";
-  mount: ControlUiView<BoardGetParams & { session?: ControlUiSession }>;
+  mount: ControlUiView<BoardGetParams>;
 };
 
 export type ControlUiWidget = {
@@ -310,3 +312,14 @@ export type ControlUiPlugin = {
 export function defineControlUiPlugin(plugin: ControlUiPlugin): ControlUiPlugin {
   return plugin;
 }
+export type { DoctorMemoryStatusPayload } from "../../packages/gateway-protocol/src/doctor-memory.js";
+export type {
+  ControlUiSettingsPlacement,
+  ControlUiSettingsSnapshot,
+  ControlUiSettingsComponents,
+  ControlUiSettingsContext,
+  ControlUiSettingsView,
+  ControlUiChannelSettingsSnapshot,
+  ControlUiChannelSettingsContext,
+  ControlUiChannelSettingsView,
+} from "./control-ui-settings.js";

@@ -1,4 +1,7 @@
-import { asNullableRecord as recordOrNull } from "@openclaw/normalization-core/record-coerce";
+import {
+  asNullableRecord as recordOrNull,
+  isStringArray,
+} from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString as stringValue } from "@openclaw/normalization-core/string-coerce";
 import type { GatewaySessionRow, SessionRunStatus } from "../../api/types.ts";
 import { isSessionRunActive } from "../session-run-state.ts";
@@ -72,12 +75,15 @@ export type SessionChangedEventInfo = {
 };
 
 export function sanitizeSessionRow(row: GatewaySessionRow): GatewaySessionRow {
-  const next = { ...row };
+  let next = row;
   for (const [key, value] of Object.entries(row)) {
     if (
       value === undefined ||
       (key === "totalTokensFresh" && value === false && row.totalTokens === undefined)
     ) {
+      if (next === row) {
+        next = { ...row };
+      }
       Reflect.deleteProperty(next, key);
     }
   }
@@ -85,8 +91,7 @@ export function sanitizeSessionRow(row: GatewaySessionRow): GatewaySessionRow {
 }
 
 export function isPersistedSessionRow(row: GatewaySessionRow): boolean {
-  const sessionId = typeof row.sessionId === "string" ? row.sessionId.trim() : "";
-  return Boolean(sessionId || typeof row.updatedAt === "number");
+  return Boolean(row.sessionId?.trim() || row.updatedAt != null);
 }
 
 export function preserveRosterPresentationMetadata(
@@ -97,7 +102,9 @@ export function preserveRosterPresentationMetadata(
     !existing ||
     !incoming.sessionId ||
     incoming.sessionId !== existing.sessionId ||
-    (incoming.derivedTitle !== undefined && incoming.lastMessagePreview !== undefined)
+    (incoming.derivedTitle !== undefined &&
+      incoming.lastMessagePreview !== undefined &&
+      incoming.lastAssistantMessage !== undefined)
   ) {
     return incoming;
   }
@@ -106,22 +113,25 @@ export function preserveRosterPresentationMetadata(
   if (incomingAgentId && existingAgentId && incomingAgentId !== existingAgentId) {
     return incoming;
   }
-  const row = { ...incoming };
-  for (const field of ["derivedTitle", "lastMessagePreview"] as const) {
+  let row = incoming;
+  for (const field of ["derivedTitle", "lastMessagePreview", "lastAssistantMessage"] as const) {
     if (incoming[field] === undefined && existing[field] !== undefined) {
-      row[field] = existing[field];
+      if (row === incoming) {
+        row = { ...incoming };
+      }
+      Object.assign(row, { [field]: existing[field] });
     }
   }
   return row;
 }
 
-export function isOlderSessionSnapshot(
+function isOlderSessionSnapshot(
   incoming: GatewaySessionRow,
   existing: GatewaySessionRow | undefined,
 ): boolean {
   return (
-    typeof incoming.updatedAt === "number" &&
-    typeof existing?.updatedAt === "number" &&
+    incoming.updatedAt != null &&
+    existing?.updatedAt != null &&
     incoming.updatedAt < existing.updatedAt
   );
 }
@@ -197,6 +207,10 @@ function recordValue(record: Record<string, unknown>, key: string): unknown {
   return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
+function recordString(record: Record<string, unknown>, key: string): string | undefined {
+  return stringValue(recordValue(record, key));
+}
+
 function sessionRunStatus(value: unknown): SessionRunStatus | null {
   return value === "running" ||
     value === "queued" ||
@@ -209,11 +223,10 @@ function sessionRunStatus(value: unknown): SessionRunStatus | null {
     : null;
 }
 
-type ParsedSessionChangedEvent = readonly [
+export type ParsedSessionChangedEvent = readonly [
   info: SessionChangedEventInfo,
   event: Record<string, unknown>,
   source: Record<string, unknown>,
-  reason: string | null,
 ];
 
 // Receipt admission is synchronous: the next event may already reference this row.
@@ -270,15 +283,12 @@ export function parseSessionChangedEvent(payload: unknown): ParsedSessionChanged
         ...session,
       }
     : event;
-  const key =
-    stringValue(recordValue(source, "key")) ?? stringValue(recordValue(event, "sessionKey"));
+  const key = recordString(source, "key") ?? recordString(event, "sessionKey");
   if (!key) {
     return null;
   }
-  const reason =
-    stringValue(recordValue(event, "reason")) ?? stringValue(recordValue(source, "reason")) ?? null;
-  const phase =
-    stringValue(recordValue(event, "phase")) ?? stringValue(recordValue(source, "phase"));
+  const reason = recordString(event, "reason") ?? recordString(source, "reason") ?? null;
+  const phase = recordString(event, "phase") ?? recordString(source, "phase");
   const sourceHasActiveRun = recordValue(source, "hasActiveRun");
   const hasActiveRun =
     typeof sourceHasActiveRun === "boolean"
@@ -295,7 +305,7 @@ export function parseSessionChangedEvent(payload: unknown): ParsedSessionChanged
     {
       key,
       reason,
-      sessionId: stringValue(recordValue(source, "sessionId")),
+      sessionId: recordString(source, "sessionId"),
       updatedAt: typeof updatedAt === "number" ? updatedAt : null,
       snapshotAt:
         typeof snapshotAt === "number" && Number.isFinite(snapshotAt) ? snapshotAt : undefined,
@@ -307,21 +317,12 @@ export function parseSessionChangedEvent(payload: unknown): ParsedSessionChanged
           : thinkingLevel === null
             ? null
             : undefined,
-      agentId: stringValue(recordValue(event, "agentId")) ?? null,
-      runId:
-        stringValue(recordValue(event, "runId")) ??
-        stringValue(recordValue(source, "runId")) ??
-        null,
+      agentId: recordString(event, "agentId") ?? null,
+      runId: recordString(event, "runId") ?? recordString(source, "runId") ?? null,
       clientRunId:
-        stringValue(recordValue(event, "clientRunId")) ??
-        stringValue(recordValue(source, "clientRunId")) ??
-        null,
+        recordString(event, "clientRunId") ?? recordString(source, "clientRunId") ?? null,
       hasActiveRun: typeof hasActiveRun === "boolean" ? hasActiveRun : null,
-      activeRunIds:
-        activeRunIds === null ||
-        (Array.isArray(activeRunIds) && activeRunIds.every((id) => typeof id === "string"))
-          ? activeRunIds
-          : undefined,
+      activeRunIds: activeRunIds === null || isStringArray(activeRunIds) ? activeRunIds : undefined,
       status:
         sessionRunStatus(recordValue(source, "status")) ??
         sessionRunStatus(recordValue(event, "status")),
@@ -337,7 +338,6 @@ export function parseSessionChangedEvent(payload: unknown): ParsedSessionChanged
     },
     event,
     source,
-    reason,
   ];
 }
 
@@ -413,6 +413,7 @@ export type SessionRowObservation = {
 
 type SessionRowReconcileOptions = SessionReconcileOptions & {
   preserveExisting?: boolean;
+  clearedFields?: readonly string[];
 };
 
 type RejectedRowDisposition =
@@ -486,6 +487,9 @@ export function reconcileSessionRow(
     ),
     existing,
   );
+  for (const field of options.clearedFields ?? []) {
+    Reflect.deleteProperty(admittedRow, field);
+  }
   if (isStaleForActiveSession(admittedRow, previous)) {
     return reject("stale-active");
   }
@@ -522,8 +526,17 @@ export function reconcileSessionChangedRow(
   if (!parsed) {
     return { applied: false, row: existing };
   }
-  const [info, event, source, reason] = parsed;
-  const { key } = info;
+  return reconcileParsedSessionChangedRow(existing, parsed, options, project);
+}
+
+export function reconcileParsedSessionChangedRow(
+  existing: GatewaySessionRow | undefined,
+  parsed: ParsedSessionChangedEvent,
+  options: SessionReconcileOptions & { admitSnapshot?: boolean } = {},
+  project?: SessionChangedRowProjection,
+): SessionChangedRowResult {
+  const [info, event, source] = parsed;
+  const { key, reason } = info;
   if (info.isAncestorReference) {
     return reconcileAncestorReference(existing, info, source, options, project);
   }
@@ -550,11 +563,8 @@ export function reconcileSessionChangedRow(
   ) {
     return { applied: false, key, agentId: null, row: existing };
   }
-  if (reason === "delete" && !info.sessionId) {
-    return { applied: false, key, agentId: info.agentId, row: existing };
-  }
   if (reason === "delete") {
-    if (existing && existing.sessionId !== info.sessionId) {
+    if (!info.sessionId || (existing && existing.sessionId !== info.sessionId)) {
       return { applied: false, key, agentId: info.agentId, row: existing };
     }
     return { applied: true, key, agentId: info.agentId, deletedKey: existing?.key ?? key };
@@ -607,10 +617,12 @@ export function reconcileSessionChangedRow(
     ...(sessionId ? { sessionId } : {}),
     ...(fullSnapshot && snapshotAgentId ? { agentId: snapshotAgentId } : {}),
   };
+  const clearedFields: string[] = [];
   // Optional wire fields use null as a tombstone; the explicit nullable fields keep null.
   for (const [field, value] of Object.entries(rowFields)) {
     if (value === null && !NULLABLE_SESSION_ROW_FIELDS.has(field)) {
       Reflect.deleteProperty(offered, field);
+      clearedFields.push(field);
     }
   }
   const fields = [
@@ -623,6 +635,7 @@ export function reconcileSessionChangedRow(
     {
       ...options,
       selectedGlobalAgentId: info.agentId ?? options.selectedGlobalAgentId ?? null,
+      clearedFields,
     },
     project && existing
       ? {

@@ -13,7 +13,7 @@ import {
   type ProviderAuthResult,
 } from "openclaw/plugin-sdk/provider-auth";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
-import { sleep } from "openclaw/plugin-sdk/runtime-env";
+import { sleep, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   asOptionalRecord,
@@ -42,42 +42,16 @@ const XAI_DEVICE_CODE_MIN_INTERVAL_MS = 1 * 1000;
 const XAI_DEVICE_CODE_SLOW_DOWN_INCREMENT_MS = 5 * 1000;
 const XAI_DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 
-type XaiDeviceCodeDiscovery = {
-  deviceAuthorizationEndpoint: string;
-  tokenEndpoint: string;
-};
-
-type XaiOAuthTokenResponse = {
-  accessToken: string;
-  refreshToken?: string;
-  expires?: number;
-  idToken?: string;
-};
-
-type XaiOAuthIdentity = {
-  email?: string;
-  displayName?: string;
-  accountId?: string;
-};
+type XaiOAuthTokenResponse = ReturnType<typeof parseXaiOAuthTokenResponse>;
 
 type XaiOAuthFetchOptions = {
   signal?: AbortSignal;
   assertCurrent?: () => void;
 };
 
-type XaiDeviceCodeResponse = {
-  deviceCode: string;
-  userCode: string;
-  verificationUri: string;
-  verificationUriComplete?: string;
-  expiresInMs: number;
-  intervalMs: number;
-};
+type XaiDeviceCodeResponse = Awaited<ReturnType<typeof requestXaiDeviceCode>>;
 
-type XaiOAuthResponseBody = {
-  json: unknown;
-  text: string;
-};
+type XaiOAuthResponseBody = Awaited<ReturnType<typeof readResponseBody>>;
 
 function fetchXaiOAuth(url: string, options: XaiOAuthFetchOptions, body?: Record<string, string>) {
   // The guard rechecks authority after DNS and each redirect; raw fetch follows
@@ -120,7 +94,7 @@ function requireTrustedXaiOAuthEndpoint(endpoint: string, label: string): string
 async function readResponseBody(
   { response, release }: Awaited<ReturnType<typeof fetchXaiOAuth>>,
   options: { fatalUtf8?: boolean } = {},
-): Promise<XaiOAuthResponseBody> {
+) {
   try {
     const buffer = await readResponseWithLimit(response, XAI_OAUTH_RESPONSE_MAX_BYTES, {
       onOverflow: ({ maxBytes }) => new Error(`xAI OAuth response exceeds ${maxBytes} bytes`),
@@ -161,9 +135,7 @@ async function fetchXaiOAuthDiscoveryDocument(
   return asOptionalRecord(await readJsonResponse(response, "xAI OAuth discovery")) ?? {};
 }
 
-async function fetchXaiDeviceCodeDiscovery(
-  options: XaiOAuthFetchOptions = {},
-): Promise<XaiDeviceCodeDiscovery> {
+async function fetchXaiDeviceCodeDiscovery(options: XaiOAuthFetchOptions = {}) {
   const json = await fetchXaiOAuthDiscoveryDocument(options);
   const deviceAuthorizationEndpoint = json.device_authorization_endpoint;
   const tokenEndpoint = json.token_endpoint;
@@ -182,7 +154,7 @@ async function fetchXaiDeviceCodeDiscovery(
 function parseXaiOAuthTokenResponse(
   value: unknown,
   options: { requireRefreshToken?: boolean } = {},
-): XaiOAuthTokenResponse {
+) {
   const json = asOptionalRecord(value) ?? {};
   const accessToken = readNonBlankString(json.access_token);
   if (!accessToken) {
@@ -304,7 +276,7 @@ async function requestXaiDeviceCode(
   params: {
     deviceAuthorizationEndpoint: string;
   } & XaiOAuthFetchOptions,
-): Promise<XaiDeviceCodeResponse> {
+) {
   const response = await fetchXaiOAuth(
     requireTrustedXaiOAuthEndpoint(
       params.deviceAuthorizationEndpoint,
@@ -413,26 +385,14 @@ async function pollXaiDeviceCodeToken(
 }
 
 async function waitForXaiDeviceCodePoll(delayMs: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, delayMs);
-    });
-    return;
-  }
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timeout);
-      reject(signal.reason instanceof Error ? signal.reason : new Error("xAI login cancelled"));
-    };
-    const timeout = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, delayMs);
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) {
-      onAbort();
+  try {
+    await sleepWithAbort(delayMs, signal);
+  } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("xAI login cancelled");
     }
-  });
+    throw error;
+  }
 }
 
 function decodeJwtPayload(token: string | undefined): Record<string, unknown> {
@@ -450,7 +410,7 @@ function decodeJwtPayload(token: string | undefined): Record<string, unknown> {
   }
 }
 
-function resolveXaiOAuthIdentity(tokens: XaiOAuthTokenResponse): XaiOAuthIdentity {
+function resolveXaiOAuthIdentity(tokens: XaiOAuthTokenResponse) {
   const payload = decodeJwtPayload(tokens.idToken ?? tokens.accessToken);
   const email = typeof payload.email === "string" ? payload.email : undefined;
   const name = typeof payload.name === "string" ? payload.name : undefined;

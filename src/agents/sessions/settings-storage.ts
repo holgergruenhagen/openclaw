@@ -1,6 +1,8 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { replaceFileAtomicSync } from "@openclaw/fs-safe/atomic";
+import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { acquireFileLockSyncWithRetry } from "../../infra/file-lock-sync.js";
 import { resolveJsonSaveTarget } from "../../infra/json-file.js";
 import type { ThinkingBudgets, Transport } from "../../llm/types.js";
@@ -124,22 +126,32 @@ export interface SettingsError {
   error: Error;
 }
 
-function replaceSettingsFile(path: string, content: string): void {
-  const savePath = resolveJsonSaveTarget(path);
-  const saveDir = realpathSync(dirname(savePath));
-  const canonicalSavePath = join(saveDir, basename(savePath));
-
-  // The atomic helper enforces explicit modes. Carry the existing parent mode
-  // and Node's writeFile creation mode forward so replacement changes no permissions.
-  // Keep rename failures fail-closed: copy fallback can expose a partial destination.
-  replaceFileAtomicSync({
-    filePath: canonicalSavePath,
-    content,
-    dirMode: statSync(saveDir).mode & 0o7777,
-    mode: 0o666 & ~process.umask(),
-    preserveExistingMode: true,
-    tempPrefix: basename(canonicalSavePath),
-  });
+/** Read one scope without applying runtime-specific settings validation or defaults. */
+export function readSettingsScope(
+  storage: SettingsStorage,
+  scope: SettingsScope,
+): { settings: Settings; loadError: Error | null } {
+  try {
+    let content: string | undefined;
+    if (storage.readSettingsScope) {
+      content = storage.readSettingsScope(scope);
+    } else {
+      storage.withLock(scope, (current) => {
+        content = current;
+        return undefined;
+      });
+    }
+    const settings: unknown = content ? JSON.parse(content) : {};
+    if (!isRecord(settings)) {
+      throw new TypeError("Session settings must be an object");
+    }
+    return { settings, loadError: null };
+  } catch (error) {
+    return {
+      settings: {},
+      loadError: toErrorObject(error, "Session settings could not be loaded"),
+    };
+  }
 }
 
 export class FileSettingsStorage implements SettingsStorage {
@@ -180,7 +192,21 @@ export class FileSettingsStorage implements SettingsStorage {
       const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
       const next = fn(current);
       if (next !== undefined) {
-        replaceSettingsFile(path, next);
+        const savePath = resolveJsonSaveTarget(path);
+        const saveDir = realpathSync(dirname(savePath));
+        const canonicalSavePath = join(saveDir, basename(savePath));
+
+        // The atomic helper enforces explicit modes. Carry the existing parent mode
+        // and Node's writeFile creation mode forward so replacement changes no permissions.
+        // Keep rename failures fail-closed: copy fallback can expose a partial destination.
+        replaceFileAtomicSync({
+          filePath: canonicalSavePath,
+          content: next,
+          dirMode: statSync(saveDir).mode & 0o7777,
+          mode: 0o666 & ~process.umask(),
+          preserveExistingMode: true,
+          tempPrefix: basename(canonicalSavePath),
+        });
       }
     } finally {
       release();

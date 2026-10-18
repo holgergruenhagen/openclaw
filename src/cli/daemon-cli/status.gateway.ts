@@ -31,25 +31,6 @@ type GatewayStatusSummary = {
 
 type PortStatusSummary = Pick<PortUsage, "port" | "status" | "listeners" | "hints">;
 
-type ResolvedGatewayStatus = {
-  gateway: GatewayStatusSummary;
-  daemonPort: number;
-  cliPort: number;
-  probeUrl: string;
-  probeUrlOverride: string | null;
-};
-
-function appendProbeNote(
-  existing: string | undefined,
-  extra: string | undefined,
-): string | undefined {
-  const values = [existing, extra].filter((value): value is string => Boolean(value?.trim()));
-  if (values.length === 0) {
-    return undefined;
-  }
-  return uniqueStrings(values).join(" ");
-}
-
 export function resolveGatewayStatusProbeConfig(params: {
   config: OpenClawConfig;
   hasUrlOverride: boolean;
@@ -85,7 +66,7 @@ export async function resolveGatewayStatusSummary(params: {
   commandProgramArguments?: string[];
   rpcUrlOverride?: string;
   localPortOverride?: number;
-}): Promise<ResolvedGatewayStatus> {
+}) {
   const portFromArgs = parseTcpPortFromArgs(params.commandProgramArguments);
   const daemonPort =
     params.localPortOverride ??
@@ -122,27 +103,31 @@ export async function resolveGatewayStatusSummary(params: {
           basePath: params.daemonCfg.gateway?.controlUi?.basePath,
           tlsEnabled,
         });
-  let probeNote =
+  const bindNote =
     !probeUrlOverride && bindMode === "lan"
-      ? `bind=lan listens on 0.0.0.0 (all interfaces); probing via ${probeHost}.`
+      ? `bind=lan listens on 0.0.0.0 (all interfaces); checking via ${probeHost}.`
       : !probeUrlOverride && bindMode === "loopback"
         ? "Loopback-only gateway; only local clients can connect."
         : undefined;
-  probeNote = appendProbeNote(probeNote, bindHostWarning);
-  probeNote = appendProbeNote(probeNote, tailnetWarning);
+  const probeNote = uniqueStrings(
+    [bindNote, bindHostWarning, tailnetWarning].filter((value): value is string =>
+      Boolean(value?.trim()),
+    ),
+  ).join(" ");
 
+  const gateway: GatewayStatusSummary = {
+    bindMode,
+    bindHost,
+    customBindHost,
+    ...(tlsEnabled ? { tlsEnabled } : {}),
+    port: daemonPort,
+    portSource,
+    probeUrl: diagnosticProbeUrl,
+    ...(controlUiLinks ? { controlUiLinks } : {}),
+    ...(probeNote ? { probeNote } : {}),
+  };
   return {
-    gateway: {
-      bindMode,
-      bindHost,
-      customBindHost,
-      ...(tlsEnabled ? { tlsEnabled } : {}),
-      port: daemonPort,
-      portSource,
-      probeUrl: diagnosticProbeUrl,
-      ...(controlUiLinks ? { controlUiLinks } : {}),
-      ...(probeNote ? { probeNote } : {}),
-    },
+    gateway,
     daemonPort,
     cliPort: resolveGatewayPort(params.cliCfg, process.env),
     probeUrl,

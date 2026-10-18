@@ -1,4 +1,4 @@
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { isRecord, isStringArray } from "@openclaw/normalization-core/record-coerce";
 import {
   arrayItemSchema,
   arrayItemSchemaIndexes,
@@ -160,9 +160,8 @@ function hasOnlySupportedFormKeywords(schema: JsonSchema): boolean {
   }
   const required = schema.not.required;
   return (
-    Array.isArray(required) &&
+    isStringArray(required) &&
     required.length > 0 &&
-    required.every((key) => typeof key === "string") &&
     Object.keys(schema.not).every((key) => key === "required" || META_KEYS.has(key))
   );
 }
@@ -264,6 +263,12 @@ function normalizeSchemaNode(
     };
   }
   const unsupported = new Set<string>();
+  const includeAnalysis = (result: NormalizedConfigSchema): JsonSchema => {
+    for (const unsupportedPath of result.unsupportedPaths) {
+      unsupported.add(unsupportedPath);
+    }
+    return result.schema;
+  };
   const normalized: JsonSchema = { ...schema };
   const pathLabel = pathKey(path) || "<root>";
 
@@ -275,8 +280,8 @@ function normalizeSchemaNode(
     const union = normalizeUnion(schema, path);
     if (union) {
       return {
-        schema: union.schema,
-        unsupportedPaths: Array.from(new Set([...unsupported, ...union.unsupportedPaths])),
+        schema: includeAnalysis(union),
+        unsupportedPaths: Array.from(unsupported),
       };
     }
     return { schema, unsupportedPaths: [pathLabel] };
@@ -324,11 +329,9 @@ function normalizeSchemaNode(
         }
         continue;
       }
-      const result = normalizeSchemaNode(entry, path, true, type, allowsNull);
-      normalizedAllOf.push(result.schema);
-      for (const unsupportedPath of result.unsupportedPaths) {
-        unsupported.add(unsupportedPath);
-      }
+      normalizedAllOf.push(
+        includeAnalysis(normalizeSchemaNode(entry, path, true, type, allowsNull)),
+      );
     }
     normalized.allOf = normalizedAllOf;
   }
@@ -362,11 +365,7 @@ function normalizeSchemaNode(
       }
       return child;
     }
-    const result = normalizeSchemaNode(child, childPath, compositionBranch);
-    for (const unsupportedPath of result.unsupportedPaths) {
-      unsupported.add(unsupportedPath);
-    }
-    return result.schema;
+    return includeAnalysis(normalizeSchemaNode(child, childPath, compositionBranch));
   };
 
   if (type === "object" && (!inheritedCompositionOnly || hasLocalObjectStructure)) {
@@ -395,10 +394,7 @@ function normalizeSchemaNode(
         if (!effectiveSchema) {
           continue;
         }
-        const result = normalizeSchemaNode(effectiveSchema, [...path, key]);
-        for (const unsupportedPath of result.unsupportedPaths) {
-          unsupported.add(unsupportedPath);
-        }
+        includeAnalysis(normalizeSchemaNode(effectiveSchema, [...path, key]));
       }
     }
 
@@ -447,10 +443,7 @@ function normalizeSchemaNode(
         if (!effectiveSchema) {
           continue;
         }
-        const result = normalizeSchemaNode(effectiveSchema, [...path, index]);
-        for (const unsupportedPath of result.unsupportedPaths) {
-          unsupported.add(unsupportedPath);
-        }
+        includeAnalysis(normalizeSchemaNode(effectiveSchema, [...path, index]));
       }
     }
   } else if (

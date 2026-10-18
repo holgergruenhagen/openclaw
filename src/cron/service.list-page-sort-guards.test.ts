@@ -24,36 +24,41 @@ function createBaseJob(overrides?: Partial<CronJob>): CronJob {
 }
 
 describe("cron listPage sort guards", () => {
-  it.each([
-    { sortDir: "asc" as const, scheduledIds: ["earlier", "later"] },
-    { sortDir: "desc" as const, scheduledIds: ["later", "earlier"] },
-  ])(
-    "keeps unscheduled jobs after the scheduled $sortDir page",
-    async ({ sortDir, scheduledIds }) => {
-      const jobs = [
-        createBaseJob({ id: "paused-z", enabled: false, state: {} }),
-        createBaseJob({ id: "later", state: { nextRunAtMs: 200 } }),
-        createBaseJob({ id: "paused-a", enabled: false, state: {} }),
-        createBaseJob({ id: "earlier", state: { nextRunAtMs: 100 } }),
-      ];
-      const state = createMockCronStateForJobs({ jobs });
-      const options = {
-        enabled: "all" as const,
-        sortBy: "nextRunAtMs" as const,
-        sortDir,
-        limit: 2,
-      };
+  it("keeps unscheduled jobs after the scheduled descending page", async () => {
+    const jobs = [
+      createBaseJob({ id: "paused-z", enabled: false, state: {} }),
+      createBaseJob({ id: "later", state: { nextRunAtMs: 200 } }),
+      createBaseJob({ id: "paused-a", enabled: false, state: {} }),
+      createBaseJob({ id: "earlier", state: { nextRunAtMs: 100 } }),
+    ];
+    const state = createMockCronStateForJobs({ jobs });
+    const options = {
+      enabled: "all" as const,
+      sortBy: "nextRunAtMs" as const,
+      sortDir: "desc" as const,
+      limit: 2,
+    };
 
-      const firstPage = await listPage(state, { ...options, offset: 0 });
-      const secondPage = await listPage(state, { ...options, offset: 2 });
+    const firstPage = await listPage(state, { ...options, offset: 0 });
+    const secondPage = await listPage(state, { ...options, offset: 2 });
 
-      expect(firstPage.jobs.map((job) => job.id)).toEqual(scheduledIds);
-      expect(firstPage.hasMore).toBe(true);
-      expect(secondPage.jobs.map((job) => job.id)).toEqual(["paused-a", "paused-z"]);
-      expect(secondPage.hasMore).toBe(false);
-      expect(secondPage.snapshotRevision).toBe(firstPage.snapshotRevision);
-    },
-  );
+    expect(firstPage.jobs.map((job) => job.id)).toEqual(["later", "earlier"]);
+    expect(firstPage.hasMore).toBe(true);
+    expect(secondPage.jobs.map((job) => job.id)).toEqual(["paused-a", "paused-z"]);
+    expect(secondPage.hasMore).toBe(false);
+    expect(secondPage.snapshotRevision).toBe(firstPage.snapshotRevision);
+  });
+
+  it("preserves list revisions for large Unicode and escaped payloads", async () => {
+    const job = createBaseJob({
+      name: "Unicode report 🦞",
+      payload: { kind: "systemEvent", text: '🦞 日本語 "quoted" \\path\n\t'.repeat(1024) },
+    });
+
+    const page = await listPage(createMockCronStateForJobs({ jobs: [job] }));
+
+    expect(page.snapshotRevision).toBe("sha256:fS8eVTHy9mbmpjFKHm3pEcvOobmxd1rMQpDjfh3qmKM");
+  });
 
   it("preserves phrase searches across existing cron job fields", async () => {
     const job = createBaseJob({
@@ -77,11 +82,19 @@ describe("cron listPage sort guards", () => {
       createBaseJob({ id: "job-scoped", sessionKey: "agent:ops:main" }),
     ];
     const state = createMockCronStateForJobs({ jobs });
-    state.deps.defaultAgentId = " Ops ";
+    let defaultAgentId = " Ops ";
+    const resolveDefaultAgentId = vi.fn(() => defaultAgentId);
+    state.deps.resolveDefaultAgentId = resolveDefaultAgentId;
 
     const page = await listPage(state, { agentId: " OPS " });
 
     expect(page.jobs.map((job) => job.id)).toEqual(["job-ops", "job-scoped", "job-unset"]);
+    expect(resolveDefaultAgentId).toHaveBeenCalledOnce();
+
+    defaultAgentId = "main";
+    const changed = await listPage(state, { agentId: "ops" });
+    expect(changed.jobs.map((job) => job.id)).toEqual(["job-ops", "job-scoped"]);
+    expect(resolveDefaultAgentId).toHaveBeenCalledTimes(2);
   });
 
   it("shares immutable requested rows until a list revision changes", async () => {

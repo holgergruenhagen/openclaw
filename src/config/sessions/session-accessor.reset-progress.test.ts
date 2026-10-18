@@ -24,12 +24,13 @@ import { resolveSqliteTargetFromSessionStorePath } from "./session-sqlite-target
 
 it.each(
   (["single", "batched"] as const).flatMap((writer) =>
-    (["clear", "preserve-tail"] as const).flatMap((context) =>
-      (context === "clear" ? [false, true] : [false]).map((rollback) => ({
-        writer,
-        context,
-        rollback,
-      })),
+    (writer === "single" ? (["clear"] as const) : (["clear", "preserve-tail"] as const)).flatMap(
+      (context) =>
+        (context === "clear" ? [false, true] : [false]).map((rollback) => ({
+          writer,
+          context,
+          rollback,
+        })),
     ),
   ),
 )(
@@ -110,14 +111,12 @@ it.each(
           expect(loadSessionEntry(scope)).toEqual(entryBefore);
           expect(await loadTranscriptEvents(scope)).toEqual(historyBefore);
         } else {
-          const sql = writer === "batched" ? observeHostDataSql() : undefined;
+          const sql = observeHostDataSql();
           try {
             await reset();
-            if (sql) {
-              expect(sql.queries, "batched reset caller-thread SQL").toEqual([]);
-            }
+            expect(sql.queries, `${writer} reset caller-thread SQL`).toEqual([]);
           } finally {
-            sql?.restore();
+            sql.restore();
           }
         }
       } finally {

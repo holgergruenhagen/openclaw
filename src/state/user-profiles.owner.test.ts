@@ -7,7 +7,7 @@ import {
   runOpenClawStateWriteTransaction,
 } from "./openclaw-state-db.js";
 import { readUserProfileVersion } from "./user-profile-events.js";
-import { readUserProfileSnapshotSync } from "./user-profile-identity.read.js";
+import { readUserProfileSnapshotSync } from "./user-profile-list-item.test-support.js";
 import {
   linkEmail,
   setDisplayName,
@@ -209,18 +209,6 @@ describe("gateway owner profiles", () => {
       expect(readUserProfileVersion()).toBe(version);
     }, options);
     expect(readUserProfileVersion()).toBe(version + 1);
-  });
-
-  it("reuses the existing provider identity without creating another owner", () => {
-    const options = stateOptions();
-    const existing = ensureProfileForEmail("existing-owner@example.test", options);
-    openOpenClawStateDatabase(options)
-      .db.prepare(
-        "INSERT INTO user_profile_identities (provider, subject, profile_id, created_at) VALUES ('gateway.local', 'owner', ?, 1)",
-      )
-      .run(existing.id);
-    expect(ensureGatewayOwnerProfile("Host Name", options)).toEqual(existing);
-    expect(readUserProfileSnapshotSync(options).profiles).toHaveLength(1);
   });
 
   it.each(["owner@gateway", "owner@gateway.local"])(

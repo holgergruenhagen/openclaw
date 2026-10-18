@@ -18,13 +18,12 @@ export function shouldHandleNavigationClick(event: MouseEvent): boolean {
   );
 }
 
+/** Delegated clicks may originate in caller-owned light DOM or shadow-root islands. */
 export function anchorFromNavigationEvent(event: Event): HTMLAnchorElement | null {
-  for (const target of event.composedPath()) {
-    if (target instanceof HTMLAnchorElement) {
-      return target;
-    }
-  }
-  return event.target instanceof Element ? event.target.closest("a") : null;
+  return (
+    event.composedPath().find((target) => target instanceof HTMLAnchorElement) ??
+    (event.target instanceof Element ? event.target.closest("a") : null)
+  );
 }
 
 /** External web links that may be handed to a browser surface. */

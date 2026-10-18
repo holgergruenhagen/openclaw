@@ -160,13 +160,9 @@ export async function ensureContainerImage(engine: SandboxContainerEngine, image
 
 function normalizeDockerLimit(value?: string | number) {
   if (typeof value === "number") {
-    return Number.isFinite(value) ? String(value) : undefined;
+    return String(value);
   }
   return normalizeOptionalString(value);
-}
-
-function normalizeFiniteDockerNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
 
 function formatUlimitValue(
@@ -177,16 +173,13 @@ function formatUlimitValue(
     return null;
   }
   if (typeof value === "number") {
-    const normalized = normalizeFiniteDockerNumber(value);
-    return normalized === undefined ? null : `${name}=${normalized}`;
+    return `${name}=${Math.max(0, value)}`;
   }
   if (typeof value === "string") {
     const raw = value.trim();
     return raw ? `${name}=${raw}` : null;
   }
-  const soft = normalizeFiniteDockerNumber(value.soft);
-  const hard = normalizeFiniteDockerNumber(value.hard);
-  const limits = [soft, hard].filter((limit) => limit !== undefined);
+  const limits = [value.soft, value.hard].filter((limit) => limit !== undefined);
   return limits.length ? `${name}=${limits.join(":")}` : null;
 }
 
@@ -268,25 +261,16 @@ export function buildSandboxCreateArgs(params: {
       args.push("--add-host", entry);
     }
   }
-  const pidsLimit = normalizeFiniteDockerNumber(params.cfg.pidsLimit);
-  if (pidsLimit !== undefined && pidsLimit > 0) {
-    args.push("--pids-limit", String(pidsLimit));
-  }
-  const memory = normalizeDockerLimit(params.cfg.memory);
-  if (memory) {
-    args.push("--memory", memory);
-  }
-  const memorySwap = normalizeDockerLimit(params.cfg.memorySwap);
-  if (memorySwap) {
-    args.push("--memory-swap", memorySwap);
-  }
-  const cpus = normalizeFiniteDockerNumber(params.cfg.cpus);
-  if (cpus !== undefined && cpus > 0) {
-    args.push("--cpus", String(cpus));
-  }
-  const gpus = params.cfg.gpus?.trim();
-  if (gpus) {
-    args.push("--gpus", gpus);
+  for (const [flag, value] of [
+    ["--pids-limit", params.cfg.pidsLimit],
+    ["--memory", normalizeDockerLimit(params.cfg.memory)],
+    ["--memory-swap", normalizeDockerLimit(params.cfg.memorySwap)],
+    ["--cpus", params.cfg.cpus],
+    ["--gpus", params.cfg.gpus?.trim()],
+  ] as const) {
+    if (value) {
+      args.push(flag, String(value));
+    }
   }
   for (const [name, value] of Object.entries(params.cfg.ulimits ?? {})) {
     const formatted = formatUlimitValue(name, value);
@@ -513,7 +497,7 @@ async function ensureSandboxContainerLifecycle(
   let running = state.running;
   let currentHash: string | null = null;
   let hashMismatch = false;
-  const registryEntry = existingRegistryEntry ?? undefined;
+  const registryEntry = existingRegistryEntry;
   if (hasContainer) {
     if (registryEntry?.runtimeState === "pending") {
       throw new Error(
@@ -566,8 +550,8 @@ async function ensureSandboxContainerLifecycle(
     ...(podmanRuntimeInfo ? { backendTarget: podmanRuntimeInfo.target } : {}),
     runtimeLabel: containerName,
     sessionKey: params.scopeKey,
-    workspaceDir: params.workspaceDir,
-    createdAtMs: now,
+    workspaceDir: registryEntry?.workspaceDir ?? params.workspaceDir,
+    createdAtMs: registryEntry?.createdAtMs ?? now,
     lastUsedAtMs: now,
     image: params.cfg.docker.image,
     configLabelKind: "Image" as const,

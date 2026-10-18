@@ -1,4 +1,3 @@
-/** Session-scoped embedded LSP runtime and tool materialization for agent bundles. */
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createAbortError } from "../infra/abort-signal.js";
@@ -15,12 +14,12 @@ import {
 import { createPendingRequestRegistry } from "../shared/pending-request-registry.js";
 import { settlesWithin } from "../shared/settle-within.js";
 import { spawnLspServerProcess } from "./agent-bundle-lsp-process.js";
+import { normalizeReservedToolNames } from "./agent-bundle-mcp-names.js";
 import {
   resolveStdioMcpServerLaunchConfig,
   describeStdioMcpServerLaunchConfig,
 } from "./mcp-stdio.js";
 import { recordAgentCleanupFailure } from "./run-cleanup-timeout.js";
-import type { AgentToolResult } from "./runtime/index.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
 type LspSession = {
@@ -48,7 +47,6 @@ type LspServerCapabilities = {
   [key: string]: unknown;
 };
 
-/** Materialized LSP tools plus session capabilities and cleanup handle. */
 type BundleLspToolRuntime = {
   tools: AnyAgentTool[];
   sessions: Array<{ serverName: string; capabilities: LspServerCapabilities }>;
@@ -65,20 +63,6 @@ type LspPositionParams = {
 const LSP_SHUTDOWN_GRACE_MS = 500;
 const LSP_PROCESS_TREE_KILL_GRACE_MS = 1_000;
 const activeBundleLspSessions = new Set<LspSession>();
-
-function createLspSession(serverName: string, child: OwnedStdioProcess): LspSession {
-  return {
-    serverName,
-    process: child,
-    requestId: 0,
-    pendingRequests: createPendingRequestRegistry<number, unknown, undefined>(),
-    input: { buffer: Buffer.alloc(0), length: 0 },
-    initialized: false,
-    capabilities: {},
-    disposed: false,
-    forceClose: false,
-  };
-}
 
 function failLspSession(session: LspSession, error: Error): void {
   session.failure ??= error;
@@ -114,11 +98,8 @@ function attachLspProcessHandlers(session: LspSession): void {
     () => {},
     (chunk) => handleIncomingData(session, chunk),
   );
-  session.process.onStderr((chunk) => {
-    for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
-      logDebug(`bundle-lsp:${session.serverName}: ${line.trim()}`);
-    }
-  });
+  // Drain the pipe without recording server output, which can contain file/tool content.
+  session.process.onStderr(() => {});
 }
 
 function encodeLspMessage(body: unknown): string {
@@ -481,7 +462,14 @@ function createLspPositionTool(params: {
         },
         signal,
       );
-      return formatLspResult(params.session.serverName, params.method, result);
+      const text =
+        result !== null && result !== undefined
+          ? JSON.stringify(result, null, 2)
+          : `No ${params.method} result from ${params.session.serverName}`;
+      return {
+        content: [{ type: "text", text }],
+        details: { lspServer: params.session.serverName, lspMethod: params.method },
+      };
     },
   };
 }
@@ -510,21 +498,6 @@ function buildLspTools(session: LspSession): AnyAgentTool[] {
     .map((definition) => createLspPositionTool({ session, ...definition }));
 }
 
-function formatLspResult(
-  serverName: string,
-  method: string,
-  result: unknown,
-): AgentToolResult<unknown> {
-  const text =
-    result !== null && result !== undefined
-      ? JSON.stringify(result, null, 2)
-      : `No ${method} result from ${serverName}`;
-  return {
-    content: [{ type: "text", text }],
-    details: { lspServer: serverName, lspMethod: method },
-  };
-}
-
 export async function createBundleLspToolRuntime(params: {
   workspaceDir: string;
   cfg?: OpenClawConfig;
@@ -545,11 +518,7 @@ export async function createBundleLspToolRuntime(params: {
     return { tools: [], sessions: [], dispose: async () => {} };
   }
 
-  const reservedNames = new Set(
-    Array.from(params.reservedToolNames ?? [], (name) =>
-      normalizeOptionalLowercaseString(name),
-    ).filter(Boolean),
-  );
+  const reservedNames = normalizeReservedToolNames(params.reservedToolNames);
   const sessions: LspSession[] = [];
   const tools: AnyAgentTool[] = [];
 
@@ -565,10 +534,20 @@ export async function createBundleLspToolRuntime(params: {
       let session: LspSession | undefined;
 
       try {
-        session = createLspSession(
+        const child = await spawnLspServerProcess(launchConfig, {
+          abortSignal: params.abortSignal,
+        });
+        session = {
           serverName,
-          await spawnLspServerProcess(launchConfig, { abortSignal: params.abortSignal }),
-        );
+          process: child,
+          requestId: 0,
+          pendingRequests: createPendingRequestRegistry<number, unknown, undefined>(),
+          input: { buffer: Buffer.alloc(0), length: 0 },
+          initialized: false,
+          capabilities: {},
+          disposed: false,
+          forceClose: false,
+        };
         activeBundleLspSessions.add(session);
         attachLspProcessHandlers(session);
         throwIfLspAborted(params.abortSignal);
@@ -597,10 +576,6 @@ export async function createBundleLspToolRuntime(params: {
           });
           tools.push(tool);
         }
-
-        logDebug(
-          `bundle-lsp: started "${serverName}" (${describeStdioMcpServerLaunchConfig(launchConfig)}) with ${serverTools.length} tools`,
-        );
       } catch (error) {
         if (session) {
           await disposeSessions([session]);

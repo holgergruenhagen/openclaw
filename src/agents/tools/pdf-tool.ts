@@ -1,5 +1,6 @@
 import { normalizeMimeType } from "@openclaw/media-core/mime";
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { asRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -53,7 +54,8 @@ import {
 import {
   applyAgentDefaultModelConfig,
   hasToolModelConfig,
-  prepareToolAuthProfileStoreSource,
+  prepareToolAuthProfileStore,
+  loadLegacyToolAuthProfileStore,
 } from "./model-config.helpers.js";
 import { anthropicAnalyzePdf, geminiAnalyzePdf } from "./pdf-native-providers.js";
 import {
@@ -128,16 +130,20 @@ export function createPdfTool(options?: {
 
   const shouldDeferAutoModelResolution =
     options?.deferAutoModelResolution === true && !hasExplicitModelConfig;
+  const resolveInitialModelConfig = (authStore: AuthProfileStore | undefined) =>
+    resolvePdfModelConfigForTool({
+      cfg: options?.config,
+      agentDir,
+      workspaceDir: options?.workspaceDir,
+      authStore,
+      activeModel: options?.activeModel,
+    });
   const registrationPdfModelConfig = shouldDeferAutoModelResolution
     ? null
-    : resolvePdfModelConfigForTool({
-        cfg: options?.config,
-        agentDir,
-        workspaceDir: options?.workspaceDir,
-        authStore: options?.authProfileStore,
-        authProfileStoreSource: options?.authProfileStoreSource,
-        activeModel: options?.activeModel,
-      });
+    : resolveInitialModelConfig(
+        options?.authProfileStore ??
+          (hasExplicitModelConfig ? undefined : loadLegacyToolAuthProfileStore(agentDir)),
+      );
   if (!registrationPdfModelConfig && !shouldDeferAutoModelResolution) {
     return null;
   }
@@ -185,20 +191,13 @@ export function createPdfTool(options?: {
     const password = typeof record.password === "string" ? record.password : undefined;
 
     let pdfModelConfig = registrationPdfModelConfig;
-    let authProfileStoreSource = options?.authProfileStoreSource;
+    const authProfileStoreSource = options?.authProfileStoreSource;
     if (!pdfModelConfig) {
-      authProfileStoreSource = await prepareToolAuthProfileStoreSource(options);
+      const authStore = await prepareToolAuthProfileStore(options);
       signal?.throwIfAborted();
       assertResourcesOpen?.();
       operatorAuthority?.assertCurrent();
-      pdfModelConfig = resolvePdfModelConfigForTool({
-        cfg: options?.config,
-        agentDir,
-        workspaceDir: options?.workspaceDir,
-        authStore: options?.authProfileStore,
-        authProfileStoreSource,
-        activeModel: options?.activeModel,
-      });
+      pdfModelConfig = resolveInitialModelConfig(authStore);
     }
     if (!pdfModelConfig) {
       throw new ToolInputError("No PDF model configured.");
@@ -252,22 +251,22 @@ export function createPdfTool(options?: {
         throw new Error("PDF reference resolved without a path.");
       }
 
-      const media = sandboxConfig
-        ? await loadWebMediaRaw(resolvedPath, {
-            maxBytes,
-            sandboxValidated: true,
-            readFile: createSandboxBridgeReadFile({ sandbox: sandboxConfig }),
-          })
-        : await loadWebMediaRaw(resolvedPath, {
-            maxBytes,
-            localRoots,
-            ...(options?.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
-            ...(isHttpUrl ? { readIdleTimeoutMs: REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS } : {}),
-            ssrfPolicy: remoteMediaSsrfPolicy,
-            // Forward the run abort signal into the fetch layer so an abort
-            // mid-download disconnects the in-flight socket.
-            ...(signal ? { requestInit: { signal } } : {}),
-          });
+      const media = await loadWebMediaRaw(resolvedPath, {
+        maxBytes,
+        ...(sandboxConfig
+          ? {
+              sandboxValidated: true,
+              readFile: createSandboxBridgeReadFile({ sandbox: sandboxConfig }),
+            }
+          : {
+              localRoots,
+              ...(options?.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
+              ...(isHttpUrl ? { readIdleTimeoutMs: REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS } : {}),
+              ssrfPolicy: remoteMediaSsrfPolicy,
+              // An aborted run must disconnect its in-flight download.
+              ...(signal ? { requestInit: { signal } } : {}),
+            }),
+      });
 
       if (normalizeMimeType(media.contentType) !== "application/pdf") {
         throw new Error(`Expected PDF but got ${media.contentType ?? media.kind}: ${pdfRaw}`);
@@ -346,9 +345,9 @@ export function createPdfTool(options?: {
     }
     const runtimeAgentDir = preparedRuntime.agentDir;
     const runtimeWorkspaceDir = preparedRuntime.workspaceDir ?? workspaceDir;
-    const runtimeAuthProfileStoreSource = hasExplicitPdfToolModelConfig(preparedRuntime.config)
-      ? authProfileStoreSource
-      : await prepareToolAuthProfileStoreSource({
+    const runtimeAuthProfileStore = hasExplicitPdfToolModelConfig(preparedRuntime.config)
+      ? authProfileStore
+      : await prepareToolAuthProfileStore({
           agentDir: runtimeAgentDir,
           authProfileStore,
           authProfileStoreSource,
@@ -359,8 +358,7 @@ export function createPdfTool(options?: {
       cfg: preparedRuntime.config,
       agentDir: runtimeAgentDir,
       ...(runtimeWorkspaceDir ? { workspaceDir: runtimeWorkspaceDir } : {}),
-      authStore: authProfileStore,
-      authProfileStoreSource: runtimeAuthProfileStoreSource,
+      authStore: runtimeAuthProfileStore,
       activeModel,
     });
     if (!committedPdfModelConfig) {
@@ -577,10 +575,7 @@ export function createPdfTool(options?: {
     description,
     parameters: PdfToolSchema,
     execute: async (_toolCallId, args, signal) => {
-      const record: Record<string, unknown> = args && typeof args === "object" ? { ...args } : {};
-      if (Array.isArray(record.pdfs)) {
-        record.pdfs = [...record.pdfs];
-      }
+      const record = asRecord(args);
       return runWithAsyncWorkResources(async (onAcquired) => {
         const runtimeResources = new AsyncDisposableStack();
         const capturedOperator = await captureAmbientGatewayOperatorAuthority({

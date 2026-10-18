@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { hasErrnoCode } from "../infra/errno.js";
 import { safePathSegmentHashed } from "../infra/install-safe-path.js";
 import { isPathInside } from "../infra/path-guards.js";
 import {
@@ -14,13 +15,31 @@ import { listPluginNpmProjectCandidatesSync } from "./npm-project-roots.js";
 
 const RETAINED_MANAGED_NPM_INSTALL_MARKER_DIR = ".openclaw-retained-npm-installs";
 
-function markerPreservesPackageFiles(markerPath: string): boolean {
-  try {
-    const marker: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    return isRecord(marker) && marker.reason === RETAINED_MANAGED_NPM_KEEP_FILES_REASON;
-  } catch {
-    return false;
+/** A negative result avoids lease admission; markers still need the cleanup owner's checks. */
+export async function hasRetainedManagedNpmInstallCandidates(
+  env?: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const npmDir = resolveDefaultPluginNpmDir(env);
+  for (const projectRoot of [npmDir, ...listPluginNpmProjectCandidatesSync(npmDir)]) {
+    try {
+      if (
+        (await fs.promises.readdir(path.join(projectRoot, RETAINED_MANAGED_NPM_INSTALL_MARKER_DIR)))
+          .length > 0
+      ) {
+        return true;
+      }
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    }
   }
+  return false;
+}
+
+function markerPreservesPackageFiles(markerPath: string): boolean {
+  const marker: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  return isRecord(marker) && marker.reason === RETAINED_MANAGED_NPM_KEEP_FILES_REASON;
 }
 
 export function resolveRetainedManagedNpmInstallPackageInfo(packageDir: string): {

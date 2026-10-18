@@ -7,8 +7,8 @@ import {
   closeOpenClawStateDatabaseByPathAsync,
   openOpenClawStateDatabase,
 } from "./openclaw-state-db.js";
-import { retainUserProfileCatalog } from "./user-profile-list.js";
-import { setAvatar, setDisplayName } from "./user-profile-writes.worker.js";
+import { prepareUserProfileCatalog } from "./user-profile-list.js";
+import { linkEmail, setAvatar, setDisplayName } from "./user-profile-writes.worker.js";
 import { createProfileAvatarReader } from "./user-profiles-avatar.js";
 import { ensureProfileForEmail } from "./user-profiles.js";
 
@@ -33,6 +33,35 @@ function fixture() {
   return { path };
 }
 
+it("retains absent avatars until committed email or avatar changes", async () => {
+  const options = fixture();
+  const profile = ensureProfileForEmail("gravatar@example.test", options);
+  releases.push((await prepareUserProfileCatalog(options)).release);
+  const inspect = () => createProfileAvatarReader(profile.id, options).inspect();
+  const first = await inspect();
+  expect(first.hasAvatar).toBe(false);
+  expect(first.emails).toEqual(["gravatar@example.test"]);
+  const read = vi.spyOn(stateReads, "executeExistingOpenClawStateRead");
+  expect(await (await inspect()).loadBytes()).toBeUndefined();
+  expect((await inspect()).emails).toEqual(["gravatar@example.test"]);
+  expect(read).not.toHaveBeenCalled();
+
+  linkEmail("other@example.test", profile.id, options);
+  expect(first.isCurrent()).toBe(false);
+  expect((await inspect()).emails).toEqual(["gravatar@example.test", "other@example.test"]);
+  expect(read).toHaveBeenCalledOnce();
+  read.mockClear();
+  const bytes = new Uint8Array([1, 2, 3]);
+  expect(setAvatar(profile.id, bytes, "image/png", options).ok).toBe(true);
+  const uploaded = await inspect();
+  expect(uploaded.hasAvatar).toBe(true);
+  expect((await uploaded.loadBytes())?.bytes).toEqual(bytes);
+  expect(read.mock.calls.map(([, command]) => command.type)).toEqual([
+    "userProfiles.avatar.inspect",
+    "userProfiles.avatar.read",
+  ]);
+});
+
 it("evicts the least recently used avatar at the byte budget while preserving unrelated cached bytes", async () => {
   const options = fixture();
   const bytes = new Uint8Array(512 * 1024).fill(7);
@@ -41,7 +70,7 @@ it("evicts the least recently used avatar at the byte budget while preserving un
     expect(setAvatar(profile.id, bytes, "image/png", options).ok).toBe(true);
     return profile;
   });
-  releases.push(retainUserProfileCatalog(options));
+  releases.push((await prepareUserProfileCatalog(options)).release);
   const load = async (index: number) => {
     const profile = profiles[index];
     assert(profile);
@@ -69,22 +98,19 @@ it("evicts the least recently used avatar at the byte budget while preserving un
   ]);
 });
 
-it.each(["catalog release", "database close and reopen", "avatar replacement"] as const)(
+it.each(["database close and reopen", "avatar replacement"] as const)(
   "requires fresh avatar reads after %s",
   async (boundary) => {
     const options = fixture();
     const profile = ensureProfileForEmail("lifetime@example.test", options);
     let bytes = new Uint8Array([1, 2, 3]);
     expect(setAvatar(profile.id, bytes, "image/png", options).ok).toBe(true);
-    const release = retainUserProfileCatalog(options);
+    const release = (await prepareUserProfileCatalog(options)).release;
     releases.push(release);
     const warm = await createProfileAvatarReader(profile.id, options).inspect();
     expect((await warm.loadBytes())?.bytes).toEqual(bytes);
 
-    if (boundary === "catalog release") {
-      release();
-      releases.push(retainUserProfileCatalog(options));
-    } else if (boundary === "database close and reopen") {
+    if (boundary === "database close and reopen") {
       await closeOpenClawStateDatabaseByPathAsync(options.path);
       openOpenClawStateDatabase(options);
     } else {

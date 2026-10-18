@@ -25,10 +25,7 @@ type GoogleAuthTransportOptions = NonNullable<
 >;
 type GoogleAuthTransportInit = GoogleAuthTransportOptions & { dispatcher?: unknown };
 type ProxyRule = NonNullable<GoogleAuthTransportOptions["noProxy"]>[number];
-type TlsOptions = {
-  cert?: ConnectionOptions["cert"];
-  key?: ConnectionOptions["key"];
-};
+type TlsOptions = Pick<ConnectionOptions, "cert" | "key">;
 type ProxyAgentLike = {
   connectOpts?: TlsOptions;
   proxy: URL;
@@ -115,9 +112,9 @@ function resolveGoogleAuthEnvProxyUrl(protocol: "http" | "https"): string | unde
     normalizeOptionalString(process.env.HTTPS_PROXY) ??
     normalizeOptionalString(process.env.https_proxy);
   if (protocol === "https") {
-    return httpsProxy ?? httpProxy ?? undefined;
+    return httpsProxy ?? httpProxy;
   }
-  return httpProxy ?? undefined;
+  return httpProxy;
 }
 
 function collectGoogleAuthNoProxyRules(noProxy: ProxyRule[] = []): ProxyRule[] {
@@ -279,7 +276,9 @@ async function readCredentialsFile(filePath: string): Promise<Record<string, unk
     }
     return parsed;
   } finally {
-    await handle.close().catch(() => {});
+    await handle.close().catch(() => {
+      // Closing this read-only descriptor cannot change the credential read outcome.
+    });
   }
 }
 
@@ -323,25 +322,16 @@ function resolveGoogleAuthDispatcherPolicy(
       : normalizeOptionalString(googleAuthInit.proxy)) ??
     (hasProxyAgentShape(agent) ? agent.proxy.toString() : undefined);
 
-  if (!proxyBypassed && explicitProxy) {
-    return {
-      dispatcherPolicy: {
-        allowPrivateProxy: true,
-        mode: "explicit-proxy",
-        ...(hasTlsOptions(tlsOptions) ? { proxyTls: { ...tlsOptions } } : {}),
-        proxyUrl: explicitProxy,
-      },
-      init: nextInit,
-    };
-  }
-
-  const envProxyUrl = proxyBypassed
+  const proxyUrl = proxyBypassed
     ? undefined
-    : resolveGoogleAuthEnvProxyUrl(requestUrl.protocol === "http:" ? "http" : "https");
-  if (envProxyUrl) {
+    : (explicitProxy ??
+      resolveGoogleAuthEnvProxyUrl(requestUrl.protocol === "http:" ? "http" : "https"));
+  if (proxyUrl) {
     return {
       dispatcherPolicy: {
-        mode: "env-proxy",
+        ...(explicitProxy
+          ? { allowPrivateProxy: true, mode: "explicit-proxy", proxyUrl }
+          : { mode: "env-proxy" }),
         ...(hasTlsOptions(tlsOptions) ? { proxyTls: { ...tlsOptions } } : {}),
       },
       init: nextInit,

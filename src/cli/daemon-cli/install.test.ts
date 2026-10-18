@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { ServiceStartRefusalError } from "../../daemon/service-inspection-error.js";
 import { withGatewayServiceUpdateAuthority } from "../../daemon/service-update-authority.js";
 import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
 import { nodeProbeOutput } from "./install.test-helpers.js";
@@ -17,6 +18,7 @@ const {
   installDaemonServiceAndEmitMock,
   isGatewayDaemonRuntimeMock,
   pinSnapshotMock,
+  pinMigrationMock,
   readConfigFileSnapshotMock,
   readFirstInstallPlanArg,
   readFirstNodeStartupTlsEnvironmentArg,
@@ -33,6 +35,41 @@ const {
 describe("runDaemonInstall", () => {
   setupInstallTests();
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+  it("runs pin admission before planning and preserves the service on refusal", async () => {
+    pinMigrationMock.mockRejectedValueOnce(
+      new Error("Runtime pin migration conflict; run openclaw doctor."),
+    );
+
+    await runDaemonInstall({ json: true, force: true });
+
+    expect(actionState.failed[0]?.message).toContain("Runtime pin migration conflict");
+    expect(pinSnapshotMock).not.toHaveBeenCalled();
+    expect(buildGatewayInstallPlanMock).not.toHaveBeenCalled();
+    expect(service.install).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    "attests pre-write service holds only from native refusal facts (%s)",
+    async (typed) => {
+      const message = "Service is masked. Run `systemctl --user unmask openclaw-gateway.service`.";
+      service.readCommand.mockRejectedValueOnce(
+        typed ? new ServiceStartRefusalError({ reason: "masked", message }) : new Error(message),
+      );
+
+      await runDaemonInstall({ json: true, force: true });
+
+      expect(actionState.failed[0]?.message).toBe(
+        typed
+          ? `SERVICE_DEFINITION_UNKNOWN: ${message}`
+          : "SERVICE_DEFINITION_UNKNOWN: Service definition cannot be safely inspected.",
+      );
+      expect(readConfigFileSnapshotMock).not.toHaveBeenCalled();
+      expect(replaceConfigFileMock).not.toHaveBeenCalled();
+      expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
+      expect(service.install).not.toHaveBeenCalled();
+    },
+  );
 
   describe("restore service CLI", () => {
     const expected = { revision: "observed", definition: "failed-app-service", stored: true };
@@ -138,7 +175,7 @@ describe("runDaemonInstall", () => {
           const probe = nodeProbeOutput("26.8.1");
           runExecMock.mockResolvedValue({
             ...probe,
-            stdout: JSON.stringify({ ...JSON.parse(probe.stdout), bunVersion: "1.4.0" }),
+            stdout: JSON.stringify({ ...JSON.parse(probe.stdout), bunVersion: "1.4.3" }),
           });
         }
         installDaemonServiceAndEmitMock.mockImplementationOnce(async (params) => {
@@ -364,37 +401,29 @@ describe("runDaemonInstall", () => {
 describe("runDaemonInstall reinstall", () => {
   setupInstallTests();
 
-  it.each([{ mode: "local", installedOverride: true, plannedOverride: false }])(
-    "refreshes only changed service start mode with $mode primary",
-    async ({ mode, installedOverride, plannedOverride }) => {
-      service.isLoaded.mockResolvedValue(true);
-      readConfigFileSnapshotMock.mockResolvedValue({
-        valid: true,
-        sourceConfig: { gateway: { mode, auth: { mode: "token" } } },
-      });
-      const command = (override: boolean) =>
-        ["openclaw", "gateway", "run"].concat(override ? ["--allow-unconfigured"] : []);
-      const environment = { NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt" };
-      resolveNodeStartupTlsEnvironmentMock.mockReturnValue(environment);
-      service.readCommand.mockResolvedValue({
-        programArguments: command(installedOverride),
-        environment,
-      });
-      buildGatewayInstallPlanMock.mockResolvedValue({
-        programArguments: command(plannedOverride),
-        environment,
-        workingDirectory: "/tmp",
-      });
-      await runDaemonInstall({ json: true });
-      expect(actionState.failed).toEqual([]);
-      if (installedOverride !== plannedOverride) {
-        expect(installDaemonServiceAndEmitMock).toHaveBeenCalledOnce();
-      } else {
-        expect(installDaemonServiceAndEmitMock).not.toHaveBeenCalled();
-        expect(actionState.emitted.at(-1)).toMatchObject({ result: "already-installed" });
-      }
-    },
-  );
+  it("refreshes changed service start mode with local primary", async () => {
+    service.isLoaded.mockResolvedValue(true);
+    readConfigFileSnapshotMock.mockResolvedValue({
+      valid: true,
+      sourceConfig: { gateway: { mode: "local", auth: { mode: "token" } } },
+    });
+    const command = (override: boolean) =>
+      ["openclaw", "gateway", "run"].concat(override ? ["--allow-unconfigured"] : []);
+    const environment = { NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt" };
+    resolveNodeStartupTlsEnvironmentMock.mockReturnValue(environment);
+    service.readCommand.mockResolvedValue({
+      programArguments: command(true),
+      environment,
+    });
+    buildGatewayInstallPlanMock.mockResolvedValue({
+      programArguments: command(false),
+      environment,
+      workingDirectory: "/tmp",
+    });
+    await runDaemonInstall({ json: true });
+    expect(actionState.failed).toEqual([]);
+    expect(installDaemonServiceAndEmitMock).toHaveBeenCalledOnce();
+  });
 
   it.each([
     { failure: "probe", message: "openclaw gateway install --force" },

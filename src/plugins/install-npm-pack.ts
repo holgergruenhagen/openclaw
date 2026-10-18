@@ -63,7 +63,7 @@ async function stageNpmPackArchiveInManagedRoot(params: {
   integrity?: string;
   shasum?: string;
   tarballName: string;
-}): Promise<{ dependencySpec: string }> {
+}): Promise<string> {
   const archiveStoreDir = path.join(params.npmRoot, MANAGED_NPM_PACK_ARCHIVE_DIR);
   const identity = params.integrity ?? params.shasum ?? params.tarballName;
   const identitySlug = sha256HexPrefixCore(identity, 16);
@@ -72,9 +72,7 @@ async function stageNpmPackArchiveInManagedRoot(params: {
   const archiveFileName = `${packageSlug}-${versionSlug}-${identitySlug}.tgz`;
   await fs.mkdir(archiveStoreDir, { recursive: true });
   await fs.copyFile(params.archivePath, path.join(archiveStoreDir, archiveFileName));
-  return {
-    dependencySpec: `file:./${path.posix.join(MANAGED_NPM_PACK_ARCHIVE_DIR, archiveFileName)}`,
-  };
+  return `file:./${path.posix.join(MANAGED_NPM_PACK_ARCHIVE_DIR, archiveFileName)}`;
 }
 
 export async function installPluginFromNpmPackArchive(
@@ -137,23 +135,22 @@ export async function installPluginFromNpmPackArchive(
       packageName,
       prepareDependencySpec: async ({ npmRoot }) => {
         try {
-          return {
-            ok: true,
-            ...(await stageNpmPackArchiveInManagedRoot({
-              archivePath: metadataResult.archivePath,
-              npmRoot,
-              packageName,
-              version: metadataResult.metadata.version,
-              integrity: metadataResult.metadata.integrity,
-              shasum: metadataResult.metadata.shasum,
-              tarballName: metadataResult.tarballName,
-            })),
-          };
+          return await stageNpmPackArchiveInManagedRoot({
+            archivePath: metadataResult.archivePath,
+            npmRoot,
+            packageName,
+            version: metadataResult.metadata.version,
+            integrity: metadataResult.metadata.integrity,
+            shasum: metadataResult.metadata.shasum,
+            tarballName: metadataResult.tarballName,
+          });
         } catch (error) {
-          return {
-            ok: false,
-            error: `Failed to stage npm pack archive in managed npm root: ${String(error)}`,
-          };
+          throw new Error(
+            `Failed to stage npm pack archive in managed npm root: ${String(error)}`,
+            {
+              cause: error,
+            },
+          );
         }
       },
       displaySpec: metadataResult.archivePath,

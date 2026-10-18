@@ -88,7 +88,7 @@ type ProfileFixture = {
   effectiveRole?: string;
   roleSource?: "assigned" | "githubLogin" | "default";
   mergedInto?: string | null;
-  githubIdentity?: { login: string } | null;
+  githubIdentity?: { host?: string; login: string } | null;
 };
 
 export function visitorProfileFixture(
@@ -142,8 +142,8 @@ export function visitorProfileFixture(
     async readSessionFacts() {
       throw new Error("Unexpected session facts request");
     },
-    async withSessionReadScope() {
-      throw new Error("Unexpected session read scope");
+    async withSessionFacts() {
+      throw new Error("Unexpected selected session facts request");
     },
     async openPluginPanel() {
       throw new Error("Unexpected plugin panel request");

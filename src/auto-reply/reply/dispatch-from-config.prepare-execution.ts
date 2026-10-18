@@ -1,6 +1,7 @@
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { sanitizeUserFacingText } from "../../agents/embedded-agent-helpers/sanitize-user-facing-text.js";
-import { shouldSuppressLocalExecApprovalPrompt } from "../../channels/plugins/exec-approval-local.js";
+import { isRequiredReplyExpectation } from "../../agents/reply-completion.js";
+import { shouldSuppressLocalExecApprovalPromptAsync } from "../../channels/plugins/exec-approval-local.js";
 import { formatPlanChecklistLines } from "../../channels/streaming.js";
 import { applyMergePatch } from "../../config/merge-patch.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -80,7 +81,7 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
     };
     state.assertProgressCurrent();
     if (shouldRouteToOriginating) {
-      await sendPayloadAsync(replyPayload, undefined, false);
+      await sendPayloadAsync(replyPayload);
       return;
     }
     markInboundDedupeReplayUnsafe();
@@ -112,7 +113,7 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
     payload: ReplyPayload,
   ): Promise<ReplyPayload | null> => {
     if (
-      shouldSuppressLocalExecApprovalPrompt({
+      await shouldSuppressLocalExecApprovalPromptAsync({
         channel: normalizeMessageChannel(ctx.Surface ?? ctx.Provider),
         cfg,
         accountId: ctx.AccountId,
@@ -159,6 +160,12 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
     forwardWhenSourceDeliverySuppressed?: boolean;
     requiresToolSummaryVisibility?: boolean;
   }) => {
+    if (
+      params.replyOptions?.progressRequiresReply === true &&
+      !isRequiredReplyExpectation(state.replyOperationRunState.replyCompletion?.expectation)
+    ) {
+      return false;
+    }
     if (
       options?.requiresToolSummaryVisibility === true &&
       !(await shouldSendToolSummariesAsync()) &&
@@ -213,10 +220,8 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
           }
         }
         if ((await shouldForwardProgressCallback(options)) && !isDispatchOperationAborted()) {
-          if (preserveProgressCallbackStartOrder && options?.onForward) {
-            await options.onForward(...args);
-          } else if (!preserveProgressCallbackStartOrder) {
-            // Preserve the historical microtask boundary for unflagged channels.
+          // Preserve the historical microtask boundary for unflagged channels.
+          if (!preserveProgressCallbackStartOrder || options?.onForward) {
             await options?.onForward?.(...args);
           }
           if (isDispatchOperationAborted()) {
@@ -269,11 +274,20 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
     state.shouldSendToolSummaries() &&
     !state.shouldSuppressProgressDeliverySync();
   const { commentaryPayloadsEnabled, draftOwnsCommentaryProgress } =
-    resolveTurnCommentaryProgressOwner({
+    await resolveTurnCommentaryProgressOwner({
       commentaryPayloadsEnabled: state.commentaryPayloadsEnabled,
       options: params.replyOptions,
       resolveVerboseProgressVisibility,
+      resolveVerboseProgressVisibilityAsync: async () => {
+        const visible =
+          standaloneCommentaryProgressVisible &&
+          (await state.shouldSendToolSummariesAsync()) &&
+          !(await state.shouldSuppressProgressDelivery());
+        state.assertProgressCurrent();
+        return visible;
+      },
     });
+  state.assertProgressCurrent();
   const deliverStandaloneCommentaryProgress =
     standaloneCommentaryProgressVisible && !draftOwnsCommentaryProgress;
   const canForwardItemEvents = Boolean(params.replyOptions?.onItemEvent);
@@ -294,6 +308,10 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
         ? noteCommentaryProgress(payload)
         : undefined,
   });
+  const forwardModelWait = wrapProgressCallback(params.replyOptions?.onItemEvent, {
+    forwardWhenSourceDeliverySuppressed: true,
+    waitForDirectBlockReplyDelivery: true,
+  });
   // CLI runners classify preambles as item events only when this handler exists.
   // Keep it for channel-owned capture even when delivery policy hides the event.
   const onItemEvent =
@@ -312,7 +330,9 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
           ) {
             await noteCommentaryProgress(payload);
           }
-          return await forwardItemEvent?.(payload);
+          return payload.kind === "model-wait"
+            ? await forwardModelWait?.(payload)
+            : await forwardItemEvent?.(payload);
         }
       : undefined;
   const replyResolver: InternalGetReplyFromConfig =
@@ -329,7 +349,7 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
       : runtimeReplyConfig,
   );
   state.recordAgentDispatchStarted();
-  const nextState = Object.assign(state, {
+  return Object.assign(state, {
     sendPlanUpdate,
     cleanBlockTtsDirectiveText,
     resolveToolDeliveryPayload,
@@ -351,9 +371,8 @@ export async function prepareDispatchExecution(state: ChooseDispatchRouteReadySt
     replyConfig,
     progressState,
   });
-  return { status: "ready" as const, state: nextState };
 }
 
 export type PrepareDispatchExecutionReadyState = Awaited<
   ReturnType<typeof prepareDispatchExecution>
->["state"];
+>;

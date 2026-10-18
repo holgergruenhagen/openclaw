@@ -1,16 +1,13 @@
-import path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { resolveSessionAgentIdStrict } from "openclaw/plugin-sdk/agent-scope-runtime";
-import { runTasksWithConcurrency } from "openclaw/plugin-sdk/concurrency-runtime";
 import type { MemoryReference, MemoryCitation } from "openclaw/plugin-sdk/memory-host-search";
 import { resolveIntegerOption } from "openclaw/plugin-sdk/number-runtime";
-import { FsSafeError, root as fsRoot } from "openclaw/plugin-sdk/security-runtime";
 import {
   normalizeLowercaseStringOrEmpty,
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { OpenClawConfig } from "../api.js";
-import { listMemoryWikiPagePaths } from "./bounded-walk.js";
 import { assessClaimFreshness, isClaimContestedStatus } from "./claim-health.js";
 import {
   loadMemoryWikiCompiledCache,
@@ -19,13 +16,7 @@ import {
   type MemoryWikiCompiledDigestPage,
 } from "./compiled-cache.js";
 import type { ResolvedMemoryWikiConfig, WikiSearchBackend, WikiSearchCorpus } from "./config.js";
-import {
-  type parseWikiMarkdown,
-  scanWikiPageSummary,
-  type WikiClaim,
-  type WikiPageSummary,
-  WIKI_PAGE_GROUPS,
-} from "./markdown.js";
+import type { WikiClaim, WikiPageSummary } from "./markdown.js";
 import { isPersonLikePage } from "./person-page.js";
 import {
   isMemoryReferenceLookup,
@@ -33,8 +24,15 @@ import {
   resolveActiveMemoryAgentId,
   usesNativeMemoryProvider,
 } from "./query-memory-provider.js";
+import { resolveQueryableWikiPageForLookup } from "./query-page-lookup.js";
 import {
-  normalizeLookupKey,
+  listWikiMarkdownFiles,
+  QUERY_PAGE_READ_CONCURRENCY,
+  readQueryableWikiPages,
+  readQueryableWikiPagesByPaths,
+  type QueryableWikiPage,
+} from "./query-pages.js";
+import {
   readSharedMemoryPage,
   searchSharedMemory,
   shouldEnforceSessionVisibility,
@@ -42,7 +40,6 @@ import {
 } from "./query-shared-memory.js";
 import { initializeMemoryWikiVault } from "./vault.js";
 
-const QUERY_PAGE_READ_CONCURRENCY = 16;
 const WIKI_SNIPPET_MAX_CHARS = 700;
 const RELATED_BLOCK_PATTERN =
   /<!-- openclaw:wiki:related:start -->[\s\S]*?<!-- openclaw:wiki:related:end -->/g;
@@ -155,11 +152,6 @@ type WikiGetResult = WikiResultMetadata & {
   truncated?: boolean;
 } & WikiResultSource;
 
-export type QueryableWikiPage = WikiPageSummary & {
-  raw: string;
-  parsed: ReturnType<typeof parseWikiMarkdown>;
-};
-
 type QuerySearchOverrides = {
   searchBackend?: WikiSearchBackend;
   searchCorpus?: WikiSearchCorpus;
@@ -205,54 +197,6 @@ function mergeWikiSearchCorpusResults(params: {
   }
 
   return sortWikiSearchResults(selected).slice(0, params.maxResults);
-}
-
-async function listWikiMarkdownFiles(rootDir: string): Promise<string[]> {
-  const files = await Promise.all(
-    WIKI_PAGE_GROUPS.map(({ dir }) => listMemoryWikiPagePaths(rootDir, dir)),
-  );
-  return files.flat().toSorted((left, right) => left.localeCompare(right));
-}
-
-export async function readQueryableWikiPages(rootDir: string): Promise<QueryableWikiPage[]> {
-  const files = await listWikiMarkdownFiles(rootDir);
-  return readQueryableWikiPagesByPaths(rootDir, files);
-}
-
-async function readQueryableWikiPagesByPaths(
-  rootDir: string,
-  files: string[],
-): Promise<QueryableWikiPage[]> {
-  if (files.length === 0) {
-    return [];
-  }
-  // Wiki pages retain their existing size and hardlink support as user artifacts.
-  // Verify the opened file's vault boundary without imposing secret-file defaults.
-  const vault = await fsRoot(rootDir, { hardlinks: "allow", maxBytes: Infinity });
-  const { results } = await runTasksWithConcurrency({
-    tasks: files.map((relativePath) => async () => {
-      const absolutePath = path.join(rootDir, relativePath);
-      try {
-        const raw = await vault.readText(relativePath);
-        const scan = scanWikiPageSummary({ absolutePath, relativePath, raw, includeLinks: false });
-        return scan.status === "valid" ? { ...scan.page, raw, parsed: scan.parsed } : null;
-      } catch (error) {
-        // Compiled candidates and directory listings can outlive a page. Only absence
-        // may fall through to discovery; boundary refusals must remain terminal.
-        if (
-          error instanceof FsSafeError &&
-          (error.code === "not-found" || error.code === "not-file")
-        ) {
-          return null;
-        }
-        throw error;
-      }
-    }),
-    limit: QUERY_PAGE_READ_CONCURRENCY,
-    errorMode: "stop",
-    throwOnError: true,
-  });
-  return results.filter((page): page is QueryableWikiPage => page !== null);
 }
 
 function buildSnippet(raw: string, query: string): string {
@@ -431,7 +375,7 @@ function scoreClaimMatch(params: {
   if (normalizeLowercaseStringOrEmpty(params.id).includes(params.queryLower)) {
     score += 10;
   }
-  if (typeof params.confidence === "number") {
+  if (params.confidence !== undefined) {
     score += Math.round(params.confidence * 10);
   }
   switch (params.freshnessLevel) {
@@ -590,7 +534,7 @@ function buildDigestCandidatePaths(params: {
         buildDigestPageSearchText(page, claims),
       );
       if (
-        !metadataLower.includes(queryLower) &&
+        !lineMatchesQuery(metadataLower, queryLower, queryTokens) &&
         !(
           params.mode === "route-question" &&
           hasRouteQuestionMatch(buildRouteQuestionFields(page), queryLower)
@@ -676,8 +620,8 @@ function scorePage(params: {
     queryTokens,
     mode,
   });
-  // Digest candidates use metadata only. Live pages also admit distributed token
-  // matches and score their body, without changing the digest prefilter's recall.
+  // Digest candidates admit phrase and distributed token matches in metadata.
+  // Live pages also match and score their body text.
   if (!("raw" in page)) {
     return score;
   }
@@ -710,22 +654,6 @@ function scorePage(params: {
     }
   }
   return score;
-}
-
-function resolveExactWikiPagePath(lookup: string): string | null {
-  const normalized = normalizeLookupKey(lookup);
-  const segments = normalized.split("/");
-  const [directory, ...pageSegments] = segments;
-  if (
-    !WIKI_PAGE_GROUPS.some(({ dir }) => dir === directory) ||
-    pageSegments.length === 0 ||
-    pageSegments.some((segment) => !segment || segment === "." || segment === "..") ||
-    !normalized.endsWith(".md") ||
-    path.posix.basename(normalized) === "index.md"
-  ) {
-    return null;
-  }
-  return normalized;
 }
 
 function isBridgeCompiledPage(page: QueryableWikiPage): boolean {
@@ -874,7 +802,7 @@ function toWikiSearchResult(
       ? {
           ...(matchingClaim.id ? { matchedClaimId: matchingClaim.id } : {}),
           ...(matchingClaim.status ? { matchedClaimStatus: matchingClaim.status } : {}),
-          ...(typeof matchingClaim.confidence === "number"
+          ...(matchingClaim.confidence !== undefined
             ? { matchedClaimConfidence: matchingClaim.confidence }
             : {}),
           evidenceKinds: uniqueStrings(
@@ -894,7 +822,9 @@ async function searchWikiCorpus(params: {
   maxResults: number;
   mode: WikiSearchMode;
   canReadPage: (page: QueryableWikiPage) => boolean;
+  signal?: AbortSignal;
 }): Promise<WikiSearchResult[]> {
+  params.signal?.throwIfAborted();
   const snapshot = await loadMemoryWikiCompiledCache(params.config);
   const rootDir = params.config.vault.path;
   const candidatePaths = snapshot
@@ -907,12 +837,26 @@ async function searchWikiCorpus(params: {
     : [];
   const candidatePages =
     candidatePaths.length > 0
-      ? await readQueryableWikiPagesByPaths(rootDir, candidatePaths)
-      : await readQueryableWikiPages(rootDir);
-  const results = candidatePages
-    .filter(params.canReadPage)
-    .map((page) => toWikiSearchResult(page, params.query, params.mode))
-    .filter((page) => page.score > 0);
+      ? await readQueryableWikiPagesByPaths(rootDir, candidatePaths, params.signal)
+      : await readQueryableWikiPages(rootDir, params.signal);
+  const results: WikiSearchResult[] = [];
+  const scorePages = async (pages: QueryableWikiPage[]) => {
+    let index = 0;
+    for (const page of pages) {
+      // Let deadlines and turn cancellation run during CPU-bound scoring too.
+      if (params.signal && index++ % QUERY_PAGE_READ_CONCURRENCY === 0) {
+        await setImmediate();
+      }
+      params.signal?.throwIfAborted();
+      if (params.canReadPage(page)) {
+        const result = toWikiSearchResult(page, params.query, params.mode);
+        if (result.score > 0) {
+          results.push(result);
+        }
+      }
+    }
+  };
+  await scorePages(candidatePages);
   if (candidatePaths.length === 0 || results.length >= params.maxResults) {
     return results;
   }
@@ -921,42 +865,13 @@ async function searchWikiCorpus(params: {
   const remainingPaths = (await listWikiMarkdownFiles(rootDir)).filter(
     (relativePath) => !seenPaths.has(relativePath),
   );
-  const remainingPages = (await readQueryableWikiPagesByPaths(rootDir, remainingPaths)).filter(
-    params.canReadPage,
+  const remainingPages = await readQueryableWikiPagesByPaths(
+    rootDir,
+    remainingPaths,
+    params.signal,
   );
-  return [
-    ...results,
-    ...remainingPages
-      .map((page) => toWikiSearchResult(page, params.query, params.mode))
-      .filter((page) => page.score > 0),
-  ];
-}
-
-async function readExactWikiPage(
-  rootDir: string,
-  lookup: string,
-): Promise<QueryableWikiPage | null> {
-  const relativePath = resolveExactWikiPagePath(lookup);
-  if (!relativePath) {
-    return null;
-  }
-  return (await readQueryableWikiPagesByPaths(rootDir, [relativePath]))[0] ?? null;
-}
-
-export function resolveQueryableWikiPageByLookup(
-  pages: QueryableWikiPage[],
-  lookup: string,
-): QueryableWikiPage | null {
-  const key = normalizeLookupKey(lookup);
-  const withExtension = key.endsWith(".md") ? key : `${key}.md`;
-  return (
-    pages.find((page) => page.relativePath === key) ??
-    pages.find((page) => page.relativePath === withExtension) ??
-    pages.find((page) => page.relativePath.replace(/\.md$/i, "") === key) ??
-    pages.find((page) => path.basename(page.relativePath, ".md") === key) ??
-    pages.find((page) => page.id === key) ??
-    null
-  );
+  await scorePages(remainingPages);
+  return results;
 }
 
 export async function searchMemoryWiki(
@@ -966,6 +881,7 @@ export async function searchMemoryWiki(
     mode?: WikiSearchMode;
   },
 ): Promise<WikiSearchResult[]> {
+  input.signal?.throwIfAborted();
   const agentId = resolveActiveMemoryAgentId(input);
   const params = agentId ? { ...input, agentId } : input;
   const protectedSessionRecall = params.conversationRecall?.corpus === "sessions";
@@ -981,7 +897,10 @@ export async function searchMemoryWiki(
     config: effectiveConfig,
     operation: "wiki_search",
   });
-  await initializeMemoryWikiVault(effectiveConfig);
+  await initializeMemoryWikiVault(
+    effectiveConfig,
+    params.signal ? { signal: params.signal } : undefined,
+  );
   const maxResults = resolveIntegerOption(params.maxResults, 10, { min: 1 });
   const mode = params.mode ?? "auto";
 
@@ -992,8 +911,10 @@ export async function searchMemoryWiki(
         maxResults,
         mode,
         canReadPage: createWikiPageVisibilityFilter(params),
+        signal: params.signal,
       })
     : [];
+  params.signal?.throwIfAborted();
 
   const memoryResults = shouldSearchSharedMemory(effectiveConfig, params.appConfig)
     ? await searchSharedMemory(params, { maxResults, mode, protectedSessionRecall })
@@ -1045,13 +966,13 @@ export async function getMemoryWikiPage(
         ).find(canReadPage) ?? null)
       : null;
     // Claim IDs may themselves be paths; preserve their established lookup priority.
-    const directLookupPage =
-      digestLookupPage ?? (await readExactWikiPage(effectiveConfig.vault.path, params.lookup));
-    const pages =
-      directLookupPage && canReadPage(directLookupPage)
-        ? [directLookupPage]
-        : (await readQueryableWikiPages(effectiveConfig.vault.path)).filter(canReadPage);
-    const page = digestLookupPage ?? resolveQueryableWikiPageByLookup(pages, params.lookup);
+    const page =
+      digestLookupPage ??
+      (await resolveQueryableWikiPageForLookup({
+        rootDir: effectiveConfig.vault.path,
+        lookup: params.lookup,
+        canReadPage,
+      }));
     if (page) {
       const lines = page.parsed.body.split(/\r?\n/);
       const totalLines = lines.length;

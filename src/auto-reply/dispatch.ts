@@ -15,11 +15,8 @@ import {
 } from "../infra/outbound/deliver-hooks.js";
 import { logMessageReceived } from "../logging/diagnostic.js";
 import { createKeyedFifoLeaseRegistry, type KeyedFifoLease } from "../shared/keyed-fifo-lease.js";
-import type { SilentReplyConversationType } from "../shared/silent-reply-policy.js";
-import {
-  resolveCommandTurnContext,
-  resolveCommandTurnTargetSessionKey,
-} from "./command-turn-context.js";
+import { observeAgentRunStart } from "./agent-run-start.js";
+import { resolveCommandTurnContext } from "./command-turn-context.js";
 import { isActiveRunSafeCommandTurn } from "./commands-registry.js";
 import { withReplyDispatcher } from "./dispatch-dispatcher.js";
 import { dispatchGroupThread } from "./group-thread-dispatch.js";
@@ -59,6 +56,45 @@ type InternalDispatchReplyOptions = Omit<
 type ReplyPayloadRunState = {
   runId?: string;
 };
+
+type InboundHookOwnership = {
+  messageSending: "legacy" | "projected" | "channel-delivery";
+  outboundHooks?: "enabled" | "disabled";
+  onReplyPayloadSuppressed?: ReplyPayloadSuppressedObserver;
+};
+
+function prepareInboundReplyHooks(
+  ctx: MsgContext | FinalizedMsgContext,
+  replyOptions: InternalDispatchReplyOptions | undefined,
+  dispatcherOptions: ReplyDispatcherOptions,
+  ownership: InboundHookOwnership,
+) {
+  const replyPayloadRunState = { runId: replyOptions?.runId };
+  const replyPayloadBeforeDeliver =
+    ownership.outboundHooks === "disabled"
+      ? undefined
+      : buildInboundReplyPayloadSendingBeforeDeliver(
+          ctx,
+          replyPayloadRunState,
+          ownership.onReplyPayloadSuppressed,
+        );
+  const globalBeforeDeliver =
+    ownership.messageSending === "channel-delivery"
+      ? replyPayloadBeforeDeliver
+      : composeReplyDispatchBeforeDeliver(
+          replyPayloadBeforeDeliver,
+          ownership.messageSending === "projected"
+            ? buildProjectedInboundMessageSendingBeforeDeliver(ctx)
+            : buildLegacyInboundMessageSendingBeforeDeliver(ctx),
+        );
+  const beforeDeliver = dispatcherOptions.beforeDeliver
+    ? composeReplyDispatchBeforeDeliver(
+        { hook: dispatcherOptions.beforeDeliver, options: dispatcherOptions.beforeDeliverOptions },
+        replyPayloadBeforeDeliver,
+      )
+    : globalBeforeDeliver;
+  return { replyPayloadRunState, replyPayloadBeforeDeliver, beforeDeliver };
+}
 
 const replyPayloadSendingDispatchers = new WeakSet<ReplyDispatcher>();
 const foregroundReplyLeases = createKeyedFifoLeaseRegistry(
@@ -111,31 +147,6 @@ function reserveForegroundReplyLease(
   return key ? foregroundReplyLeases.reserve([key]) : undefined;
 }
 
-function resolveDispatcherSilentReplyContext(
-  ctx: MsgContext | FinalizedMsgContext,
-  cfg: OpenClawConfig,
-) {
-  const finalized = finalizeInboundContext(ctx);
-  const commandTargetSessionKey = resolveCommandTurnTargetSessionKey(finalized);
-  const policySessionKey = commandTargetSessionKey ?? finalized.SessionKey;
-  const chatType = normalizeChatType(finalized.ChatType);
-  const conversationType: SilentReplyConversationType | undefined =
-    commandTargetSessionKey && commandTargetSessionKey !== finalized.SessionKey
-      ? undefined
-      : chatType === "direct"
-        ? "direct"
-        : chatType === "group" || chatType === "channel"
-          ? "group"
-          : undefined;
-  // Cross-session native command dispatch bypasses direct/group inference for silent policy.
-  return {
-    cfg,
-    sessionKey: policySessionKey,
-    surface: finalized.Surface ?? finalized.Provider,
-    conversationType,
-  };
-}
-
 function installReplyPayloadSendingBeforeDeliver(
   dispatcher: ReplyDispatcher,
   ctx: MsgContext | FinalizedMsgContext,
@@ -164,14 +175,8 @@ function markReplyPayloadSendingBeforeDeliverInstalled(
 function buildDispatchTimelineAttributes(ctx: MsgContext | FinalizedMsgContext) {
   const commandTurn = resolveCommandTurnContext(ctx);
   return {
-    surface:
-      typeof ctx.Surface === "string"
-        ? ctx.Surface
-        : typeof ctx.Provider === "string"
-          ? ctx.Provider
-          : "unknown",
-    hasSessionKey:
-      typeof ctx.SessionKey === "string" || typeof ctx.CommandTargetSessionKey === "string",
+    surface: ctx.Surface ?? ctx.Provider ?? "unknown",
+    hasSessionKey: ctx.SessionKey !== undefined || ctx.CommandTargetSessionKey !== undefined,
     commandSource: commandTurn.source,
   };
 }
@@ -201,13 +206,11 @@ export async function dispatchInboundMessage(params: {
   const replyPayloadRunState = params.replyPayloadRunState ?? {
     runId: replyOptions?.runId,
   };
-  const onAgentRunStart = replyOptions?.onAgentRunStart;
   const replyOptionsWithRunState: InternalDispatchReplyOptions = {
     ...replyOptions,
-    onAgentRunStart: (...args) => {
-      replyPayloadRunState.runId = args[0];
-      return onAgentRunStart?.(...args);
-    },
+    ...observeAgentRunStart(replyOptions, (start) => {
+      replyPayloadRunState.runId = start.runId;
+    }),
   };
   const finalized = measureDiagnosticsTimelineSpanSync(
     "auto_reply.finalize_context",
@@ -271,20 +274,12 @@ type BufferedInboundDispatcherParams = Omit<
 
 async function dispatchInboundMessageWithBufferedDispatcherCore(
   params: BufferedInboundDispatcherParams,
-  ownership: {
-    messageSending: "dispatcher" | "channel-delivery";
-    outboundHooks?: "enabled" | "disabled";
-    onReplyPayloadSuppressed?: ReplyPayloadSuppressedObserver;
-  },
+  ownership: InboundHookOwnership,
 ): Promise<DispatchInboundResult> {
   const finalized = finalizeInboundContext(params.ctx);
   const foregroundReplyLease = reserveForegroundReplyLease(finalized, params.cfg);
   const replyOperationRunState: ReplyOperationRunState =
     resolveReplyOperationRunState(params.replyOptions) ?? {};
-  const silentReplyContext = resolveDispatcherSilentReplyContext(finalized, params.cfg);
-  const replyPayloadRunState = {
-    runId: params.replyOptions?.runId,
-  };
   let settledDeliveries = Promise.resolve();
   const settleDeliveries = () =>
     (settledDeliveries = settledDeliveries.then(async () => {
@@ -297,30 +292,11 @@ async function dispatchInboundMessageWithBufferedDispatcherCore(
       await onSettled?.();
       await onFreshSettledDelivery?.();
     }));
-  const replyPayloadBeforeDeliver =
-    ownership.outboundHooks === "disabled"
-      ? undefined
-      : buildInboundReplyPayloadSendingBeforeDeliver(
-          finalized,
-          replyPayloadRunState,
-          ownership.onReplyPayloadSuppressed,
-        );
-  const globalBeforeDeliver =
-    ownership.messageSending === "dispatcher"
-      ? composeReplyDispatchBeforeDeliver(
-          replyPayloadBeforeDeliver,
-          buildLegacyInboundMessageSendingBeforeDeliver(finalized),
-        )
-      : replyPayloadBeforeDeliver;
-  const configuredBeforeDeliver = params.dispatcherOptions.beforeDeliver
-    ? composeReplyDispatchBeforeDeliver(
-        {
-          hook: params.dispatcherOptions.beforeDeliver,
-          options: params.dispatcherOptions.beforeDeliverOptions,
-        },
-        replyPayloadBeforeDeliver,
-      )
-    : globalBeforeDeliver;
+  const {
+    replyPayloadRunState,
+    replyPayloadBeforeDeliver,
+    beforeDeliver: configuredBeforeDeliver,
+  } = prepareInboundReplyHooks(finalized, params.replyOptions, params.dispatcherOptions, ownership);
   const beforeDeliver: ReplyDispatchBeforeDeliver | undefined =
     foregroundReplyLease || configuredBeforeDeliver
       ? markReplyDispatchBeforeDeliverDeadlineOwned(async (payload, info) => {
@@ -337,7 +313,6 @@ async function dispatchInboundMessageWithBufferedDispatcherCore(
       beforeDeliver,
       onSettled: settleDeliveries,
       onFreshSettledDelivery: undefined,
-      silentReplyContext: params.dispatcherOptions.silentReplyContext ?? silentReplyContext,
     });
   const onTypingController = params.replyOptions?.onTypingController
     ? (typing: Parameters<NonNullable<typeof params.replyOptions.onTypingController>>[0]) => {
@@ -379,7 +354,7 @@ export async function dispatchInboundMessageWithBufferedDispatcher(
   params: BufferedInboundDispatcherParams,
 ): Promise<DispatchInboundResult> {
   return await dispatchInboundMessageWithBufferedDispatcherCore(params, {
-    messageSending: "dispatcher",
+    messageSending: "legacy",
   });
 }
 
@@ -409,39 +384,18 @@ async function dispatchInboundMessageWithPlainDispatcherCore(
   params: PlainInboundDispatcherParams,
   messageSending: "legacy" | "projected",
 ): Promise<DispatchInboundResult> {
-  const silentReplyContext = resolveDispatcherSilentReplyContext(params.ctx, params.cfg);
-  const replyPayloadRunState = {
-    runId: params.replyOptions?.runId,
-  };
-  const replyPayloadBeforeDeliver = buildInboundReplyPayloadSendingBeforeDeliver(
-    params.ctx,
-    replyPayloadRunState,
-  );
-  const messageSendingBeforeDeliver =
-    messageSending === "projected"
-      ? buildProjectedInboundMessageSendingBeforeDeliver(params.ctx)
-      : buildLegacyInboundMessageSendingBeforeDeliver(params.ctx);
-  const globalBeforeDeliver = composeReplyDispatchBeforeDeliver(
-    replyPayloadBeforeDeliver,
-    messageSendingBeforeDeliver,
-  );
-  const composedBeforeDeliver = params.dispatcherOptions.beforeDeliver
-    ? composeReplyDispatchBeforeDeliver(
-        {
-          hook: params.dispatcherOptions.beforeDeliver,
-          options: params.dispatcherOptions.beforeDeliverOptions,
-        },
-        replyPayloadBeforeDeliver,
-      )
-    : globalBeforeDeliver;
+  const finalized = finalizeInboundContext(params.ctx);
+  const { replyPayloadRunState, replyPayloadBeforeDeliver, beforeDeliver } =
+    prepareInboundReplyHooks(finalized, params.replyOptions, params.dispatcherOptions, {
+      messageSending,
+    });
   const dispatcher = createReplyDispatcher({
     ...params.dispatcherOptions,
-    beforeDeliver: composedBeforeDeliver,
-    silentReplyContext: params.dispatcherOptions.silentReplyContext ?? silentReplyContext,
+    beforeDeliver,
   });
   markReplyPayloadSendingBeforeDeliverInstalled(dispatcher, replyPayloadBeforeDeliver);
   return await dispatchInboundMessage({
-    ctx: params.ctx,
+    ctx: finalized,
     cfg: params.cfg,
     dispatcher,
     toolsAllow: params.toolsAllow,

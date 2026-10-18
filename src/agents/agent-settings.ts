@@ -82,18 +82,14 @@ export function isSilentOverflowProneModel(model: {
   modelId?: string | null;
   baseUrl?: string | null;
 }): boolean {
-  const provider = normalizeProviderId(typeof model.provider === "string" ? model.provider : "");
+  const provider = normalizeProviderId(model.provider ?? "");
   if (provider === "zai") {
     return true;
   }
-  if (
-    typeof model.baseUrl === "string" &&
-    model.baseUrl.length > 0 &&
-    resolveProviderEndpoint(model.baseUrl).endpointClass === "zai-native"
-  ) {
+  if (model.baseUrl && resolveProviderEndpoint(model.baseUrl).endpointClass === "zai-native") {
     return true;
   }
-  const normalized = typeof model.modelId === "string" ? model.modelId.toLowerCase() : "";
+  const normalized = model.modelId?.toLowerCase() ?? "";
   return (
     normalized.startsWith("z-ai/") ||
     normalized.startsWith("openrouter/z-ai/") ||
@@ -107,13 +103,15 @@ export function applyAgentAutoCompactionGuard(params: {
   contextEngineInfo?: ContextEngineInfo;
   compactionMode?: AgentCompactionMode;
   silentOverflowProneProvider?: boolean;
+  compactionForbidden?: boolean;
 }): void {
   // Leave compaction with its selected owner so prompt-time runtime compaction
   // cannot rewrite the transcript before OpenClaw's provider call.
   const disable =
     params.contextEngineInfo?.ownsCompaction === true ||
     params.compactionMode === "safeguard" ||
-    params.silentOverflowProneProvider === true;
+    params.silentOverflowProneProvider === true ||
+    params.compactionForbidden === true;
   if (disable) {
     params.settingsManager.setCompactionEnabled(false);
   }

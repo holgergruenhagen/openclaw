@@ -20,26 +20,23 @@ import type {
 import type { CodeModeOutputState } from "./code-mode-json.js";
 import type { CodeModeNamespaceRuntime } from "./code-mode-namespaces.js";
 import { CodeModeProgramDataInbox, type CodeModeReplyLease } from "./code-mode-program-data.js";
-import { createCodeModeResultsAccess, type CodeModeResultsAccess } from "./code-mode-results.js";
+import { createCodeModeResultsAccess } from "./code-mode-results.js";
 import type {
   CodeModeConfig,
   CodeModeSettlementMode,
   PendingBridgeRequest,
   SettledBridgeRequest,
 } from "./code-mode-runtime.js";
-import {
-  createCodeModeSessionStoreAccess,
-  type CodeModeSessionStoreAccess,
-} from "./code-mode-session-store.js";
+import { createCodeModeSessionStoreAccess } from "./code-mode-session-store.js";
 import { recordCodeModeToolOutcome } from "./code-mode-tool-outcome.js";
 import { captureAgentPluginRuntimeRefresh } from "./plugin-runtime-refresh.js";
-import type { AgentToolUpdateCallback } from "./runtime/index.js";
 import type { ToolSearchRuntime } from "./tool-search-runtime.js";
 import type { ToolSearchToolContext } from "./tool-search-types.js";
 import { ToolInputError } from "./tools/common.js";
 
 export type CodeModeBridgeDispatchState = {
   started: boolean;
+  workerId?: string;
 };
 
 export type PendingBridgeState = PendingBridgeRequest & {
@@ -251,6 +248,9 @@ export function createCodeModeRunOwner(
       return execution;
     },
     approvalWait,
+    releaseCall() {
+      releaseCall();
+    },
     bindCall(callSignal?: AbortSignal): AbortSignal {
       releaseCall();
       if (signal.aborted) {
@@ -534,22 +534,10 @@ function isPendingBridgeRequestReplaySafe(
 
 export function createPendingBridgeStates(
   pendingRequests: PendingBridgeRequest[],
-  params: {
-    config: CodeModeConfig;
+  params: Omit<Parameters<typeof runBridgeRequest>[0], "request" | "reply" | "signal"> & {
     inbox: CodeModeProgramDataInbox;
-    results: CodeModeResultsAccess;
-    sessionStore?: CodeModeSessionStoreAccess;
-    runtime: ToolSearchRuntime;
-    catalogProjection: CodeModeCatalogProjection;
-    namespaceRuntime: CodeModeNamespaceRuntime;
-    parentToolCallId: string;
-    codeModeRunId: string;
-    remainingMs: number;
-    completionRequired?: boolean;
     activeRunId?: string;
-    ctx: ToolSearchToolContext;
     signal: AbortSignal;
-    onUpdate?: AgentToolUpdateCallback;
     bridgeDispatch: CodeModeBridgeDispatchState;
   },
 ): PendingBridgeState[] {
@@ -574,6 +562,8 @@ export function createPendingBridgeStates(
       params.bridgeDispatch.started = true;
     }
     const bridgeCall = runBridgeRequest({
+      activeRunId: params.activeRunId,
+      workerId: params.bridgeDispatch.workerId,
       runtime: params.runtime,
       results: params.results,
       sessionStore: params.sessionStore,
@@ -670,7 +660,11 @@ export function storeSuspendedRun(
   // A result that cannot expose its continuation must not leave an unreachable parked cell.
   activeRuns.set(runId, state);
   scheduleActiveRunExpiry();
-  return recordCodeModeToolOutcome(result, result, params.pending);
+  const recorded = recordCodeModeToolOutcome(result, result, params.pending);
+  // Successful observers can close before the next wait. Parked work remains
+  // owned by the parent run, catalog and expiry, not that completed call.
+  params.owner.releaseCall();
+  return recorded;
 }
 
 export function codeModeAbortedResult(params: {

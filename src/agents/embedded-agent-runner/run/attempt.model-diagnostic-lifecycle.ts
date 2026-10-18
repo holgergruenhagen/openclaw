@@ -5,6 +5,8 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { fireAndForgetBoundedHook } from "../../../hooks/fire-and-forget.js";
+import { emitAgentEvent } from "../../../infra/agent-events.js";
+import { getAgentRunContext } from "../../../infra/agent-run-registry.js";
 import {
   diagnosticErrorCategory,
   diagnosticErrorFailureKind,
@@ -30,13 +32,18 @@ import {
 } from "../../../infra/diagnostic-trace-context.js";
 import { formatPropagatedDiagnosticTraceparent } from "../../../infra/diagnostic-trace-propagation.js";
 import { emitDiagnosticsTimelineEvent } from "../../../infra/diagnostics-timeline.js";
+import { withModelTransportContext } from "../../../llm/model-transport-context.js";
+import { createModelCallStreamProgressReporter } from "../../../logging/diagnostic-model-stream-progress.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import type {
   PluginHookAgentContext,
   PluginHookModelCallEndedEvent,
   PluginHookModelCallStartedEvent,
 } from "../../../plugins/hook-types.js";
+import { captureAsyncWorkTracker } from "../../../shared/async-work-scope.js";
+import type { EmbeddedAgentEvent } from "../../embedded-agent-subscribe.shared-types.js";
 import type { StreamFn } from "../../runtime/index.js";
+import { log } from "../logger.js";
 import type {
   createModelObserver,
   ModelCallEventBase,
@@ -49,13 +56,17 @@ export type ModelCallDiagnosticContext = Omit<PluginHookModelCallStartedEvent, "
   contentCapture?: DiagnosticModelContentCapturePolicy;
   nextCallId: () => string;
   ownerGeneration?: CoreModelRequestOwnerGeneration;
-  onStarted?: () => void;
+  onStarted?: (callId: string) => void;
+  /** Request observation ended; cleanup settlement and replay admission remain separately owned. */
+  onFinished?: (callId: string) => void;
   /** Each streamed non-empty text, thinking or tool-call delta; keepalives never count. */
   onOutputDelta?: () => void;
   onTerminal?: () => void;
   onSucceeded?: (startedAt: number) => void;
+  onAgentEvent?: (event: EmbeddedAgentEvent) => void | Promise<void>;
   suppressPluginHooks?: boolean;
   requestTimeoutMs?: number;
+  priority?: "interactive" | "background";
 };
 
 type ModelCallErrorFields = Pick<
@@ -116,6 +127,14 @@ function processMemoryUsageSnapshot(): DiagnosticMemoryUsage | undefined {
   }
 }
 
+const modelCallContextBudget = (eventBase: PluginHookModelCallStartedEvent) => ({
+  ...(eventBase.contextTokenBudget ? { contextTokenBudget: eventBase.contextTokenBudget } : {}),
+  ...(eventBase.contextWindowSource ? { contextWindowSource: eventBase.contextWindowSource } : {}),
+  ...(eventBase.contextWindowReferenceTokens
+    ? { contextWindowReferenceTokens: eventBase.contextWindowReferenceTokens }
+    : {}),
+});
+
 function modelCallHookEventBase(
   eventBase: PluginHookModelCallStartedEvent,
 ): PluginHookModelCallStartedEvent {
@@ -128,13 +147,7 @@ function modelCallHookEventBase(
     model: eventBase.model,
     ...(eventBase.api ? { api: eventBase.api } : {}),
     ...(eventBase.transport ? { transport: eventBase.transport } : {}),
-    ...(eventBase.contextTokenBudget ? { contextTokenBudget: eventBase.contextTokenBudget } : {}),
-    ...(eventBase.contextWindowSource
-      ? { contextWindowSource: eventBase.contextWindowSource }
-      : {}),
-    ...(eventBase.contextWindowReferenceTokens
-      ? { contextWindowReferenceTokens: eventBase.contextWindowReferenceTokens }
-      : {}),
+    ...modelCallContextBudget(eventBase),
   };
 }
 
@@ -156,13 +169,7 @@ function dispatchModelCallHook(
     ...(eventBase.sessionId ? { sessionId: eventBase.sessionId } : {}),
     modelProviderId: eventBase.provider,
     modelId: eventBase.model,
-    ...(eventBase.contextTokenBudget ? { contextTokenBudget: eventBase.contextTokenBudget } : {}),
-    ...(eventBase.contextWindowSource
-      ? { contextWindowSource: eventBase.contextWindowSource }
-      : {}),
-    ...(eventBase.contextWindowReferenceTokens
-      ? { contextWindowReferenceTokens: eventBase.contextWindowReferenceTokens }
-      : {}),
+    ...modelCallContextBudget(eventBase),
   });
   fireAndForgetBoundedHook(
     () =>
@@ -173,92 +180,13 @@ function dispatchModelCallHook(
   );
 }
 
-function emitModelCallEnded(
-  eventBase: ModelCallEventBase,
-  startedAt: number,
-  observer: ModelCallObserver,
-  failure: { error: unknown } | undefined,
-  ownerGeneration: CoreModelRequestOwnerGeneration | undefined,
-  config: OpenClawConfig | undefined,
-): void {
-  if (observer.state.terminalEventEmitted) {
-    return;
-  }
-  observer.state.terminalEventEmitted = true;
-  const terminalAtMs = Date.now();
-  const durationMs = terminalAtMs - startedAt;
-  const sizeTimingFields = observer.sizeTimingFields();
-  const fields = failure ? modelCallErrorFields(failure.error) : undefined;
-  const terminal = fields
-    ? { type: "model.call.error" as const, ...fields }
-    : { type: "model.call.completed" as const };
-  const errorStatus = failure ? diagnosticHttpStatusCode(failure.error) : undefined;
-  const responseStatus =
-    observer.state.responseStatus ?? (errorStatus === undefined ? undefined : Number(errorStatus));
-  const terminalReason = failure
-    ? observer.state.terminalReason === "aborted"
-      ? "aborted"
-      : (fields?.failureKind ?? "error")
-    : (observer.state.terminalReason ?? "unknown");
-  const { providerAcceptanceKind } = observer.state;
-  const provider = boundedTimelineAttribute(eventBase.provider);
-  const model = boundedTimelineAttribute(eventBase.model);
-  const api = boundedTimelineAttribute(eventBase.api);
-  const transport = boundedTimelineAttribute(eventBase.transport);
-  emitDiagnosticsTimelineEvent(
-    {
-      type: "provider.request",
-      name: "provider.request",
-      timestamp: new Date(startedAt).toISOString(),
-      runId: eventBase.runId,
-      spanId: eventBase.callId,
-      durationMs,
-      provider,
-      operation: api ?? transport ?? "model.call",
-      ok: failure === undefined,
-      ...(responseStatus !== undefined ? { status: responseStatus } : {}),
-      attributes: {
-        ...(model ? { model } : {}),
-        ...(api ? { api } : {}),
-        ...(transport ? { transport } : {}),
-        terminalAtMs,
-        ...(observer.state.lastProviderActivityAtMs !== undefined
-          ? { lastProviderActivityAtMs: observer.state.lastProviderActivityAtMs }
-          : {}),
-        terminalReason,
-        providerAccepted: providerAcceptanceKind !== undefined,
-        ...(providerAcceptanceKind ? { providerAcceptanceKind } : {}),
-      },
-    },
-    { config },
-  );
-  emitCoreModelRequestEndedDiagnosticEvent(
-    {
-      ...terminal,
-      ...eventBase,
-      durationMs,
-      ...sizeTimingFields,
-      ...observer.usageField(),
-    },
-    ownerGeneration,
-    modelContentPrivateData(observer.completedContent()),
-  );
-  if (!observer.state.suppressPluginHooks) {
-    dispatchModelCallHook(eventBase, {
-      durationMs,
-      outcome: failure ? "error" : "completed",
-      ...sizeTimingFields,
-      ...fields,
-    });
-  }
-}
-
 function withDiagnosticRequestContext(
   options: ModelCallStreamOptions,
   trace: DiagnosticTraceContext,
   observer: ModelCallObserver,
   callId: string,
-): ModelCallStreamOptions {
+  ctx: ModelCallDiagnosticContext,
+): NonNullable<ModelCallStreamOptions> {
   const traceparent = formatPropagatedDiagnosticTraceparent(trace);
   const originalOnPayload = options?.onPayload;
   const originalOnResponse = options?.onResponse;
@@ -271,14 +199,11 @@ function withDiagnosticRequestContext(
       return undefined;
     }
     const result = originalOnPayload(payload, model);
-    if (isPromiseLike(result)) {
-      return result.then((replacement) => {
-        observer.assignRequestPayloadBytes(replacement ?? payload);
-        return replacement;
-      });
-    }
-    observer.assignRequestPayloadBytes(result ?? payload);
-    return result;
+    const observeReplacement = (replacement: unknown) => {
+      observer.assignRequestPayloadBytes(replacement ?? payload);
+      return replacement;
+    };
+    return isPromiseLike(result) ? result.then(observeReplacement) : observeReplacement(result);
   };
   const onResponse: NonNullable<ModelCallStreamOptions>["onResponse"] = (response, model) => {
     // Retrying providers can expose several responses; the terminal request status
@@ -309,6 +234,16 @@ function withDiagnosticRequestContext(
   };
   modelRequestBodyState(requestOptions).onBytes = (bytes) => {
     observer.state.requestPayloadBytes = bytes;
+    emitDiagnosticsTimelineEvent(
+      {
+        type: "mark",
+        name: "provider.request.serialized",
+        timestamp: new Date().toISOString(),
+        runId: ctx.runId,
+        spanId: callId,
+      },
+      { config: ctx.config },
+    );
   };
   return withProviderAcceptanceObserver(requestOptions, (acceptance) => {
     if (observer.state.terminalEventEmitted) {
@@ -329,6 +264,24 @@ export function createModelLifecycle(params: {
   createObserver: (capturePromptStats: boolean) => ModelCallObserver;
 }) {
   const callId = params.ctx.nextCallId();
+  const runContext = getAgentRunContext(params.ctx.runId);
+  const transportContext = {
+    sessionKey: params.ctx.sessionKey,
+    runId: params.ctx.runId,
+    requestId: callId,
+    priority: params.ctx.priority,
+    onRateLimitWait: (retryAt: number) => {
+      const delayMs = Math.max(0, retryAt - Date.now());
+      reportStatus({
+        phase: "retrying",
+        reason: "rate_limit",
+        message: `Waiting for rate limit. Retrying in ${Math.ceil(delayMs / 1000)}s.`,
+        delayMs,
+        retryAt,
+      });
+      return () => reportStatus({ phase: "starting_model" });
+    },
+  };
   const trace = freezeDiagnosticTraceContext(createChildDiagnosticTraceContext(params.ctx.trace));
   const observer = params.createObserver(areDiagnosticsEnabledForProcess());
   const eventBase: ModelCallEventBase = {
@@ -338,6 +291,10 @@ export function createModelLifecycle(params: {
     ...(observer.promptStats ? { promptStats: observer.promptStats } : {}),
     trace,
   };
+  const reportStreamProgress = createModelCallStreamProgressReporter({
+    config: params.ctx.config,
+    target: eventBase,
+  });
   emitCoreModelRequestStartedDiagnosticEvent(
     eventBase,
     params.ctx.ownerGeneration,
@@ -347,7 +304,6 @@ export function createModelLifecycle(params: {
   if (params.ctx.suppressPluginHooks !== true) {
     dispatchModelCallHook(eventBase);
   }
-  params.ctx.onStarted?.();
   const startedAt = Date.now();
   emitDiagnosticsTimelineEvent(
     {
@@ -359,47 +315,199 @@ export function createModelLifecycle(params: {
     },
     { config: params.ctx.config },
   );
-  const propagatedOptions = withDiagnosticRequestContext(params.options, trace, observer, callId);
+  const propagatedOptions = withDiagnosticRequestContext(
+    params.options,
+    trace,
+    observer,
+    callId,
+    params.ctx,
+  );
+  let waitReason: "response" | "slot" | null = null;
+  let firstEventObserved = false;
+  const trackStatusDelivery = captureAsyncWorkTracker();
+  const signal = params.options?.signal;
+  function reportStatus(data: Record<string, unknown>) {
+    const event = { stream: "run_status" as const, data };
+    emitAgentEvent({ runId: params.ctx.runId, sessionKey: params.ctx.sessionKey, ...event });
+    if (params.ctx.onAgentEvent) {
+      void trackStatusDelivery(async () => {
+        try {
+          await params.ctx.onAgentEvent?.(event);
+        } catch {
+          log.warn("Provider wait status delivery failed");
+        }
+      });
+    }
+  }
+  const reportWait: NonNullable<NonNullable<ModelCallStreamOptions>["onProviderWait"]> = (
+    reason,
+  ) => {
+    if (
+      reason === waitReason ||
+      (reason !== null &&
+        (firstEventObserved || signal?.aborted || observer.state.terminalEventEmitted))
+    ) {
+      return;
+    }
+    waitReason = reason;
+    if (runContext) {
+      if (reason) {
+        runContext.localModelWait = { requestId: callId };
+      } else if (runContext.localModelWait?.requestId === callId) {
+        delete runContext.localModelWait;
+      }
+    }
+    reportStatus(reason ? { phase: "waiting_for_model", reason } : { phase: "starting_model" });
+    params.options?.onProviderWait?.(reason);
+  };
+  const clearWait = () => reportWait(null);
+  propagatedOptions.onProviderWait = reportWait;
+  signal?.addEventListener("abort", clearWait, { once: true });
+  function emitModelCallEnded(failure: { error: unknown } | undefined): void {
+    const { ownerGeneration, config } = params.ctx;
+    if (observer.state.terminalEventEmitted) {
+      return;
+    }
+    clearWait();
+    signal?.removeEventListener("abort", clearWait);
+    observer.state.terminalEventEmitted = true;
+    const terminalAtMs = Date.now();
+    const durationMs = terminalAtMs - startedAt;
+    const providerTimingFields: Record<string, number> =
+      observer.state.providerProcessingMs === undefined
+        ? {}
+        : {
+            providerProcessingMs: observer.state.providerProcessingMs,
+            // Includes queueing, loading, transport, and terminal settlement overhead.
+            providerWaitEstimateMs: Math.max(0, durationMs - observer.state.providerProcessingMs),
+          };
+    const sizeTimingFields = observer.sizeTimingFields();
+    const fields = failure ? modelCallErrorFields(failure.error) : undefined;
+    const terminal = fields
+      ? { type: "model.call.error" as const, ...fields }
+      : { type: "model.call.completed" as const };
+    const errorStatus = failure ? diagnosticHttpStatusCode(failure.error) : undefined;
+    const responseStatus =
+      observer.state.responseStatus ??
+      (errorStatus === undefined ? undefined : Number(errorStatus));
+    const terminalReason = failure
+      ? observer.state.terminalReason === "aborted"
+        ? "aborted"
+        : (fields?.failureKind ?? "error")
+      : (observer.state.terminalReason ?? "unknown");
+    const { providerAcceptanceKind } = observer.state;
+    const provider = boundedTimelineAttribute(eventBase.provider);
+    const model = boundedTimelineAttribute(eventBase.model);
+    const api = boundedTimelineAttribute(eventBase.api);
+    const transport = boundedTimelineAttribute(eventBase.transport);
+    emitDiagnosticsTimelineEvent(
+      {
+        type: "provider.request",
+        name: "provider.request",
+        timestamp: new Date(startedAt).toISOString(),
+        runId: eventBase.runId,
+        spanId: eventBase.callId,
+        durationMs,
+        provider,
+        operation: api ?? transport ?? "model.call",
+        ok: failure === undefined,
+        ...(responseStatus !== undefined ? { status: responseStatus } : {}),
+        attributes: {
+          ...(model ? { model } : {}),
+          ...(api ? { api } : {}),
+          ...(transport ? { transport } : {}),
+          terminalAtMs,
+          ...providerTimingFields,
+          ...(observer.state.lastProviderActivityAtMs !== undefined
+            ? { lastProviderActivityAtMs: observer.state.lastProviderActivityAtMs }
+            : {}),
+          terminalReason,
+          providerAccepted: providerAcceptanceKind !== undefined,
+          ...(providerAcceptanceKind ? { providerAcceptanceKind } : {}),
+        },
+      },
+      { config },
+    );
+    emitCoreModelRequestEndedDiagnosticEvent(
+      {
+        ...terminal,
+        ...eventBase,
+        durationMs,
+        ...providerTimingFields,
+        ...sizeTimingFields,
+        ...observer.usageField(),
+      },
+      ownerGeneration,
+      modelContentPrivateData(observer.completedContent()),
+    );
+    if (!observer.state.suppressPluginHooks) {
+      dispatchModelCallHook(eventBase, {
+        durationMs,
+        outcome: failure ? "error" : "completed",
+        ...sizeTimingFields,
+        ...fields,
+      });
+    }
+  }
   let terminalNotified = false;
+  let finishedNotified = false;
+  const notifyFinished = () => {
+    if (!finishedNotified) {
+      finishedNotified = true;
+      clearWait();
+      signal?.removeEventListener("abort", clearWait);
+      params.ctx.onFinished?.(callId);
+    }
+  };
+  try {
+    params.ctx.onStarted?.(callId);
+  } catch (error) {
+    notifyFinished();
+    throw error;
+  }
   return {
     eventBase,
     observer,
     propagatedOptions,
+    runInTransportContext<T>(run: () => T): T {
+      return withModelTransportContext(transportContext, run);
+    },
     startedAt,
     observeChunk(chunk: unknown) {
+      firstEventObserved = true;
+      clearWait();
       observer.observeResponseChunk(startedAt, chunk);
-      observer.maybeEmitStreamProgress(eventBase);
+      reportStreamProgress(observer.state.terminalEventEmitted ? undefined : callId);
       if (params.ctx.onOutputDelta && isModelOutputDelta(chunk)) {
         params.ctx.onOutputDelta();
       }
     },
     emitCompleted() {
-      // Iterator exhaustion can emit diagnostics before result() supplies the terminal response.
-      if (!terminalNotified && (observer.state.terminalSucceeded || observer.state.terminalError)) {
-        terminalNotified = true;
-        params.ctx.onTerminal?.();
-        if (observer.state.terminalSucceeded && !observer.state.terminalError) {
-          params.ctx.onSucceeded?.(startedAt);
+      try {
+        // Iterator exhaustion can emit diagnostics before result() supplies the terminal response.
+        if (
+          !terminalNotified &&
+          (observer.state.terminalSucceeded || observer.state.terminalError)
+        ) {
+          terminalNotified = true;
+          params.ctx.onTerminal?.();
+          if (observer.state.terminalSucceeded && !observer.state.terminalError) {
+            params.ctx.onSucceeded?.(startedAt);
+          }
         }
+        emitModelCallEnded(
+          observer.state.terminalError ? { error: observer.state.terminalError } : undefined,
+        );
+      } finally {
+        notifyFinished();
       }
-      emitModelCallEnded(
-        eventBase,
-        startedAt,
-        observer,
-        observer.state.terminalError ? { error: observer.state.terminalError } : undefined,
-        params.ctx.ownerGeneration,
-        params.ctx.config,
-      );
     },
     emitError(err: unknown) {
-      emitModelCallEnded(
-        eventBase,
-        startedAt,
-        observer,
-        { error: err },
-        params.ctx.ownerGeneration,
-        params.ctx.config,
-      );
+      try {
+        emitModelCallEnded({ error: err });
+      } finally {
+        notifyFinished();
+      }
     },
   };
 }

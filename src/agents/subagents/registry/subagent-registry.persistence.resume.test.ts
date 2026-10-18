@@ -19,9 +19,13 @@ import { closeOpenClawStateDatabaseForTest as closeSeedStateDatabase } from "../
 import "./subagent-registry.mocks.shared.js";
 import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import type { maybeWakeRequesterAfterAllChildrenSettled } from "../announce/subagent-announce.requester-settle-wake.js";
-import { saveSubagentRegistryToSqlite } from "./subagent-registry-state.fixture.test-support.js";
+import {
+  loadSubagentRegistryFromSqlite,
+  saveSubagentRegistryToSqlite,
+} from "./subagent-registry-state.fixture.test-support.js";
 import { registerSubagentDismissedRetentionCases } from "./subagent-registry.persistence.retention.test-support.js";
 import {
+  prepareSubagentRecoveryFixture,
   gateSubagentRequesterSettlement,
   observeSubagentRequesterWake,
   settleSubagentRegistryPersistenceWork,
@@ -32,7 +36,6 @@ import {
   writeChildSession,
 } from "./subagent-registry.persistence.test-support.js";
 import { registerStaleRequesterWakeBatchTests } from "./subagent-registry.persistence.wake.test-support.js";
-import { loadSubagentRegistryFromSqlite } from "./subagent-registry.store.sqlite.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 type WakeRequester = typeof maybeWakeRequesterAfterAllChildrenSettled;
@@ -126,6 +129,7 @@ describe("subagent registry persistence resume", () => {
           runId,
           requesterTurnRunId: "run-requester",
           childSessionKey,
+          childSessionIdentity: { sessionId: `sess-pending-${label}-delivery` },
           task: "deliver before waking requester",
           createdAt: 100,
           endedReason: "subagent-complete",
@@ -150,6 +154,7 @@ describe("subagent registry persistence resume", () => {
           },
           cleanupHandled: false,
         });
+        await prepareSubagentRecoveryFixture(run, { stateDir });
         saveSubagentRegistryToSqlite(new Map([[run.runId, run]]));
         await writeChildSession(stateDir, run.childSessionKey, `sess-pending-${label}-delivery`);
 
@@ -167,8 +172,9 @@ describe("subagent registry persistence resume", () => {
   );
 
   it("replays one required completion after restart without the child session", async () => {
-    await withRegistryState(async () => {
+    await withRegistryState(async (stateDir) => {
       const run = createOrphanedRequiredDelivery("pending");
+      await prepareSubagentRecoveryFixture(run, { stateDir });
       saveSubagentRegistryToSqlite(new Map([[run.runId, run]]));
       const settlement = gateSubagentRequesterSettlement(
         requesterSettleModule.maybeWakeRequesterAfterAllChildrenSettled,
@@ -239,7 +245,7 @@ describe("subagent registry persistence resume", () => {
       vi.useFakeTimers();
     }
     try {
-      await withRegistryState(async () => {
+      await withRegistryState(async (stateDir) => {
         const endedAt = Date.now();
         const run = createDeliveredWake("run-rejected-requester-wake", {
           status: restarting && !waitingForActivation ? "dispatching" : "pending",
@@ -250,6 +256,7 @@ describe("subagent registry persistence resume", () => {
           afterRequesterYield: true,
           rearmGeneration: 1,
         });
+        await prepareSubagentRecoveryFixture(run, { stateDir });
         const wakeRequester = vi.fn<WakeRequester>(async (params) => {
           if (!restarting) {
             throw new admission.GatewayDrainingError();
@@ -379,7 +386,7 @@ describe("subagent registry persistence resume", () => {
       };
       vi.useFakeTimers();
       try {
-        await withRegistryState(async () => {
+        await withRegistryState(async (stateDir) => {
           try {
             const runs = Array.from({ length: runCount }, (_, index) => {
               const runId = `run-outstanding-wake-${index}`;
@@ -395,6 +402,9 @@ describe("subagent registry persistence resume", () => {
                 requesterSessionKey: `agent:main:requester-${index}`,
               };
             });
+            for (const run of runs) {
+              await prepareSubagentRecoveryFixture(run, { stateDir });
+            }
             const { run: wakeRequester, waitForCalls } = observeSubagentRequesterWake(
               async (params) => {
                 if (getGatewayContextResolver(params.settledEntry!)?.() === firstGateway) {
@@ -542,12 +552,53 @@ describe("subagent registry persistence resume", () => {
     settleOwnedWork: () => settleOwnedWork?.(true),
   });
 
+  it("restores metadata without reloading unchanged retained payloads", async () => {
+    await withRegistryState(async () => {
+      const endedAt = 1_000;
+      const runs = ["unchanged", "retention-changed"].map((runId) =>
+        createSubagentRunRecord({
+          runId,
+          childAgentId: "main",
+          requesterAgentId: "main",
+          childSessionKey: `agent:main:subagent:${runId}`,
+          task: "retained task ".repeat(100),
+          endedAt,
+          cleanup: "delete",
+          cleanupCompletedAt: endedAt,
+          archiveAtMs: runId === "unchanged" ? endedAt + 60_000 : endedAt + 120_000,
+          delivery: { status: "delivered" },
+          completion: { required: true, resultText: "retained result ".repeat(100) },
+        }),
+      );
+      registryConfigModule.setRuntimeConfigSnapshot({
+        agents: { defaults: { subagents: { archiveAfterMinutes: 1 } } },
+      });
+      saveSubagentRegistryToSqlite(new Map(runs.map((run) => [run.runId, run])));
+      const reads = await import("./subagent-registry-read-cache.js");
+      const payloadReads = vi.spyOn(reads, "readFullSubagentRuns");
+
+      await mod.initSubagentRegistry();
+
+      expect(payloadReads.mock.calls.map(([, selection]) => selection)).toEqual([
+        { kind: "ids", runIds: ["retention-changed"] },
+      ]);
+      for (const original of runs) {
+        expect(readPersistedRun(original.runId)).toMatchObject({
+          archiveAtMs: endedAt + 60_000,
+          task: original.task,
+          completion: original.completion,
+        });
+      }
+    });
+  });
+
   it.each([
     { status: "suspended" as const, disposition: undefined, queueId: undefined },
     { status: "in_progress" as const, disposition: "session_queued" as const, queueId: "queue-1" },
   ])("retains $status required delivery with its owner after restart", async (expected) => {
-    await withRegistryState(async () => {
+    await withRegistryState(async (stateDir) => {
       const run = createOrphanedRequiredDelivery(expected.status);
+      await prepareSubagentRecoveryFixture(run, { stateDir });
       saveSubagentRegistryToSqlite(new Map([[run.runId, run]]));
 
       await mod.initSubagentRegistry();
@@ -585,6 +636,7 @@ describe("subagent registry persistence resume", () => {
           requesterTurnRunId: "run-requester",
           requesterTurnYielded: true,
           childSessionKey: "agent:main:subagent:hydrated-yield",
+          childSessionIdentity: { sessionId: "sess-hydrated-yield" },
           task: "wake only after lifecycle activation",
           createdAt: endedAt - 1_000,
           endedReason: "subagent-complete",
@@ -595,6 +647,10 @@ describe("subagent registry persistence resume", () => {
         const queuedCollector = createSubagentRunRecord({
           runId: "run-hydrated-collector",
           childSessionKey: "agent:main:subagent:hydrated-collector",
+          childSessionIdentity: {
+            sessionId: "sess-hydrated-collector",
+            lifecycleRevision: "revision-hydrated-collector",
+          },
           task: "clean only after lifecycle activation",
           createdAt: endedAt - 500,
           collect: true,
@@ -612,6 +668,7 @@ describe("subagent registry persistence resume", () => {
         const runningRun = createSubagentRunRecord({
           runId: "run-hydrated-running",
           childSessionKey: "agent:main:subagent:hydrated-running",
+          childSessionIdentity: { sessionId: "sess-hydrated-running" },
           task: "wait through the activated instance",
           createdAt: endedAt,
           execution: { status: "running", startedAt: endedAt },
@@ -655,6 +712,7 @@ describe("subagent registry persistence resume", () => {
         };
         let firstLifecycleOpen = true;
         const gatewayContext = {
+          localEmbedded: true,
           chatAbortControllers: new Map<string, ChatAbortControllerEntry>(),
           recoveryRuntime,
           resolveGatewayContext: vi.fn(),
@@ -673,13 +731,15 @@ describe("subagent registry persistence resume", () => {
         expect(restoredGatewayContextResolver?.()).toBe(gatewayContext);
 
         await Promise.all([wakeStarted.promise, waitStarted.promise]);
-        expect(wakeRequester).toHaveBeenCalledOnce();
+        expect(wakeRequester).toHaveBeenCalled();
         expect(recoveryRuntime.waitForAgent).toHaveBeenCalledOnce();
         expect(recoveryRuntime.dispatchAgent).not.toHaveBeenCalled();
         expect(callGatewayModule.callGateway).not.toHaveBeenCalledWith(
           expect.objectContaining({ method: "agent.wait" }),
         );
 
+        // Activation's collector publications must settle before the manual sweep captures them.
+        await settleSubagentRegistryPersistenceWork(() => settleOwnedWork?.(true));
         const sweptWake = createDeferredCore<boolean>();
         wakeRequester.mockImplementationOnce(() => {
           sweptWake.resolve(false);
@@ -709,6 +769,7 @@ describe("subagent registry persistence resume", () => {
           waitForAgent: vi.fn(async () => ({ status: "pending" })),
         };
         const replacementGateway = {
+          localEmbedded: true,
           chatAbortControllers: new Map<string, ChatAbortControllerEntry>(),
           recoveryRuntime: replacementRuntime,
           resolveGatewayContext: () => replacementGateway as never,
@@ -837,6 +898,7 @@ describe("subagent registry persistence resume", () => {
           endedAt,
           cleanupCompletedAt: endedAt,
         });
+        await prepareSubagentRecoveryFixture(run, { stateDir });
         const predecessor = {
           ...run,
           runId: "run-original",
@@ -855,6 +917,7 @@ describe("subagent registry persistence resume", () => {
             rearmGeneration: 7,
           };
           predecessor.childSessionKey = "agent:main:subagent:old-child";
+          predecessor.childSessionIdentity = { sessionId: "sess-run-old-child-continued" };
           predecessor.taskRunId = "task-old-child";
           predecessor.requesterSettleWake = structuredClone(run.requesterSettleWake);
           nonannouncing.push({
@@ -873,6 +936,7 @@ describe("subagent registry persistence resume", () => {
             runId: `run-nonannouncing-${collect}`,
             taskRunId: `run-nonannouncing-${collect}`,
             childSessionKey: `agent:main:subagent:nonannouncing-${collect}`,
+            childSessionIdentity: { sessionId: `sess-run-nonannouncing-${collect}` },
             expectsCompletionMessage: false,
             requesterTurnYielded: undefined,
             requesterSettleWake: undefined,

@@ -1,4 +1,3 @@
-// Lazy command implementations for routes that can bypass full Commander registration.
 import { defaultRuntime } from "../../runtime.js";
 import {
   parseAgentsListRouteArgs,
@@ -26,7 +25,6 @@ function defineRoutedCommand<TArgs>(
   };
 }
 
-/** Route id to lazy parser/runner definition. */
 export const routedCommandDefinitions = {
   health: defineRoutedCommand(parseHealthRouteArgs, async (args) => {
     const { healthCommand } = await import("../../commands/health.js");
@@ -72,7 +70,10 @@ export const routedCommandDefinitions = {
   }),
   "config-unset": defineRoutedCommand(parseConfigUnsetRouteArgs, async (args) => {
     const { runConfigUnset } = await import("../config-cli.js");
-    await runConfigUnset(args);
+    await runConfigUnset({
+      ...args,
+      localStateOwner: { method: "config unset", target: args.path },
+    });
   }),
   "models-list": defineRoutedCommand(parseModelsListRouteArgs, async (args) => {
     const { modelsListCommand } = await import("../../commands/models/list.list-command.js");

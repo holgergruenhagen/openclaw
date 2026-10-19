@@ -517,7 +517,7 @@ describe("auditGatewayServiceConfig systemd", () => {
             {
               code: codes.systemdUserManagerStopTimeout,
               message: expect.stringContaining(
-                "set TimeoutStopSec=90 or longer in /etc/systemd/system/user@1000.service.d/*.conf",
+                "set TimeoutStopSec=90 or longer in /etc/systemd/system/user@1000.service.d/zz-openclaw-stop-timeout.conf",
               ),
               detail: scenario.detail,
               level: "recommended",

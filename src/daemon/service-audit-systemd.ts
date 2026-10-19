@@ -267,7 +267,7 @@ async function auditSystemdUserManagerStopTimeout(
   }
   report(
     SYSTEMD_SERVICE_AUDIT_CODES.systemdUserManagerStopTimeout,
-    `Host shutdown or reboot stops ${managerUnit} within ${stopTimeoutMs / 1_000}s, cutting short the Gateway drain and cleanup; set TimeoutStopSec=${SYSTEMD_DEFAULT_STOP_TIMEOUT_MS / 1_000} or longer in /etc/systemd/system/${managerUnit}.d/*.conf (${GATEWAY_SERVICE_STOP_TIMEOUT_MS / 1_000} keeps the full drain).`,
+    `Host shutdown or reboot stops ${managerUnit} within ${stopTimeoutMs / 1_000}s, cutting short the Gateway drain and cleanup; set TimeoutStopSec=${SYSTEMD_DEFAULT_STOP_TIMEOUT_MS / 1_000} or longer in /etc/systemd/system/${managerUnit}.d/zz-openclaw-stop-timeout.conf (${GATEWAY_SERVICE_STOP_TIMEOUT_MS / 1_000} keeps the full drain).`,
     `${managerUnit}: ${stopTimeoutMs / 1_000}s (systemd system manager)`,
   );
 }

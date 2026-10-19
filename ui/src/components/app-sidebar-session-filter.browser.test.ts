@@ -1,4 +1,4 @@
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, onTestFailed, onTestFinished, vi } from "vitest";
 import { i18n, t } from "../i18n/index.ts";
 import { captureI18nStateForTesting } from "../i18n/lib/translate.test-support.ts";
 import { subscribeNativeOverlayOcclusion } from "../lib/native-overlay-occlusion.ts";
@@ -17,7 +17,6 @@ import {
   loadStoredSidebarSessionsShowPreview,
   loadStoredSidebarSessionsShowSystem,
 } from "./app-sidebar-session-types.ts";
-import "@awesome.me/webawesome/dist/styles/themes/default.css";
 import "../test-helpers/load-styles.ts";
 import "../styles/settings-controls.css";
 import "../styles/settings-native-controls.css";
@@ -38,6 +37,9 @@ const ownerOptions = (root: Element) =>
 async function mountFilters(width: number, teammates = 0) {
   const { page } = await import("vitest/browser");
   await page.viewport(width, 560);
+  // Park before mounting: a previous case's pointer can otherwise reveal a
+  // tooltip while the new sidebar settles, before keyboard actions begin.
+  await page.elementLocator(document.body).hover({ position: { x: 0, y: 0 } });
   // The app shell marks phone layouts; the filter panel becomes a bottom sheet there.
   document.body.classList.toggle("shell--mobile-nav", width < 560);
   onTestFinished(() => document.body.classList.remove("shell--mobile-nav"));
@@ -83,14 +85,69 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
         vi.unstubAllGlobals();
       });
       const { sidebar, page } = await mountFilters(width);
+      // A retained pointer can open the rail tooltip when the layout switches to RTL.
+      await page.elementLocator(document.body).hover({ position: { x: 0, y: 0 } });
       sidebar.dir = direction;
       const occlusion: boolean[] = [];
+      const started = performance.now();
+      const surfaceSelector = ".picker-select__menu,.oc-overlay,.tooltip-popup";
+      const diagnostics: {
+        event: string;
+        elapsed: number;
+        occluded?: boolean;
+        id?: string;
+        phase?: string;
+      }[] = [];
+      const record = (event: string, occluded?: boolean, surface?: Element) => {
+        if (diagnostics.length < 32) {
+          diagnostics.push({
+            event,
+            elapsed: Math.round(performance.now() - started),
+            occluded,
+            id: surface?.id,
+            phase: surface?.getAttribute("data-phase") ?? undefined,
+          });
+        }
+      };
+      const lifecycle = (event: Event) => {
+        if (!(event.target instanceof Element)) {
+          return;
+        }
+        // Tooltip events retarget or forward across the shadow boundary to their host.
+        const surface = event.target.matches("openclaw-tooltip")
+          ? event.target.shadowRoot?.querySelector(".oc-overlay")
+          : event.target.matches(surfaceSelector)
+            ? event.target
+            : null;
+        if (surface) {
+          record(event.type, undefined, surface);
+        }
+      };
+      const events = ["overlay-show", "overlay-hide", "overlay-after-show", "overlay-after-hide"];
+      for (const event of events) {
+        document.addEventListener(event, lifecycle, true);
+      }
+      onTestFinished(() => {
+        for (const event of events) {
+          document.removeEventListener(event, lifecycle, true);
+        }
+      });
+      onTestFailed(() => {
+        console.info(
+          "sidebar overlay diagnostics",
+          JSON.stringify({ width, direction, diagnostics }),
+        );
+      });
       onTestFinished(
         subscribeNativeOverlayOcclusion(
-          (value) => occlusion.push(value),
+          (value) => {
+            occlusion.push(value);
+            record("occlusion", value);
+          },
           () => new DOMRect(0, 0, innerWidth, innerHeight),
         ),
       );
+      expect(occlusion).toEqual([false]);
       const { userEvent } = await import("vitest/browser");
       const trigger = page.getByRole("button", { name: "Filter & sort", exact: true });
       const active = page.getByRole("radio", { name: "Active", exact: true });
@@ -133,12 +190,13 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
       await expect
         .element(page.getByRole("listbox", { name: "Owners", exact: true }))
         .toBeVisible();
-      await expect.poll(() => occlusion).toEqual([false, true]);
       expect(ownerOptions(sidebar)).toEqual(["All owners", "Involving me", "My sessions", "Bob"]);
       const search = page.getByRole("combobox", { name: "Search", exact: true });
       const ownersSurface = search.element().closest(".picker-select__menu")!;
-      // Settle the phone picker's opening animation before exercising Escape.
+      // Native overlap can change during the sheet's slide-in; sample close/open edges after entry.
       await Promise.all(ownersSurface.getAnimations().map((animation) => animation.finished));
+      await expect.poll(() => occlusion.at(-1)).toBe(true);
+      const occlusionAfterOpening = occlusion.length;
       await expect.element(search).toHaveFocus();
       expect(getComputedStyle(sidebar.querySelector(".picker-select__search")!).boxShadow).not.toBe(
         "none",
@@ -157,9 +215,9 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
       await userEvent.keyboard("{Escape}");
       await ownersHidden;
       await expect.element(owners).toHaveFocus();
-      expect(occlusion).toEqual([false, true, false]);
+      expect(occlusion.slice(occlusionAfterOpening)).toEqual([false]);
       await trigger.click();
-      await expect.poll(() => occlusion).toEqual([false, true, false, true]);
+      await expect.poll(() => occlusion.slice(occlusionAfterOpening)).toEqual([false, true]);
       await expectFits();
       await expect.element(active).toHaveFocus();
       await userEvent.keyboard(direction === "rtl" ? "{ArrowLeft}" : "{ArrowRight}");
@@ -227,12 +285,14 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
       await userEvent.keyboard("{Escape}");
       await expect.element(trigger).toHaveFocus();
       expect(sidebar.querySelector(".sidebar-session-sort-menu")).toBeNull();
-      await expect.poll(() => occlusion).toEqual([false, true, false, true, false]);
+      await expect.poll(() => occlusion.slice(occlusionAfterOpening)).toEqual([false, true, false]);
       await trigger.click();
       await expect
         .element(page.getByRole("radio", { name: "Archived", exact: true }))
         .toHaveFocus();
-      await expect.poll(() => occlusion).toEqual([false, true, false, true, false, true]);
+      await expect
+        .poll(() => occlusion.slice(occlusionAfterOpening))
+        .toEqual([false, true, false, true]);
       // The phone sheet covers the toolbar; its backdrop dismisses it instead.
       if (width < 560) {
         sidebar.querySelector<HTMLElement>(".sidebar-session-filter-panel__backdrop")!.click();
@@ -240,7 +300,9 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
         await trigger.click();
       }
       await expect.poll(() => sidebar.querySelector(".sidebar-session-sort-menu")).toBeNull();
-      await expect.poll(() => occlusion).toEqual([false, true, false, true, false, true, false]);
+      await expect
+        .poll(() => occlusion.slice(occlusionAfterOpening))
+        .toEqual([false, true, false, true, false]);
     },
   );
 
@@ -274,6 +336,40 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
     expect(row.nextElementSibling!.getBoundingClientRect().top).toBeGreaterThanOrEqual(
       rowBounds.bottom,
     );
+  });
+
+  it("isolates keyboard filters from a previous sidebar's hovered control", async () => {
+    vi.stubGlobal("webkit", { messageHandlers: { openclawBrowser: { postMessage: vi.fn() } } });
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const previous = await mountFilters(390);
+    const previousControl = previous.sidebar.querySelector<HTMLElement>(
+      ".sidebar-footer-bar__home",
+    )!;
+    await previous.page.elementLocator(previousControl).hover();
+    expect(previousControl.matches(":hover")).toBe(true);
+    previous.provider.remove();
+
+    const { sidebar, page } = await mountFilters(390);
+    const control = sidebar.querySelector<HTMLElement>(".sidebar-footer-bar__home")!;
+    expect(control.matches(":hover")).toBe(false);
+    const occlusion: boolean[] = [];
+    onTestFinished(
+      subscribeNativeOverlayOcclusion(
+        (value) => occlusion.push(value),
+        () => new DOMRect(0, 0, innerWidth, innerHeight),
+      ),
+    );
+    const { userEvent } = await import("vitest/browser");
+    const owners = page.getByRole("button", { name: "Owners: All owners", exact: true });
+    (owners.element() as HTMLElement).focus();
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByRole("listbox", { name: "Owners", exact: true })).toBeVisible();
+    await expect.poll(() => occlusion).toEqual([false, true]);
+    await userEvent.keyboard("{Escape}");
+    await expect.element(owners).toHaveFocus();
+    await expect.poll(() => occlusion).toEqual([false, true, false]);
   });
 
   it("opens display submenus on mouse hover and leaves touch on click", async () => {

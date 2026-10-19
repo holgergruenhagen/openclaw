@@ -21,6 +21,7 @@ import {
   type LobsterSceneTravel,
 } from "./lobster-pet-scene.ts";
 import { Balloon, BottleSvg, PASSER_SPRITES, PASSER_TITLES } from "./lobster-pet-sprites.tsx";
+import { PluginThemeArtwork } from "./plugin-theme-artwork.tsx";
 import {
   THEME_CRITTER_SPRITES,
   THEME_CRITTER_TITLES,
@@ -102,27 +103,12 @@ export type LobsterPetSceneProps = {
   flavor: string | null;
   bottle: { spotPct: number; opened: boolean; fortune: string } | null;
   onPointerDown: (event: PointerEvent) => void;
+  onSprite?: (element: HTMLElement) => void;
   onPointerUp: (event: PointerEvent) => void;
   onPointerCancel: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onBottleOpen: () => void;
 };
-
-function PluginArtwork(props: { url: string }) {
-  const src = createMemo(
-    async () => {
-      const url = props.url;
-      try {
-        const { fetchPluginThemeArtworkBlobUrl } = await import("../pages/plugins/icon-loader.ts");
-        return await fetchPluginThemeArtworkBlobUrl({ url });
-      } catch {
-        return null;
-      }
-    },
-    { loadingValue: null },
-  );
-  return <Show when={src()}>{(url) => <img class="lobster-pet__svg" alt="" src={url()} />}</Show>;
-}
 
 export function LobsterPetScene(props: { scene: LobsterPetSceneProps | null }) {
   return <Show when={props.scene}>{(scene) => <Scene {...scene()} />}</Show>;
@@ -153,9 +139,7 @@ function Sprite(props: LobsterPetSceneProps & { twin: boolean }) {
       args.grumpy ? "lobster-pet--grumpy" : "",
       args.vigil ? "lobster-pet--vigil" : "",
       args.act ? `lobster-pet--act-${args.act}` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
+    ];
     // The twin tags along on the parent's trailing side and copies every act
     // a beat later (--lob-act-delay feeds each act's animation-delay).
     const point = lobsterLanePoint(lane, args.spotPct);
@@ -187,10 +171,18 @@ function Sprite(props: LobsterPetSceneProps & { twin: boolean }) {
   });
   return (
     <div
-      class={`lobster-pet__motion ${visual().travel ? (visual().travel?.hop ? "lobster-pet__motion--hop" : "lobster-pet__motion--walk") : ""}`}
+      class={[
+        "lobster-pet__motion",
+        visual().travel && `lobster-pet__motion--${visual().travel?.hop ? "hop" : "walk"}`,
+      ]}
       style={visual().travelStyle}
     >
       <div
+        ref={(element) => {
+          if (!props.twin) {
+            props.onSprite?.(element);
+          }
+        }}
         class={visual().classes}
         style={visual().style}
         aria-hidden="true"
@@ -298,8 +290,7 @@ function Scene(args: LobsterPetSceneProps) {
     const passerLook = stranger ? strangerLookFor(args.seed, args.look.palette.id) : args.look;
     const passerClasses = args.passer
       ? [
-          "lobster-pet",
-          "lobster-pet--passer",
+          "lobster-pet lobster-pet--passer",
           stranger
             ? `lobster-pet--palette-${passerLook.palette.id}`
             : `lobster-pet--${args.passer.kind}`,
@@ -307,8 +298,6 @@ function Scene(args: LobsterPetSceneProps) {
           args.passer.direction === 1 ? "lobster-pet--passer-ltr" : "lobster-pet--passer-rtl",
           args.passer.hops && args.scene.passage ? "lobster-pet--passer-hop" : "",
         ]
-          .filter(Boolean)
-          .join(" ")
       : "";
     const passerLane = args.passer ? args.scene[args.passer.anchor] : null;
     const passingGap =
@@ -364,7 +353,7 @@ function Scene(args: LobsterPetSceneProps) {
       <Show when={view().showBottle && args.bottle}>
         {(bottle) => (
           <div
-            class={`lobster-bottle ${bottle().opened ? "lobster-bottle--open" : ""}`}
+            class={["lobster-bottle", { "lobster-bottle--open": bottle().opened }]}
             style={`--lob-x:${view().bottlePoint.x}px`}
             title={bottle().opened ? bottle().fortune : "a message in a bottle"}
             aria-hidden="true"
@@ -396,7 +385,7 @@ function Scene(args: LobsterPetSceneProps) {
                 </Show>
               }
             >
-              {(artwork) => <PluginArtwork url={artwork().url} />}
+              {(artwork) => <PluginThemeArtwork url={artwork().url} class="lobster-pet__svg" />}
             </Show>
           </div>
         </div>

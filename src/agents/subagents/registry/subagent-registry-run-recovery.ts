@@ -16,8 +16,8 @@ import { replaceRequesterCronAuthorityEntry } from "../requester-cron-authority.
 import {
   matchesSubagentChildSessionOwner,
   resolveSubagentChildAuthority,
-  warnLegacySubagentAuthority,
 } from "./subagent-child-owner-match.js";
+import { retireSubagentControllerInputs } from "./subagent-controller-inputs.js";
 import {
   clearDeliveryState,
   normalizeSubagentRunState,
@@ -365,6 +365,10 @@ export class SubagentRecoveryManager extends SubagentWaitManager {
             // Completed follow-ups start a new task; steer retains its task's lineage.
             taskRunId: preserveCompletedRun ? nextRunId : (source.taskRunId ?? source.runId),
             requesterTurnRunId: preserveCompletedRun ? undefined : source.requesterTurnRunId,
+            // A new task has a fresh caller; it cannot recover under the completed task's grant.
+            operatorRecoverySource: preserveCompletedRun
+              ? undefined
+              : source.operatorRecoverySource,
             requesterTurnYielded: preserveCompletedRun ? undefined : source.requesterTurnYielded,
             retireAfterRequesterTurn: preserveCompletedRun
               ? undefined
@@ -470,7 +474,7 @@ export class SubagentRecoveryManager extends SubagentWaitManager {
               replaceParams.gatewayContextResolver ?? getGatewayContextResolver(value.source),
             );
             if (preserveCompletedRun) {
-              if (authority?.operatorAuthority) {
+              if (authority) {
                 subagentRuns.bindCompletionAuthority(next, authority);
                 custodyTransferred = true;
               }
@@ -480,6 +484,10 @@ export class SubagentRecoveryManager extends SubagentWaitManager {
             subagentRuns.commitOwnership(next);
             if (replaceParams.successor) {
               subagentRuns.releaseCompletionAuthority(replaceParams.successor);
+            }
+            if (!preserveCompletedRun && previousRunId !== nextRunId) {
+              // Remapped cohorts must not queue behind their restored, now-unbound input.
+              retireSubagentControllerInputs(value.source);
             }
             replaceParams.onPublished?.(next);
           },
@@ -505,7 +513,6 @@ export class SubagentRecoveryManager extends SubagentWaitManager {
     }
     const source = replacement.source;
     const next = publishedNext ?? replacement.next;
-    warnLegacySubagentAuthority(source, log.warn);
     if (!isSameSubagentRunOwner(this.options.runs.get(nextRunId), next)) {
       return true;
     }

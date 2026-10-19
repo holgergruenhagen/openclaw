@@ -269,13 +269,20 @@ export function renderUpdateRunReport(
     run.status === "failed" &&
     (run.reason === "node-runtime-preflight" ||
       run.reason === "preflight-node-runtime-incompatible");
+  const warnings = updateRunWarningMessages(run.steps).map((message) => `Warning: ${message}`);
   let headline: string;
   switch (run.status) {
-    case "succeeded":
+    case "succeeded": {
+      // A skipped post-swap step keeps the version change; the headline must not read as clean.
+      const attention =
+        warnings.length > 0
+          ? `; ${warnings.length} warning${warnings.length === 1 ? " needs" : "s need"} attention`
+          : "";
       headline = after
-        ? `✅ OpenClaw updated to ${after}${before ? ` (from ${before})` : ""}.`
-        : "✅ OpenClaw updated.";
+        ? `✅ OpenClaw updated to ${after}${before ? ` (from ${before})` : ""}${attention}.`
+        : `✅ OpenClaw updated${attention}.`;
       break;
+    }
     case "failed":
       headline = reconciled
         ? "ℹ️ OpenClaw abandoned update reconciled."
@@ -304,7 +311,6 @@ export function renderUpdateRunReport(
   }
   headline = bounded(headline, 500);
   const markdownLimit = opts.markdownLimit ?? 1500;
-  const warnings = updateRunWarningMessages(run.steps).map((message) => `Warning: ${message}`);
   // Successful activation must not bury recovery constraints behind snapshot inventory.
   // Failed runs keep their failure diagnostics ahead of warnings in the short report.
   const lines: string[] = run.status === "succeeded" ? [...warnings] : [];
@@ -387,8 +393,13 @@ export function renderUpdateRunReport(
   )) {
     const failure = `Failed: ${step.step}${step.detail ? ` — ${step.detail}` : ""}`;
     lines.push(bounded(failure, 300));
-    if (step.termination === "signal" && step.stderrTail) {
-      lines.push(`Stderr (${step.signal ?? "unknown signal"}):\n${step.stderrTail}`);
+    if (
+      step.stderrTail &&
+      (step.termination === "signal" || step.step === "candidate-state-snapshot")
+    ) {
+      lines.push(
+        `Stderr${step.termination === "signal" ? ` (${step.signal ?? "unknown signal"})` : ""}:\n${step.stderrTail}`,
+      );
     }
     lines.push(
       ...(step.failureFacts ?? []).slice(0, 5).map((fact) =>

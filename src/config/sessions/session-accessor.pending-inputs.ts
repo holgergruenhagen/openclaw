@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { AgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.types.js";
+import { decodeRequesterOrigin, type RequesterOrigin } from "../../agents/requester-origin.js";
 import {
   normalizeMessageClientSources,
   readMessageClientSources,
@@ -14,6 +15,7 @@ import { hasSqliteWorkerOutcomeUnknown } from "../../infra/sqlite-worker-contrac
 import type { PersistedUserTurnMessage } from "../../sessions/user-turn-transcript.types.js";
 import { rethrowIncognitoSessionError } from "../../state/incognito-session-error.js";
 import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
+import type { SessionInputLifecycleAdmission } from "./restart-resume.js";
 import {
   preparePendingInputRequest,
   resolveCommittedPendingInputRequestHash,
@@ -41,10 +43,9 @@ import {
 } from "./session-accessor.sqlite-scope.js";
 import { sanitizeTranscriptMessageForStorage } from "./session-accessor.sqlite-transcript-store.js";
 import {
-  getSessionActorStorageBinding,
+  captureSessionActorStorageOwner,
   runWithSessionActorStorage,
 } from "./session-actor-storage-binding.js";
-import { captureIncognitoSessionOperation } from "./session-incognito-binding.js";
 import { getSessionInputActor } from "./session-input-actor.js";
 import {
   withCurrentPendingInputAuthority,
@@ -70,6 +71,18 @@ export type { SessionPendingInputReceipt } from "./session-pending-input-receipt
 const receiptOwners = new WeakMap<SessionPendingInputReceipt, SessionPendingInputOwner>();
 const withdrawnOwners = new WeakSet<SessionPendingInputOwner>();
 
+/** The private accepted bytes survive mutable receipt projections and replay preparation. */
+export function readSessionPendingInputRequesterOrigin(
+  receipt: SessionPendingInputReceipt,
+): RequesterOrigin | undefined {
+  const owner = receiptOwners.get(receipt);
+  if (!owner) {
+    return undefined;
+  }
+  assertSessionPendingInputLifetimeCurrent(owner);
+  return owner.requesterOrigin;
+}
+
 export function readWithdrawnSessionPendingInputId(
   receipt: SessionPendingInputReceipt | undefined,
 ): string | undefined {
@@ -78,6 +91,8 @@ export function readWithdrawnSessionPendingInputId(
 }
 
 function ownerReceipt(owner: SessionPendingInputOwner): SessionPendingInputReceipt {
+  const message = parseSessionPendingInputMessage(owner.messageJson);
+  owner.requesterOrigin ??= decodeRequesterOrigin(message["__openclaw"]?.requesterOrigin);
   const receipt: SessionPendingInputReceipt = {
     get state() {
       return owner.consumed || owner.sources?.every((source) => source.consumed)
@@ -85,7 +100,7 @@ function ownerReceipt(owner: SessionPendingInputOwner): SessionPendingInputRecei
         : "queued";
     },
     inputId: owner.inputId,
-    message: parseSessionPendingInputMessage(owner.messageJson),
+    message,
     run: (operation) => runWithSessionPendingInput(owner, operation),
     runAsync: (operation) =>
       runWithSessionPendingInputPersistence(owner, () =>
@@ -165,6 +180,7 @@ export function bindSessionPendingInputSources(
   const aggregateInputId = randomUUID();
   const aggregate = ownerReceipt({
     ...first,
+    requesterOrigin: undefined,
     inputId: aggregateInputId,
     transcriptInputId: aggregateInputId,
     idempotencyKey,
@@ -200,9 +216,12 @@ export function bindSessionPendingInputSources(
 }
 
 type PendingInputStageOptions = PendingInputRequest & {
+  lifecycleAdmission?: SessionInputLifecycleAdmission;
   onCommitted?: (receipt: SessionPendingInputReceipt) => void;
   authority?: SessionPendingInputAuthority;
   trackCompletion?: boolean;
+  /** An idempotent pre-commit operation may reclaim interrupted custody in this process. */
+  retryInterrupted?: boolean;
   assertCurrent: () => void;
   assertAdmittedCurrent?: () => void;
   assertCompletionCurrent?: () => void;
@@ -213,29 +232,36 @@ export function stageSessionPendingInput(
   scope: PendingInputScope,
   options: PendingInputStageOptions,
 ): Promise<SessionPendingInputReceipt | undefined> {
-  const memory = getSessionActorStorageBinding(scope);
-  const incognito = memory
-    ? undefined
-    : (scope.incognito ?? captureIncognitoSessionOperation(scope));
-  incognito?.admissionSignal?.throwIfAborted();
-  incognito?.actor.assertCurrent();
   const captured = {
     ...scope,
-    sessionActor: memory,
-    incognito: incognito && { ...incognito },
     env: captureSessionTranscriptStorageEnvironment(scope.env ?? process.env),
   };
   const preparedRequest = preparePendingInputRequest(options);
   const lifecycleGeneration = getAgentEventLifecycleGeneration();
-  if (memory) {
-    return runWithSessionActorStorage(memory, () =>
-      preparePendingInputStore(
-        captured,
-        options.authority?.assertLifetimeCurrent ?? options.assertCurrent,
-      ).then((store) =>
-        stagePreparedPendingInput(captured, options, preparedRequest, lifecycleGeneration, store),
-      ),
-    );
+  if (
+    captureSessionActorStorageOwner(scope, {
+      assertCurrent: options.assertCurrent,
+      authorize: options.assertCurrent,
+    })
+  ) {
+    return preparePendingInputStore(
+      captured,
+      options.authority?.assertLifetimeCurrent ?? options.assertCurrent,
+    ).then((store) => {
+      const binding = store.sessionActor;
+      if (!binding) {
+        throw new Error("Incognito pending input omitted its actor");
+      }
+      return runWithSessionActorStorage(binding, () =>
+        stagePreparedPendingInput(
+          { ...captured, sessionActor: binding },
+          options,
+          preparedRequest,
+          lifecycleGeneration,
+          store,
+        ),
+      );
+    });
   }
   return getSessionInputActor(captured).then((inputActor) => {
     const admission = inputActor ? undefined : resolveSqliteWriteAdmissionScope(captured);
@@ -243,10 +269,11 @@ export function stageSessionPendingInput(
       const store = await preparePendingInputStore(
         captured,
         options.authority?.assertLifetimeCurrent ?? options.assertCurrent,
+        options.lifecycleAdmission,
       );
       const accept = () =>
         stagePreparedPendingInput(captured, options, preparedRequest, lifecycleGeneration, store);
-      // Actor commands own the physical FIFO and revalidate the prepared snapshot.
+      // Actor commands own the physical FIFO and check the admitted input's identity.
       // Holding the legacy reservation here would make native acceptance queue behind itself.
       return inputActor ? accept() : store.withAdmission(accept, admission !== undefined);
     };
@@ -351,7 +378,9 @@ async function stagePreparedPendingInput(
       if (
         (!options.requestFingerprint && !options.trackCompletion) ||
         (existing.state !== "queued" && existing.state !== "interrupted") ||
-        (existing.lifecycle_generation === lifecycleGeneration && !options.trackCompletion)
+        (existing.lifecycle_generation === lifecycleGeneration &&
+          !options.trackCompletion &&
+          !(options.retryInterrupted && existing.state === "interrupted"))
       ) {
         throw new Error("Pending input ownership ended; submit a new turn to continue");
       }
@@ -476,7 +505,11 @@ async function stagePreparedPendingInput(
         if (!committedHash) {
           return undefined;
         }
-        requestHash = committedHash;
+        // A retained receipt owns the raw request hash, even when JSON storage
+        // normalized its message. Reconstruct identity only after receipt retirement.
+        if (!previous && !existing) {
+          requestHash = committedHash;
+        }
         await assertCurrent();
       }
       retained = true;
@@ -485,7 +518,6 @@ async function stagePreparedPendingInput(
         if (finished) {
           throw new SessionPendingInputCustodyError("Pending input ownership ended");
         }
-        scope.incognito?.authority.assertCurrent();
         options.assertCurrent();
         return scope.sessionActor
           ? runWithSessionActorStorage(scope.sessionActor, operation)
@@ -573,8 +605,6 @@ async function stagePreparedPendingInput(
           config: options.config,
           assertCurrent: () => {
             store.assertCurrent();
-            scope.incognito?.actor.assertCurrent();
-            scope.incognito?.authority.assertCurrent();
             assertAdmittedCurrent();
           },
           authority: options.authority,

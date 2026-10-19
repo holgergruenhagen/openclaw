@@ -1,10 +1,14 @@
+import { channel } from "node:diagnostics_channel";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { reserveWorkerEnvironmentNativePublication } from "../gateway/worker-environments/store-native-publication.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
+import { clearDeviceAuthToken } from "./device-auth-store.js";
 import type { DevicePairingAdmissionFacts } from "./device-pairing-admission.types.js";
 import { invalidatePairedCardRendererCache } from "./device-pairing-card-renderer.js";
 import { withDevicePairingLock } from "./device-pairing-lock.js";
@@ -18,6 +22,9 @@ import {
   type SqliteWorkerOperationAdmission,
 } from "./sqlite-worker-operation-admission.js";
 
+const pairingDiagnostics = channel("openclaw.device-pairing.operation");
+const pairingLog = createSubsystemLogger("gateway/device-pairing");
+
 export const DevicePairingAuthorityRefusedError = resolveGlobalSingleton(
   Symbol.for("openclaw.devicePairingAuthorityRefusedError"),
   () =>
@@ -27,6 +34,14 @@ export const DevicePairingAuthorityRefusedError = resolveGlobalSingleton(
       }
     },
 );
+
+const setupChanges = resolveGlobalSingleton(
+  Symbol.for("openclaw.devicePairSetupChanges"),
+  () => new Set<(databasePath: string) => void>(),
+);
+
+export const onDevicePairSetupChange = (listener: (databasePath: string) => void) =>
+  registerListener(setupChanges, listener);
 
 // The broker owns this private channel; domain kernels supply the discriminated facts.
 function admissionFacts(value: unknown): DevicePairingAdmissionFacts[] {
@@ -81,7 +96,14 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
       options.baseDir ? { env: { ...process.env, OPENCLAW_STATE_DIR: options.baseDir } } : {},
     );
   const captured = structuredClone(command);
+  const credentialEnvironment = { ...process.env, ...context.environment };
+  const startedAt = pairingDiagnostics.hasSubscribers ? performance.now() : undefined;
+  let admittedAt = startedAt;
+  let publicationMs = 0;
   const operation = withDevicePairingLock(async () => {
+    if (startedAt !== undefined) {
+      admittedAt = performance.now();
+    }
     context.admission.assertCurrent();
     options.assertCurrent?.();
     // Join codes and retained setup cleanup cannot change paired-device authority.
@@ -94,6 +116,7 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
     const mutation = publication?.beginMutation();
     let admission: SqliteWorkerOperationAdmission | undefined;
     let published = false;
+    let cacheCleanup: Promise<boolean> | undefined;
     let publishEnvironment: ReturnType<typeof reserveWorkerEnvironmentNativePublication>;
     const install = () => {
       if (!mutation) {
@@ -101,7 +124,19 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
       }
       const committed = admission?.committed;
       if (committed && !published) {
+        const publishingAt = startedAt === undefined ? undefined : performance.now();
         const receipt = commitReceipt(committed.facts);
+        if (receipt.retiredNodeToken) {
+          cacheCleanup = clearDeviceAuthToken({
+            ...receipt.retiredNodeToken,
+            role: "node",
+            env: credentialEnvironment,
+          }).catch((error: unknown) => {
+            // Server revocation is committed. A failed cache cleanup cannot restore authority.
+            pairingLog.warn(`Local retired node token cleanup failed: ${String(error)}`);
+            return false;
+          });
+        }
         const environment = receipt.workerEnvironment;
         let environmentPublished = false;
         if (environment && publishEnvironment) {
@@ -124,11 +159,14 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
         if (receipt.tokensReplaced) {
           options.onTokensReplaced?.(receipt.tokensReplaced.deviceId, receipt.tokensReplaced.roles);
         }
+        if (publishingAt !== undefined) {
+          publicationMs += performance.now() - publishingAt;
+        }
       }
     };
     const removeService = publication?.servicePending(install);
     try {
-      return await runOpenClawStateWorkerOperation(
+      const result = await runOpenClawStateWorkerOperation(
         context,
         async (scope) => {
           try {
@@ -164,15 +202,36 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
           },
         },
       );
+      await cacheCleanup;
+      return result;
     } finally {
       try {
         install();
       } finally {
         mutation?.finish(!admission || admission.settlement?.kind === "completed");
         removeService?.();
+        // Unknown outcomes can have committed; retry discovery without reviving authority.
+        if (
+          captured.type === "bootstrap.consume" ||
+          captured.type === "bootstrap.confirm" ||
+          captured.type === "bootstrap.ensure" ||
+          captured.type === "bootstrap.readCompletion"
+        ) {
+          notifyListeners(setupChanges, context.admission.databasePath);
+        }
       }
     }
   });
+  if (startedAt !== undefined) {
+    const report = () =>
+      pairingDiagnostics.publish({
+        operation: captured.type,
+        queueMs: admittedAt! - startedAt,
+        durationMs: performance.now() - admittedAt!,
+        publicationMs,
+      });
+    void operation.then(report, report);
+  }
   const onAuthorityRefused = options.onAuthorityRefused;
   return onAuthorityRefused
     ? operation.catch((error: unknown) => {

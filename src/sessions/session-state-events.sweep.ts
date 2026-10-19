@@ -26,7 +26,7 @@ export async function sweepSessionStateWatchNotices(
     );
     context.admission.assertCurrent();
     const watchers = new Map<string, SessionStateSweepAddress[]>();
-    for (const cursor of result?.type === "sessionState.pendingNotices" ? result.cursors : []) {
+    for (const cursor of result?.cursors ?? []) {
       const cursors = watchers.get(cursor.watcherSessionKey) ?? [];
       cursors.push(cursor);
       watchers.set(cursor.watcherSessionKey, cursors);
@@ -61,9 +61,9 @@ export async function sweepSessionStateWatchNotices(
             type: "sessionState.sweep",
             input: { cursors, now },
           });
-          // Sweeping is best effort; delivery still checks its current target and store.
+          // Restore advisory context without replaying model turns during startup.
           for (const notice of notices) {
-            enqueueSessionStateNotice(notice);
+            enqueueSessionStateNotice({ ...notice, queueOnly: true });
           }
         },
         () => context.admission.assertCurrent(),

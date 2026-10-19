@@ -3,10 +3,11 @@ import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { extractText } from "../../../../ui/src/lib/chat/message-extract.ts";
 import {
-  ACTIVE_EMBEDDED_RUN_REGISTRATIONS,
-  ACTIVE_EMBEDDED_RUNS,
+  getEmbeddedRunAttachment,
+  getActiveNativeAttempt,
   ACTIVE_EMBEDDED_RUNS_BY_RUN_ID,
 } from "../../../agents/embedded-agent-runner/run-state.js";
+import type { EmbeddedAgentRunResult } from "../../../agents/embedded-agent.js";
 import { guardSessionManager } from "../../../agents/session-tool-result-guard-wrapper.js";
 import {
   createAssistant,
@@ -24,6 +25,7 @@ import {
 } from "../../../config/sessions/session-accessor.js";
 import { readTranscriptEventRows } from "../../../config/sessions/session-accessor.sqlite-read.js";
 import { waitForSessionTranscriptIndexReconcile } from "../../../config/sessions/session-transcript-reconcile.js";
+import { runWithRetainedGatewayRootWork } from "../../../process/gateway-work-admission.js";
 import { onInternalSessionTranscriptUpdate } from "../../../sessions/transcript-events.js";
 import { runOutsideAsyncWorkScope } from "../../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
@@ -147,19 +149,20 @@ describe("native Talk action ownership through public plugin registration", () =
       const rowProjection = await createSessionRowProjection({
         cfg: { agents: { entries: { [AGENT_ID]: {} } } },
       });
-      const publications: Promise<void>[] = [];
+      const publications: ReturnType<typeof publish>[] = [];
       const published = vi.fn();
       const publish = createTranscriptUpdateBroadcastHandler({
         getSessionRowProjection: () => rowProjection,
         broadcastToConnIds: published,
         sessionEventSubscribers: { getAll: () => new Set([CONNECTION_ID]) },
         sessionMessageSubscribers: { get: () => new Set([CONNECTION_ID]) },
-        chatAbortControllers: fixture.chatAbortControllers,
       });
       const unsubscribe = onInternalSessionTranscriptUpdate((update) => {
         if ((update.target?.sessionId ?? update.sessionId) === SESSION_ID) {
-          // Match the Gateway subscription: committed publications outlive their producer.
-          const publication = runOutsideAsyncWorkScope(() => publish(update));
+          // Match production subscription ownership: committed broadcasts outlive the producer.
+          const publication = runOutsideAsyncWorkScope(() =>
+            runWithRetainedGatewayRootWork(() => publish(update)),
+          );
           void publication.catch(() => {});
           publications.push(publication);
         }
@@ -196,7 +199,13 @@ describe("native Talk action ownership through public plugin registration", () =
             modelRun = session.prompt(params.prompt);
             await modelRun;
             await recorder?.waitForRuntimePersistence();
-            return { payloads: [{ text: "Both labels are preserved." }], meta: { durationMs: 0 } };
+            return {
+              payloads: [{ text: "Both labels are preserved." }],
+              meta: {
+                durationMs: 0,
+                terminalReply: { disposition: "visible", text: "Both labels are preserved." },
+              },
+            } satisfies EmbeddedAgentRunResult;
           }).catch((error: unknown) => {
             providerStarted.reject(error);
             throw error;
@@ -263,7 +272,7 @@ describe("native Talk action ownership through public plugin registration", () =
         await vi.waitFor(() =>
           expect(spokenMessages(socket.sent)).toContain("Both labels are preserved."),
         );
-        // A returned readback is a distinct voice record, not a deduplication signal.
+        // Speech stays a distinct raw record; the UI discloses it without claiming replacement.
         const readback = "Both labels are preserved.";
         const dialogue = "OpenClaw is waiting on the model.";
         for (const text of [readback, dialogue]) {
@@ -294,6 +303,15 @@ describe("native Talk action ownership through public plugin registration", () =
             : [],
         );
         expect(assistantRecords).toHaveLength(3);
+        expect(assistantRecords[0]).not.toHaveProperty("__openclaw.voiceTranscript");
+        expect(assistantRecords.slice(1)).toEqual([
+          expect.objectContaining({
+            __openclaw: expect.objectContaining({ voiceTranscript: "provider-owned" }),
+          }),
+          expect.objectContaining({
+            __openclaw: expect.objectContaining({ voiceTranscript: "provider-owned" }),
+          }),
+        ]);
         expect(assistantRecords.slice(1)).toEqual([
           expect.objectContaining({ api: "realtime", content: [{ type: "text", text: readback }] }),
           expect.objectContaining({ api: "realtime", content: [{ type: "text", text: dialogue }] }),
@@ -461,7 +479,7 @@ describe("native Talk action ownership through public plugin registration", () =
         expect(streamMocks.streamSimple).toHaveBeenCalledOnce();
         expect(await providerStream.result()).toBe(answer);
         expect(session.isStreaming).toBe(false);
-        expect(ACTIVE_EMBEDDED_RUNS.has(SESSION_ID)).toBe(false);
+        expect(Boolean(getActiveNativeAttempt(SESSION_ID))).toBe(false);
         const runId = upstream.runEmbeddedAgent.mock.calls[0]![0].runId;
         expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.has(runId)).toBe(false);
       },
@@ -482,7 +500,7 @@ describe("native Talk action ownership through public plugin registration", () =
         .mockImplementationOnce(() => providerStream)
         .mockImplementation(() => createAssistantResultStream(answer));
       await withParkedNativeTask(
-        async ({ create, result, socket, activeRun, chatAbortControllers, abortOwned }) => {
+        async ({ create, result, socket, activeRun, rpcSourceTesting, abortOwned }) => {
           let closing: Promise<boolean> | undefined;
           try {
             await vi.waitFor(() => expect(streamMocks.streamSimple).toHaveBeenCalledOnce());
@@ -491,9 +509,9 @@ describe("native Talk action ownership through public plugin registration", () =
               transition === "reassigned"
                 ? requireString(await create(true), "voiceSessionId")
                 : undefined;
-            const handle = ACTIVE_EMBEDDED_RUNS.get(activeRun.sessionId);
-            const registration = handle && ACTIVE_EMBEDDED_RUN_REGISTRATIONS.get(handle);
-            const chatRegistration = chatAbortControllers.get(activeRun.runId);
+            const handle = getActiveNativeAttempt(activeRun.sessionId);
+            const registration = handle && getEmbeddedRunAttachment(handle);
+            const chatRegistration = rpcSourceTesting.get(activeRun.runId);
             if (!handle || !registration?.toolAuthority || !chatRegistration) {
               throw new Error("Expected the real admitted backend and control registration");
             }
@@ -561,10 +579,10 @@ describe("native Talk action ownership through public plugin registration", () =
             }
             expect(steering).toHaveBeenCalledOnce();
             expect(insertionsBeforeTransition).toBe(0);
-            expect(ACTIVE_EMBEDDED_RUNS.get(activeRun.sessionId)).toBe(handle);
-            expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(activeRun.runId)).toBe(handle);
-            expect(ACTIVE_EMBEDDED_RUN_REGISTRATIONS.get(handle)).toBe(registration);
-            expect(chatAbortControllers.get(activeRun.runId)).toBe(chatRegistration);
+            expect(getActiveNativeAttempt(activeRun.sessionId)).toBe(handle);
+            expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(activeRun.runId)).toBe(registration);
+            expect(getEmbeddedRunAttachment(handle)).toBe(registration);
+            expect(rpcSourceTesting.get(activeRun.runId)).toBe(chatRegistration);
             expect(() => registration.toolAuthority?.assertActive()).not.toThrow();
             expect(activeRun.abortSignal.aborted).toBe(false);
             expect(session.agent.signal?.aborted).toBe(false);
@@ -595,13 +613,13 @@ describe("native Talk action ownership through public plugin registration", () =
     "does not retarget %s during control readiness or FIFO wait (%s)",
     async (transition, mode) => {
       await withParkedNativeTask(
-        async ({ socket, activeRun, chatAbortControllers, abortOwned, queueMessage }) => {
-          const entry = chatAbortControllers.get(activeRun.runId);
+        async ({ socket, activeRun, rpcSourceTesting, abortOwned, queueMessage }) => {
+          const entry = rpcSourceTesting.get(activeRun.runId);
           if (!entry) {
             throw new Error("Missing original registration");
           }
           if (transition === "idle") {
-            chatAbortControllers.delete(activeRun.runId);
+            rpcSourceTesting.delete(activeRun.runId);
           }
           const before = socket.sent.length;
           const queued = transition === "queued replacement";
@@ -615,7 +633,7 @@ describe("native Talk action ownership through public plugin registration", () =
             ),
           );
           // Same call and even the same correlation ID cannot adopt a new registration.
-          chatAbortControllers.set(activeRun.runId, { ...entry });
+          rpcSourceTesting.set(activeRun.runId, { ...entry });
           await vi.waitFor(() =>
             expect(spokenMessages(socket.sent.slice(before))).toEqual([
               ...(queued
@@ -652,7 +670,7 @@ describe("native Talk action ownership through public plugin registration", () =
         socket.serverEvent(nativeDelegation("original-task", "Keep working."));
         await started.promise;
         expect(upstream.runEmbeddedAgent).toHaveBeenCalledOnce();
-        expect(ACTIVE_EMBEDDED_RUNS.has(SESSION_ID)).toBe(false);
+        expect(Boolean(getActiveNativeAttempt(SESSION_ID))).toBe(false);
         const before = socket.sent.length;
         socket.serverEvent(nativeDelegation("startup-control", "use the release branch instead"));
         await vi.waitFor(() =>
@@ -797,7 +815,7 @@ describe("native Talk action ownership through public plugin registration", () =
         queueMessage,
         abortOwned,
         broadcast,
-        chatAbortControllers,
+        rpcSourceTesting,
       }) => {
         const beforeBurst = socket.sent.length;
         await flushNativeTranscript(
@@ -840,7 +858,7 @@ describe("native Talk action ownership through public plugin registration", () =
         expect(queueMessage).not.toHaveBeenCalled();
         expect(abortOwned).not.toHaveBeenCalled();
         expect(activeRun.abortSignal.aborted).toBe(false);
-        expect(chatAbortControllers.has(activeRun.runId)).toBe(true);
+        expect(rpcSourceTesting.has(activeRun.runId)).toBe(true);
         expect(upstream.runEmbeddedAgent).toHaveBeenCalledOnce();
         expect(socket.readyState).toBe(upstream.NativeSocket.OPEN);
         expect(talkEventTypes(broadcast)).not.toContain("session.error");

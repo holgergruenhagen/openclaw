@@ -1,14 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GATEWAY_CLIENT_IDS,
   GATEWAY_CLIENT_MODES,
 } from "../../../packages/gateway-protocol/src/client-info.js";
-import {
-  clearRuntimeConfigSnapshot,
-  setRuntimeConfigSnapshot,
-} from "../../config/runtime-snapshot.js";
 import {
   onDiagnosticEvent,
   resetDiagnosticEventsForTest,
@@ -76,8 +72,6 @@ async function git(root: string, ...args: string[]) {
 
 describe("placement recovery session admission with persisted placements", () => {
   support.setupWorkerEnvironmentServiceSuite();
-  beforeEach(() => setRuntimeConfigSnapshot(support.testState.config));
-  afterAll(() => clearRuntimeConfigSnapshot());
   let releaseOwnedWork: (() => Promise<void>) | undefined;
   afterEach(async () => {
     // Release blocked provider work before the service fixture drains on a failed test.
@@ -294,12 +288,10 @@ describe("placement recovery session admission with persisted placements", () =>
     const interruption = new Error("fixture Move interrupted after claim wait");
     const harness = await createHarness(support.testState.stateDb, placements, {
       workspacePath: support.testState.root,
-      runMoveBarrier: async ({ sessionId, begin }) => {
+      runMoveBarrier: async ({ begin }) => {
         await begin();
-        await coordinated.awaitTurnClaimRelease(sessionId, () => {
-          claimWaitEntered.resolve();
-          return releaseClaimWait.promise;
-        });
+        claimWaitEntered.resolve();
+        await releaseClaimWait.promise;
         throw interruption;
       },
     });
@@ -580,6 +572,45 @@ describe("placement recovery session admission with persisted placements", () =>
     expect(await git(root, "for-each-ref", "--format=%(refname)", cleanupRef)).toBe(cleanupRef);
     await coordinated.reconcileActive();
     expect(await git(root, "for-each-ref", "--format=%(refname)", cleanupRef)).toBe("");
+  });
+
+  it("retains the pending orphan pass after a transient workspace-resolution failure", async () => {
+    const root = support.testState.root;
+    await git(root, "init", "--quiet");
+    await fs.writeFile(path.join(root, "result.txt"), "retired workspace result");
+    await git(root, "add", "result.txt");
+    const tree = await git(root, "write-tree");
+    const cleanupRef = cleanupWorkerWorkspaceResultRef(workerWorkspaceResultRef("orphan-claim"));
+    await git(root, "update-ref", cleanupRef, tree);
+    const placements = createStore();
+    const idle = await placements.startDispatch({
+      ...REQUEST,
+      sessionId: "idle",
+      sessionKey: "agent:main:idle",
+    });
+    await placements.fail({
+      sessionId: idle.sessionId,
+      expectedGeneration: idle.generation,
+      recoveryError: "finished fixture",
+    });
+    let resolutionAttempts = 0;
+    const harness = await createHarness(support.testState.stateDb, placements, {
+      workspacePath: root,
+      resolveWorkspace: async () => {
+        resolutionAttempts += 1;
+        if (resolutionAttempts === 1) {
+          throw new Error("fixture transient workspace resolution failure");
+        }
+        return { kind: "local", path: root };
+      },
+    });
+    const coordinated = coordinate(harness);
+    await coordinated.reconcile("startup");
+    await coordinated.reconcileActive();
+    expect(await git(root, "for-each-ref", "--format=%(refname)", cleanupRef)).toBe(cleanupRef);
+    await coordinated.reconcileActive();
+    expect(await git(root, "for-each-ref", "--format=%(refname)", cleanupRef)).toBe("");
+    expect(resolutionAttempts).toBe(2);
   });
 
   it("a real dispatch reaches device provisioning while another placement's teardown is stuck", async () => {

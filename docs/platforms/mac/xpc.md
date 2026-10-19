@@ -32,6 +32,15 @@ A local Unix socket connects the node host service to the macOS app for exec app
 - The socket owns the request lifetime. Node cancellation or a socket deadline closes the response reader, cancelling the native prompt or command and its process group. Stopping the app's exec server also cancels and drains active requests before releasing its socket lease.
 - Clients still half-close their **write** side after sending one JSONL request. That normal request EOF does not cancel execution. The response reader remains open until the result arrives.
 
+The exec response deadline includes the requested command `timeoutMs`, the
+companion's 15-second approval window, and 5 seconds for transport overhead.
+An omitted timeout keeps the 20-second default; `timeoutMs: 0` disables the
+response deadline while preserving cancellation. After submission, a response
+deadline reports `TIMEOUT` and a lost or oversized reply reports `UNKNOWN`.
+Both mean the execution outcome is unknown; the command is never replayed
+locally. `COMPANION_APP_UNAVAILABLE` is reserved for requests that could not be
+submitted to the companion.
+
 Diagram (SCI):
 
 ```text
@@ -49,15 +58,16 @@ its exec-approvals lifecycle owner. The shared listener owns the socket path
 lease, guarded filesystem cleanup, connection framing, and shutdown drainage.
 It exposes only these operations:
 
-| Operation           | Result and effect                                                                                                                   |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `status`            | Primary connection, saved Gateways, and app version/build/profile.                                                                  |
-| `primary.set`       | Set local mode, SSH transport, or direct transport through the app's native connection owners; return the resulting primary status. |
-| `primary.clear`     | Return the primary connection to its unconfigured state; return primary status.                                                     |
-| `gateway.list`      | List saved Gateways and their connection status.                                                                                    |
-| `gateway.add`       | Validate and connect through the Gateways tab's sign-in coordinator; return the saved Gateway and identity when present.            |
-| `gateway.remove`    | Resolve an ID/name and use the profile store's Remove path, including credential and dashboard-data cleanup.                        |
-| `gateway.reconnect` | Repeat browser sign-in for browser profiles or reconnect the saved token/password connection.                                       |
+| Operation            | Result and effect                                                                                                                   |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `status`             | Primary connection, saved Gateways, and app version/build/profile.                                                                  |
+| `primary.set`        | Set local mode, SSH transport, or direct transport through the app's native connection owners; return the resulting primary status. |
+| `primary.clear`      | Return the primary connection to its unconfigured state; return primary status.                                                     |
+| `gateway.list`       | List saved Gateways and their connection status.                                                                                    |
+| `gateway.add`        | Validate and connect through the Gateways tab's sign-in coordinator; return the saved Gateway and identity when present.            |
+| `gateway.remove`     | Resolve an ID/name and use the profile store's Remove path, including credential and dashboard-data cleanup.                        |
+| `gateway.reconnect`  | Repeat browser sign-in for browser profiles or reconnect the saved token/password connection.                                       |
+| `client.credentials` | Internal bounded access to the app-owned local credential store for an explicitly configured client root.                           |
 
 Requests identify the operation with an `operation` string. Primary SSH
 settings include `sshTarget`, optional ports, `identityPath`, and
@@ -91,11 +101,30 @@ Socket responses use `{ok:true,result:...}` or
   connection state/error.
 - `app`: version, build, and profile.
 
-Responses never include tokens, passwords, browser-session credentials, or
-Keychain contents. Saved-Gateway mutations execute inside the signed app,
+Public setup responses never include tokens, passwords, browser-session credentials,
+or Keychain contents. The internal `client.credentials` operation returns the
+requested local credential only over this authenticated same-UID transport. It
+accepts the app's configured identity and exec-host roots, never an arbitrary
+database path. A lost response after dispatch does not permit an offline replay.
+Saved-Gateway mutations execute inside the signed app,
 where the profile store owns Keychain access, connection retirement,
 dashboard cookies, and device-token cleanup. The CLI never writes the
 saved-Gateway registry.
+
+The app retains the operation route for its configured roots. Each operation
+acquires exclusive custody of `client/credentials.sqlite` and closes it before
+returning. Other clients contact the app first; only an undispatched request can
+use the app-absent route. Existing maintenance admission blocks new app operations
+while updater or Doctor custody captures, migrates, or restores the local store.
+The same rule applies when a named profile uses one root for both identity and
+execution. A separate Application Support identity root remains independently
+owned throughout bootstrap.
+
+Native identity bootstrap uses the existing Application Support root; exec-host
+secrets use the existing resolved state root. Neither opens the selected Gateway
+database to load private client material. Older apps cannot use retired shared credential tables: update the app
+and run the matching `openclaw doctor --fix` before reconnecting. The existing
+`mac-control.token` bootstrap file and its transport authentication stay unchanged.
 
 See [remote control](/platforms/mac/remote#macos-app-setup) for shell examples,
 profile selection, safe credential input, and background app launch.
@@ -121,8 +150,8 @@ profile selection, safe credential input, and background app launch.
 - PeekabooBridge: `PEEKABOO_ALLOW_UNSIGNED_SOCKET_CLIENTS=1` (DEBUG-only) may allow same-UID callers for local development.
 - All communication remains local-only. No network sockets are exposed.
 - TCC prompts originate only from the GUI app bundle. Keep the signed bundle ID stable across rebuilds.
-- Exec approvals socket hardening: file mode `0600`, shared token stored in the
-  `exec_approvals_config` row of `state/openclaw.sqlite`, peer-UID check
+- Exec approvals socket hardening: file mode `0600`, local token stored in
+  `client/credentials.sqlite` under the resolved client state root, peer-UID check
   (`getpeereid`), HMAC-SHA256 challenge/response, and a short TTL on requests.
 
 ## Related

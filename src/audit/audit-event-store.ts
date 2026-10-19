@@ -1,6 +1,5 @@
 /** SQLite persistence and stable cursor queries for metadata-only audit events. */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
 import { AUDIT_ACTIVITY_MESSAGE_KIND } from "../../packages/gateway-protocol/src/schema/audit-activity.js";
 import {
@@ -8,6 +7,7 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
+import { isPostgresSqlConnection, type EngineConnection } from "../infra/sql-connection.js";
 import { normalizeSqliteNumber } from "../infra/sqlite-number.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
@@ -22,7 +22,6 @@ import {
   AUDIT_INBOUND_MESSAGE_COMPLETED_REASONS,
   AUDIT_INBOUND_MESSAGE_SKIPPED_REASONS,
   AUDIT_OUTBOUND_MESSAGE_SUPPRESSED_REASONS,
-  isOutboundMessageProgressInput,
   type AgentRunAuditEventRecord,
   type AuditEventInput,
   type AuditEventListQuery,
@@ -44,20 +43,18 @@ import {
   recordConfirmedTerminalMessageExecutionBinding,
 } from "./message-execution-binding.js";
 
-type AuditEventsTable = OpenClawStateKyselyDatabase["audit_events"];
 type AuditDatabase = Pick<OpenClawStateKyselyDatabase, "audit_events">;
-type AuditEventRow = Selectable<AuditEventsTable>;
+type AuditEventRow = Selectable<AuditDatabase["audit_events"]>;
 
 export const AUDIT_EVENT_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const AUDIT_EVENT_MAX_ROWS = 100_000;
 const AUDIT_EVENT_PRUNE_BATCH_ROWS = 1_024;
 // The single audit writer owns one DB handle. Maintenance and rollback drop
 // these facts; ordinary inserts need neither a row scan nor an empty expiry DELETE.
-const auditEventRetention = new WeakMap<DatabaseSync, { rowCount: number; nextExpiryAt: number }>();
-
-function getAuditKysely(db: DatabaseSync) {
-  return getNodeSqliteKysely<AuditDatabase>(db);
-}
+const auditEventRetention = new WeakMap<
+  EngineConnection,
+  { rowCount: number; nextExpiryAt: number; nextSequence: number }
+>();
 
 const RUN_ACTIONS = ["agent.run.started", "agent.run.finished"] as const;
 const TOOL_ACTIONS = ["tool.action.started", "tool.action.finished"] as const;
@@ -107,10 +104,7 @@ function optionalInteger(
   field: string,
   minimum: number,
 ): number | undefined {
-  if (value === null) {
-    return undefined;
-  }
-  return requiredInteger(row, value, field, minimum);
+  return value === null ? undefined : requiredInteger(row, value, field, minimum);
 }
 
 function requiredText(row: AuditEventRow, value: unknown, field: string): string {
@@ -121,10 +115,7 @@ function requiredText(row: AuditEventRow, value: unknown, field: string): string
 }
 
 function optionalText(row: AuditEventRow, value: unknown, field: string): string | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  return requiredText(row, value, field);
+  return value === null || value === undefined ? undefined : requiredText(row, value, field);
 }
 
 function requiredEnum<const Value extends string>(
@@ -485,7 +476,7 @@ export function rowToAuditEvent(row: AuditEventRow): AuditEventRecord {
   return corruptAuditRow(row, "invalid message direction");
 }
 
-function projectMessageIdentities(db: DatabaseSync, input: MessageAuditEventInput) {
+function projectMessageIdentities(db: EngineConnection, input: MessageAuditEventInput) {
   const identity = loadOrCreateAuditIdentityKey(db);
   const conversationId =
     input.conversationId ?? (input.direction === "outbound" ? input.targetId : undefined);
@@ -512,11 +503,11 @@ function projectMessageIdentities(db: DatabaseSync, input: MessageAuditEventInpu
   };
 }
 
-function bindAuditEvent(db: DatabaseSync, input: AuditEventInput) {
+function bindAuditEvent(db: EngineConnection, input: AuditEventInput, eventId: string) {
   const message =
     input.kind === AUDIT_ACTIVITY_MESSAGE_KIND ? projectMessageIdentities(db, input) : undefined;
   return {
-    event_id: randomUUID(),
+    event_id: eventId,
     source_id: input.sourceId,
     source_sequence: input.sourceSequence,
     schema_version: AUDIT_EVENT_SCHEMA_VERSION,
@@ -549,10 +540,10 @@ function bindAuditEvent(db: DatabaseSync, input: AuditEventInput) {
   } satisfies AuditEventInsert;
 }
 
-function readAuditEventRetention(db: DatabaseSync) {
+function readAuditEventRetention(db: EngineConnection) {
   const row = executeSqliteQueryTakeFirstSync(
     db,
-    getAuditKysely(db)
+    getNodeSqliteKysely<AuditDatabase>(db)
       .selectFrom("audit_events")
       .select((expression) => [
         expression.fn.countAll<number>().as("count"),
@@ -567,8 +558,8 @@ function readAuditEventRetention(db: DatabaseSync) {
   };
 }
 
-function deleteExpiredAuditEvents(db: DatabaseSync, now: number) {
-  const kysely = getAuditKysely(db);
+function deleteExpiredAuditEvents(db: EngineConnection, now: number) {
+  const kysely = getNodeSqliteKysely<AuditDatabase>(db);
   const expiredSequences = kysely
     .selectFrom("audit_events")
     .select("sequence")
@@ -582,13 +573,13 @@ function deleteExpiredAuditEvents(db: DatabaseSync, now: number) {
   );
 }
 
-function pruneAuditEventsAfterInsert(db: DatabaseSync, now: number, occurredAt: number): void {
-  const kysely = getAuditKysely(db);
+function pruneAfterInsert(db: EngineConnection, now: number, at: number, sequence: number): void {
+  const kysely = getNodeSqliteKysely<AuditDatabase>(db);
   const cached = auditEventRetention.get(db);
-  const retention = cached
+  let retention = cached
     ? {
         rowCount: cached.rowCount + 1,
-        nextExpiryAt: Math.min(cached.nextExpiryAt, occurredAt + AUDIT_EVENT_RETENTION_MS),
+        nextExpiryAt: Math.min(cached.nextExpiryAt, at + AUDIT_EVENT_RETENTION_MS),
       }
     : readAuditEventRetention(db);
   let pruned = false;
@@ -598,24 +589,23 @@ function pruneAuditEventsAfterInsert(db: DatabaseSync, now: number, occurredAt: 
     pruned = true;
   }
   if (retention.rowCount > AUDIT_EVENT_MAX_ROWS) {
-    const retainedRows = Math.max(0, AUDIT_EVENT_MAX_ROWS - AUDIT_EVENT_PRUNE_BATCH_ROWS);
-    const overflowRow = executeSqliteQueryTakeFirstSync(
+    const overflowCutoff = kysely
+      .selectFrom("audit_events")
+      .select("sequence")
+      .orderBy("sequence", "desc")
+      .offset(AUDIT_EVENT_MAX_ROWS - AUDIT_EVENT_PRUNE_BATCH_ROWS)
+      .limit(1);
+    const overflow = executeSqliteQuerySync(
       db,
-      kysely
-        .selectFrom("audit_events")
-        .select("sequence")
-        .orderBy("sequence", "desc")
-        .offset(retainedRows)
-        .limit(1),
+      kysely.deleteFrom("audit_events").where("sequence", "<=", overflowCutoff),
     );
-    const sequenceCutoff = overflowRow ? normalizeSqliteNumber(overflowRow.sequence) : undefined;
-    if (sequenceCutoff !== undefined) {
-      const overflow = executeSqliteQuerySync(
-        db,
-        kysely.deleteFrom("audit_events").where("sequence", "<=", sequenceCutoff),
-      );
-      retention.rowCount = Math.max(0, retention.rowCount - Number(overflow.numAffectedRows ?? 0n));
+    const deleted = Number(overflow.numAffectedRows ?? 0n);
+    if (deleted > 0) {
+      retention.rowCount = Math.max(0, retention.rowCount - deleted);
       pruned = true;
+    } else {
+      retention = readAuditEventRetention(db);
+      pruned = false;
     }
   }
   if (pruned) {
@@ -629,17 +619,15 @@ function pruneAuditEventsAfterInsert(db: DatabaseSync, now: number, occurredAt: 
       (normalizeSqliteNumber(oldest?.oldest ?? null) ?? Number.POSITIVE_INFINITY) +
       AUDIT_EVENT_RETENTION_MS;
   }
-  auditEventRetention.set(db, retention);
+  auditEventRetention.set(db, { ...retention, nextSequence: sequence + 1 });
 }
 
 /** Persist one projected event idempotently and prune fixed retention bounds. */
 export function recordAuditEventInDatabase(
   input: AuditEventInput,
   options: OpenClawStateDatabaseOptions & { database: OpenClawStateDatabase },
+  eventId: string = randomUUID(),
 ): AuditEventRecord | undefined {
-  if (isOutboundMessageProgressInput(input)) {
-    throw new Error("outbound message progress belongs to its companion store");
-  }
   const executionToken =
     input.kind === "message" && input.direction === "outbound"
       ? planMessageExecutionBinding(input.executionIdentityToken, input.runId)
@@ -647,15 +635,45 @@ export function recordAuditEventInDatabase(
   if (executionToken) {
     ensureTerminalMessageExecutionBindingSchema(options);
   }
-  let retentionCacheDatabase: DatabaseSync | undefined;
+  const { db } = options.database;
+  const nested = db.isTransaction;
   try {
-    return runOpenClawStateWriteTransaction(({ db }) => {
-      retentionCacheDatabase = db;
+    const retention = auditEventRetention.get(db);
+    const currentTime = Date.now();
+    const expiry = input.occurredAt + AUDIT_EVENT_RETENTION_MS;
+    if (
+      input.kind !== "message" &&
+      !nested &&
+      !isPostgresSqlConnection(db) &&
+      retention &&
+      retention.rowCount < AUDIT_EVENT_MAX_ROWS &&
+      retention.nextExpiryAt >= currentTime &&
+      expiry >= currentTime &&
+      Number.isSafeInteger(retention.nextSequence)
+    ) {
+      const values = bindAuditEvent(db, input, eventId);
+      // This is the only runtime inserter. Validate the complete result before
+      // autocommit; even a duplicate source consumes an AUTOINCREMENT sequence.
+      const record = rowToAuditEvent({ ...values, sequence: retention.nextSequence });
+      const queries = getAuditEventQueries(db);
+      const inserted = runOpenClawStateWriteTransaction(() => queries.insert(values), options, {
+        singleStatement: true,
+      });
+      retention.nextSequence += 1;
+      if (inserted) {
+        retention.rowCount += 1;
+        retention.nextExpiryAt = Math.min(retention.nextExpiryAt, expiry);
+      }
+      return inserted ? record : undefined;
+    }
+    return runOpenClawStateWriteTransaction(() => {
       // Read losslessly so Node's rowid decoding cannot preempt the safe-integer guard.
-      const values = bindAuditEvent(db, input);
+      const values = bindAuditEvent(db, input, eventId);
       const queries = getAuditEventQueries(db);
       const insert = queries.insert(values);
       if (insert === undefined) {
+        // Terminal bindings commit with the event, so a replay settles both rows.
+        auditEventRetention.delete(db);
         return undefined;
       }
       const insertedSequence = Number(insert.sequence);
@@ -663,7 +681,7 @@ export function recordAuditEventInDatabase(
         throw new Error("audit event sequence is outside the supported integer range");
       }
       const now = Date.now();
-      pruneAuditEventsAfterInsert(db, now, values.occurred_at);
+      pruneAfterInsert(db, now, values.occurred_at, insertedSequence);
       // Current events cannot be removed by retention: sequence allocation puts
       // them after every existing row. An expired replay may be pruned immediately.
       const row =
@@ -674,13 +692,14 @@ export function recordAuditEventInDatabase(
         eventId: row?.event_id,
         token: executionToken,
       });
+      if (nested) {
+        auditEventRetention.delete(db);
+      }
       return row ? rowToAuditEvent(row) : undefined;
     }, options);
   } catch (error) {
-    if (retentionCacheDatabase) {
-      auditEventRetention.delete(retentionCacheDatabase);
-      clearAuditIdentityKeyCacheForDatabase(retentionCacheDatabase);
-    }
+    auditEventRetention.delete(db);
+    clearAuditIdentityKeyCacheForDatabase(db);
     throw error;
   }
 }
@@ -708,9 +727,13 @@ export function pruneExpiredAuditEventsInDatabase(params: {
   now?: number;
   database: OpenClawStateDatabaseOptions & { database: OpenClawStateDatabase };
 }): number {
-  return runOpenClawStateWriteTransaction(({ db }) => {
-    const deleted = deleteExpiredAuditEvents(db, params.now ?? Date.now());
-    auditEventRetention.delete(db);
-    return Number(deleted.numAffectedRows ?? 0n);
-  }, params.database);
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      const deleted = deleteExpiredAuditEvents(db, params.now ?? Date.now());
+      auditEventRetention.delete(db);
+      return Number(deleted.numAffectedRows ?? 0n);
+    },
+    params.database,
+    { singleStatement: true },
+  );
 }

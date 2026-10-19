@@ -171,6 +171,7 @@ export async function collectGatewayPlatformWarnings(
     }
     const { auditGatewayServiceConfig, SERVICE_AUDIT_CODES } =
       await import("../daemon/service-audit.js");
+    const { isHostOnlyServiceAuditIssue } = await import("../daemon/service-audit-systemd.js");
     // Unit-only audit keeps effective settings and file fallback at their owner;
     // no executable or Gateway credentials need to be resolved for this check.
     const audit = await auditGatewayServiceConfig({ env: process.env, command: null });
@@ -178,14 +179,20 @@ export async function collectGatewayPlatformWarnings(
       .filter(
         (issue) =>
           issue.code === SERVICE_AUDIT_CODES.systemdKillModeControlGroup ||
-          issue.code === SERVICE_AUDIT_CODES.systemdKillModeProcessOrNone,
+          issue.code === SERVICE_AUDIT_CODES.systemdKillModeProcessOrNone ||
+          isHostOnlyServiceAuditIssue(issue),
       )
       .map((issue) =>
         [
           issue.detail ? `${issue.message} (${issue.detail})` : issue.message,
           // Structured Doctor keeps this second line in fixHint, so triage
           // message truncation cannot discard the supported repair command.
-          `Run ${formatCliCommand("openclaw gateway install --force")} only after verification; inspect drop-ins separately.`,
+          // Host-only findings name their host fix; a reinstall cannot change them.
+          ...(isHostOnlyServiceAuditIssue(issue)
+            ? []
+            : [
+                `Run ${formatCliCommand("openclaw gateway install --force")} only after verification; inspect drop-ins separately.`,
+              ]),
         ].join("\n"),
       );
   }

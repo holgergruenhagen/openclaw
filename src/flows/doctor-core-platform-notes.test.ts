@@ -9,6 +9,7 @@ import { renderTriagePrompt } from "../commands/triage-prompt.js";
 import { isDefaultInstallIdentity } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
+  execSystemctlMock,
   execSystemctlUserMock,
   resetServiceAuditMocks,
   resolveNodeRuntimeInfoMock,
@@ -109,6 +110,34 @@ it.each(["legacy", "profile"])("triages %s read-only", async (scenario) => {
     expect(execSystemctlUserMock.mock.calls[0]?.[1]).toContain(path.basename(file));
     expect(resolveNodeRuntimeInfoMock).not.toHaveBeenCalled();
   }
+});
+
+it("reports a short user-manager stop timeout without unit reinstall advice", async () => {
+  await fs.writeFile(unitPath, "[Service]\nKillMode=mixed\n");
+  execSystemctlUserMock.mockResolvedValue({
+    stdout:
+      "KillMode=mixed\nLoadState=loaded\nControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/openclaw-gateway.service\n",
+    stderr: "",
+    code: 0,
+    termination: "exit",
+  });
+  execSystemctlMock.mockResolvedValue({
+    stdout: "TimeoutStopUSec=5s\nLoadState=loaded\n",
+    stderr: "",
+    code: 0,
+    termination: "exit",
+  });
+  const findings = await detect();
+  expect(findings).toEqual([
+    expect.objectContaining({
+      severity: "warning",
+      message: expect.stringContaining("stops user@1000.service within 5s"),
+    }),
+  ]);
+  expect(findings[0]).not.toHaveProperty("fixHint");
+  expect(findings[0]?.message).toContain(
+    "/etc/systemd/system/user@1000.service.d/zz-openclaw-stop-timeout.conf",
+  );
 });
 
 it.each([

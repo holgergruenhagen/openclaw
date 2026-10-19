@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
+import { setRuntimeConfigSnapshot } from "../../config/config.js";
 import {
   loadSessionEntryReadOnly,
   loadTranscriptEvents,
@@ -12,7 +13,7 @@ import {
   resolveManagedOutgoingMediaArtifactDownload,
 } from "../../gateway/managed-image-attachments.js";
 import { listManagedImageRecordEntries } from "../../gateway/managed-image-record-store.js";
-import { managedImageRecordOperations } from "../../gateway/managed-image-record-store.kernel.js";
+import { managedImageRecordReadOperations } from "../../gateway/managed-image-record-store.kernel.js";
 import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import type { OpenClawTestState } from "../../test-utils/openclaw-test-state.js";
@@ -40,15 +41,16 @@ export async function createCompletionFixture(
     sessionId,
     storePath: path.join(state.stateDir, "agents", "main", "sessions", "sessions.json"),
   };
+  const cfg = {
+    agents: { entries: { main: { workspace: state.workspaceDir } } },
+    session: { store: scope.storePath },
+  };
+  setRuntimeConfigSnapshot(cfg);
   const generation = { sessionId, lifecycleRevision: "report-generation" };
   await replaceSessionEntry(scope, { ...generation, updatedAt: 1 });
   await fs.mkdir(state.workspaceDir, { recursive: true });
   const imagePath = path.join(state.workspaceDir, "report.png");
   await fs.writeFile(imagePath, PNG);
-  const cfg = {
-    agents: { entries: { main: { workspace: state.workspaceDir } } },
-    session: { store: scope.storePath },
-  };
   const payload: ReplyPayload = { text: "Example report", mediaUrl: imagePath };
   const job: CronStoredJob = {
     ...makeCronJob({ id: "report-job", sessionTarget, sessionKey }),
@@ -107,9 +109,9 @@ export async function createCompletionFixture(
     }
     updates += 1;
     // Observe records at publication, before a wrongly late write could make the test pass.
-    const entries = managedImageRecordOperations["managedImages.entries"](
+    const { entries } = managedImageRecordReadOperations["managedImages.entries"](
       { sessionKey },
-      { open: () => database, stateOptions: () => ({ path: database.path, env: state.env }) },
+      database.db,
     );
     for (const { record } of entries) {
       const pending = resolveManagedOutgoingMediaArtifactDownload({

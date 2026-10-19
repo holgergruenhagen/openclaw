@@ -19,6 +19,7 @@ import { resolveCodexAppServerFallbackApiKeyCacheKey } from "./app-server/auth-c
 import type { createCodexAuthProfileSelection } from "./app-server/auth-profile-selection.js";
 import type {
   CodexAppServerStartOptions,
+  CodexPluginConfig,
   CodexSupervisionEndpoint,
 } from "./app-server/config-contracts.js";
 import {
@@ -303,11 +304,11 @@ function readLegacyEnvEndpoints(env: NodeJS.ProcessEnv): CodexSupervisionEndpoin
 }
 
 function normalizeEndpoints(
-  pluginConfig: unknown,
+  pluginConfig: CodexPluginConfig,
   options: CodexSupervisionToolsOptions,
 ): NormalizedSupervisionEndpoint[] {
   const env = options.env ?? process.env;
-  const configured = readCodexPluginConfig(pluginConfig).supervision?.endpoints;
+  const configured = pluginConfig.supervision?.endpoints;
   const endpoints = configured?.length ? configured : readLegacyEnvEndpoints(env);
   const normalized: NormalizedSupervisionEndpoint[] = endpoints
     ? endpoints.map((endpoint, index) => {
@@ -332,7 +333,7 @@ function normalizeEndpoints(
 }
 
 async function resolveEndpoints(
-  pluginConfig: unknown,
+  pluginConfig: CodexPluginConfig,
   options: CodexSupervisionToolsOptions,
 ): Promise<ResolvedSupervisionEndpoint[]> {
   const env = options.env ?? process.env;
@@ -356,7 +357,7 @@ async function resolveEndpoints(
 
 function resolveEndpointStartOptions(params: {
   endpoint: NormalizedSupervisionEndpoint;
-  pluginConfig: unknown;
+  pluginConfig: CodexPluginConfig;
   env: NodeJS.ProcessEnv;
   resolveRuntimeOptions: CodexSupervisionToolsOptions["resolveRuntimeOptions"];
   validateSecurity?: boolean;
@@ -403,7 +404,7 @@ function resolveEndpointStartOptions(params: {
 
 type EndpointConnectionParams = {
   endpoint: NormalizedSupervisionEndpoint;
-  pluginConfig: unknown;
+  pluginConfig: CodexPluginConfig;
   env: NodeJS.ProcessEnv;
   runtimeConfig: OpenClawConfig | undefined;
   resolveAuthProfileId: CodexSupervisionToolsOptions["resolveAuthProfileId"];
@@ -459,7 +460,7 @@ function createPolicyGuardedRequest(
     if (options.request) {
       return await options.request<T>(currentEndpoint, method, requestParams);
     }
-    const pluginConfig = options.getPluginConfig();
+    const pluginConfig = readCodexPluginConfig(options.getPluginConfig());
     const env = options.env ?? process.env;
     const runtime = options.resolveRuntimeOptions({ pluginConfig, env });
     const config = options.getRuntimeConfig?.();
@@ -749,34 +750,6 @@ async function resolveInProgressTurnId(params: {
   }
 }
 
-function redactString(value: string): string {
-  return value
-    .replace(/\b(?:sk|glpat|xox[baprs])-[-_a-zA-Z0-9]{12,}\b/g, "[redacted]")
-    .replace(/\b(?:ghp|gho|ghu|ghs)_[-_a-zA-Z0-9]{12,}\b/g, "[redacted]")
-    .replace(/\bBearer\s+[-._~+/a-zA-Z0-9]+=*/g, "Bearer [redacted]");
-}
-
-/** Redacts secret-bearing fields before legacy tool results leave the plugin. */
-function redactCodexSupervisionValue(value: unknown, key = ""): unknown {
-  if (typeof value === "string") {
-    return /authorization|password|secret|token|api[-_]?key/i.test(key)
-      ? "[redacted]"
-      : redactString(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactCodexSupervisionValue(entry));
-  }
-  if (!isRecord(value)) {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([entryKey, entryValue]) => [
-      entryKey,
-      redactCodexSupervisionValue(entryValue, entryKey),
-    ]),
-  );
-}
-
 function redactEndpointUrl(value: string): string {
   if (value.startsWith("unix://")) {
     return "unix://";
@@ -795,7 +768,7 @@ function redactEndpointUrl(value: string): string {
 
 function endpointResult(
   endpoint: ResolvedSupervisionEndpoint,
-  pluginConfig: unknown,
+  pluginConfig: CodexPluginConfig,
   env: NodeJS.ProcessEnv,
   resolveRuntimeOptions: CodexSupervisionToolsOptions["resolveRuntimeOptions"],
 ): Record<string, unknown> {
@@ -814,29 +787,23 @@ function endpointResult(
   };
 }
 
-function sanitizeSessionListResult(
+function projectSessionListResult(
   result: CodexSupervisorSessionListResult,
   includeTranscriptDerivedFields: boolean,
-): Record<string, unknown> {
+): CodexSupervisorSessionListResult {
+  if (includeTranscriptDerivedFields) {
+    return result;
+  }
   return {
-    sessions: result.sessions.map((session) => {
-      const sanitized = redactCodexSupervisionValue(session) as Record<string, unknown>;
-      if (!includeTranscriptDerivedFields) {
-        delete sanitized.preview;
-        delete sanitized.name;
-      }
-      return sanitized;
-    }),
-    errors: includeTranscriptDerivedFields
-      ? redactCodexSupervisionValue(result.errors)
-      : result.errors.map(({ endpointId, ok }) => ({ endpointId, ok })),
+    sessions: result.sessions.map(({ preview: _preview, name: _name, ...session }) => session),
+    errors: result.errors.map(({ endpointId, ok }) => ({ endpointId, ok })),
   };
 }
 
 async function requireLiveToolPolicy(
   options: CodexSupervisionToolsOptions,
   policy: CodexSupervisionRequestPolicy,
-): Promise<{ pluginConfig: unknown; endpoints: ResolvedSupervisionEndpoint[] }> {
+): Promise<{ pluginConfig: CodexPluginConfig; endpoints: ResolvedSupervisionEndpoint[] }> {
   const pluginConfig = requireLiveToolPolicyConfig(options, policy);
   return { pluginConfig, endpoints: await resolveEndpoints(pluginConfig, options) };
 }
@@ -844,20 +811,15 @@ async function requireLiveToolPolicy(
 function requireLiveToolPolicyConfig(
   options: CodexSupervisionToolsOptions,
   policy: CodexSupervisionRequestPolicy,
-): unknown {
+): CodexPluginConfig {
   options.assertInvocationCurrent?.();
   if (!options.senderIsOwner) {
     throw new CodexSupervisionPolicyError(
       "Codex supervision compatibility tools require an owner-authorized sender.",
     );
   }
-  const pluginConfig = options.getPluginConfig();
-  requireToolPolicy(pluginConfig, policy);
-  return pluginConfig;
-}
-
-function requireToolPolicy(pluginConfig: unknown, policy: CodexSupervisionRequestPolicy): void {
-  const config = readCodexPluginConfig(pluginConfig).supervision;
+  const pluginConfig = readCodexPluginConfig(options.getPluginConfig());
+  const config = pluginConfig.supervision;
   const error =
     config?.enabled !== true
       ? "Codex supervision is disabled in the codex plugin config."
@@ -869,6 +831,7 @@ function requireToolPolicy(pluginConfig: unknown, policy: CodexSupervisionReques
   if (error) {
     throw new CodexSupervisionPolicyError(error);
   }
+  return pluginConfig;
 }
 
 async function requireCurrentEndpoint(
@@ -925,7 +888,7 @@ function assertCurrentEndpointAtEffect(
 function requireCurrentEndpointSet(
   options: CodexSupervisionToolsOptions,
   expected: ResolvedSupervisionEndpoint[],
-): { pluginConfig: unknown } {
+): { pluginConfig: CodexPluginConfig } {
   const pluginConfig = requireLiveToolPolicyConfig(options, "enabled");
   const current = normalizeEndpoints(pluginConfig, options);
   const unchanged =
@@ -953,10 +916,8 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
   const rawTranscriptRequest = createPolicyGuardedRequest(options, "raw-transcripts");
   const writeRequest = createPolicyGuardedRequest(options, "write-controls");
   // Recheck owner authorization when directly constructed tools execute.
-  const current = () => requireLiveToolPolicy(options, "enabled");
   const controlActiveTurn = async (rawParams: unknown, action: "steer" | "interrupt") => {
-    const { endpoints, pluginConfig } = await current();
-    requireToolPolicy(pluginConfig, "write-controls");
+    const { endpoints } = await requireLiveToolPolicy(options, "write-controls");
     const params = isRecord(rawParams) ? rawParams : {};
     const threadId = readStringParam(params, "thread_id", { required: true });
     const input =
@@ -1021,7 +982,7 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
       description: "Check configured Codex app-server endpoints.",
       parameters: EmptyParamsSchema,
       execute: async () => {
-        const { endpoints } = await current();
+        const { endpoints } = await requireLiveToolPolicy(options, "enabled");
         const health: CodexSupervisorEndpointHealth[] = [];
         for (const endpoint of endpoints) {
           try {
@@ -1056,7 +1017,7 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
       parameters: SessionsListParamsSchema,
       execute: async (_toolCallId, rawParams) => {
         const params = isRecord(rawParams) ? rawParams : {};
-        const { endpoints } = await current();
+        const { endpoints } = await requireLiveToolPolicy(options, "enabled");
         const result = await listSessionSnapshot({
           endpoints,
           request,
@@ -1066,9 +1027,9 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
         const { pluginConfig } = requireCurrentEndpointSet(options, endpoints);
         return jsonResult({
           summary: `codex sessions: ${result.sessions.length}`,
-          ...sanitizeSessionListResult(
+          ...projectSessionListResult(
             result,
-            readCodexPluginConfig(pluginConfig).supervision?.allowRawTranscripts === true,
+            pluginConfig.supervision?.allowRawTranscripts === true,
           ),
         });
       },
@@ -1079,8 +1040,7 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
       description: "Read one Codex session transcript from app-server.",
       parameters: SessionReadParamsSchema,
       execute: async (_toolCallId, rawParams) => {
-        const { endpoints, pluginConfig } = await current();
-        requireToolPolicy(pluginConfig, "raw-transcripts");
+        const { endpoints } = await requireLiveToolPolicy(options, "raw-transcripts");
         const params = isRecord(rawParams) ? rawParams : {};
         const threadId = readStringParam(params, "thread_id", { required: true });
         const endpoint = await resolveEndpointForThread({
@@ -1098,7 +1058,7 @@ export function createCodexSupervisionTools(options: CodexSupervisionToolsOption
         assertCurrentEndpointAtEffect(options, "raw-transcripts", endpoint);
         return jsonResult({
           summary: `codex session: ${threadId}`,
-          response: redactCodexSupervisionValue({ thread }),
+          response: { thread },
         });
       },
     },

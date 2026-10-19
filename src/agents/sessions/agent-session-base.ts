@@ -16,7 +16,6 @@ import type {
   ThinkingLevel,
 } from "../runtime/index.js";
 import { isToolResultError } from "../tool-result-error.js";
-import { takeCodeModeResponseSource } from "../transcript-code-mode-source.js";
 import { persistAgentSessionMessage } from "./agent-session-transcript.js";
 import type {
   AgentSessionConfig,
@@ -47,7 +46,7 @@ import {
 } from "./queued-user-message-retirement.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import type { SessionManager } from "./session-manager.js";
-import { createSessionToolResultPreparer } from "./session-tool-result-redaction.js";
+import { createSessionToolResultPreparer } from "./session-tool-result-preparation.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { reportSteeringMessagePersistenceFailure } from "./steering-message-identity.js";
 import type { BuildSystemPromptOptions } from "./system-prompt-metadata.js";
@@ -75,7 +74,6 @@ export abstract class AgentSessionBase {
   protected contextOverflowRecoveryOwner: "session" | "caller";
   protected resolveCompactionThinkingLevel?: AgentSessionConfig["resolveCompactionThinkingLevel"];
 
-  protected branchSummaryAbortController: AbortController | undefined = undefined;
   private extensionModifiedToolResultIds = new Set<string>();
 
   protected retryAbortController: AbortController | undefined = undefined;
@@ -316,7 +314,7 @@ export abstract class AgentSessionBase {
       await this.runWithSessionWriteSettlement(
         async () => await this.handleAgentEventUnlocked(event, prepareToolResult),
       );
-      // Supported callbacks can change the current result or register another secret.
+      // Supported callbacks can replace the current result.
       prepareToolResult();
       return;
     }
@@ -338,8 +336,6 @@ export abstract class AgentSessionBase {
       retireQueuedUserMessage(event.message);
     }
 
-    const sourceSlots =
-      event.type === "message_end" ? takeCodeModeResponseSource(event.message) : undefined;
     let messageChanged = false;
     if (this.currentExtensionRunner.hasHandlers(event.type)) {
       messageChanged = await this.emitExtensionEvent(event);
@@ -348,7 +344,7 @@ export abstract class AgentSessionBase {
     if (event.type === "turn_end") {
       this.turnIndex++;
     }
-    // Extensions can replace the final result. Protect listeners before publishing it.
+    // Extensions can replace the final result. Apply the size cap before publishing it.
     messageChanged = prepareToolResult() || messageChanged;
     const publishAfterPersistence = event.type === "message_end" && event.message.role === "user";
 
@@ -400,7 +396,6 @@ export abstract class AgentSessionBase {
           }
           const entryId = await persistAgentSessionMessage(this.sessionManager, event.message, {
             invalidateSerializedPrefixCache: messageChanged || toolResultChangedByExtension,
-            sourceAppend: sourceSlots,
           });
           if (event.message.role === "assistant") {
             this.lastAssistantEntryId = entryId;
@@ -555,12 +550,7 @@ export abstract class AgentSessionBase {
    */
   dispose(): void {
     notifyListeners(
-      [
-        () => this.abortRetry(),
-        () => this.abortCompaction(),
-        () => this.abortBranchSummary(),
-        () => this.agent.abort(),
-      ],
+      [() => this.abortRetry(), () => this.abortCompaction(), () => this.agent.abort()],
       undefined,
     );
 
@@ -645,12 +635,11 @@ export abstract class AgentSessionBase {
     this.agent.state.systemPrompt = systemPrompt;
   }
 
-  /** Whether compaction or branch summarization is currently running */
+  /** Whether manual or automatic compaction is currently running */
   get isCompacting(): boolean {
     return (
       this.autoCompactionAbortController !== undefined ||
-      this.compactionAbortController !== undefined ||
-      this.branchSummaryAbortController !== undefined
+      this.compactionAbortController !== undefined
     );
   }
 
@@ -730,5 +719,4 @@ export abstract class AgentSessionBase {
   ): Promise<boolean>;
   abstract abortRetry(): void;
   abstract abortCompaction(): void;
-  abstract abortBranchSummary(): void;
 }

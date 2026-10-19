@@ -2,6 +2,7 @@ import path from "node:path";
 import { expect, it } from "vitest";
 import { buildWidgetDocument } from "../../../src/canvas/wrap.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { selectChatLayoutAction } from "../test-helpers/chat-layout-menu.ts";
 import {
   controlUiSessionUrl,
   defaultControlUiFeatureMethods,
@@ -93,7 +94,7 @@ suite.define(() => {
             .frameLocator("iframe")
             .getByText("All systems ready")
             .waitFor();
-          await page.locator(".chat-panel-swap").click();
+          await selectChatLayoutAction(page, /^Swap /);
           await expect
             .poll(() =>
               page
@@ -218,36 +219,16 @@ suite.define(() => {
             const frames = await page.evaluate(() => Reflect.get(window, "dashboardPaints"));
             console.log("Dashboard reload first painted frame", JSON.stringify(frames[0]));
             expect(frames.length).toBeGreaterThan(0);
-            expect(frames).toEqual(
-              expect.arrayContaining([
-                {
-                  title,
-                  welcome: false,
-                  board: true,
-                  boardRegion: "main",
-                  transcript: true,
-                  transcriptRegion: "side",
-                },
-              ]),
-            );
-            expect(
-              frames.every(
-                (frame: {
-                  title: string;
-                  welcome: boolean;
-                  board: boolean;
-                  boardRegion: string | null;
-                  transcript: boolean;
-                  transcriptRegion: string | null;
-                }) =>
-                  frame.title === title &&
-                  !frame.welcome &&
-                  frame.board &&
-                  frame.boardRegion === "main" &&
-                  frame.transcript &&
-                  frame.transcriptRegion === "side",
-              ),
-            ).toBe(true);
+            for (const frame of frames) {
+              expect(frame).toEqual({
+                title,
+                welcome: false,
+                board: true,
+                boardRegion: "main",
+                transcript: true,
+                transcriptRegion: "side",
+              });
+            }
             expect(await gateway.getRequests("board.get")).toHaveLength(0);
             const helloReleasedAt = performance.now();
             await gateway.resolveDeferred("connect");

@@ -13,6 +13,10 @@ import {
   runOpenClawStateWriteTransaction,
 } from "./openclaw-state-db.js";
 import {
+  addPreCutoverClientCredentialTablesForTest,
+  withStateMigrationBackupForTest,
+} from "./openclaw-state-schema.test-support.js";
+import {
   linkUserChannelIdentity,
   authorizeUserChannelIdentityInDatabase,
   publishUserChannelPolicyInDatabase,
@@ -20,20 +24,19 @@ import {
   configuredCommandOwnerPolicyFingerprint,
 } from "./user-channel-identities.js";
 import { prepareConfiguredCommandOwnerAuthority } from "./user-channel-identity-operations.js";
+import { readUserProfileEmailBindings } from "./user-profile-identity.read.js";
 import {
+  getUserProfileListItem,
   readUserProfileSnapshotSync,
-  readUserProfileEmailBindings,
-} from "./user-profile-identity.read.js";
-import { getUserProfileListItem } from "./user-profile-list-item.test-support.js";
-import { readUserProfileIdentity, prepareUserProfileCatalog } from "./user-profile-list.js";
-import { setUserProfileRole } from "./user-profile-writes.worker.js";
-import { ensureUserProfilesSchema } from "./user-profiles-schema.js";
+} from "./user-profile-list-item.test-support.js";
 import {
-  ensureProfileForEmail,
   getUserProfileDisplay,
-  getUserProfileRole,
-  resolveUserProfileId,
-} from "./user-profiles.js";
+  readResidentUserProfileIdentity,
+  prepareUserProfileCatalog,
+} from "./user-profile-list.js";
+import { setUserProfileRole } from "./user-profile-writes.worker.js";
+import { ensureUserProfileRoleSchema, ensureUserProfilesSchema } from "./user-profiles-schema.js";
+import { ensureProfileForEmail } from "./user-profiles.js";
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
   afterEach(() => {
@@ -132,9 +135,9 @@ describe("user profile role schema", () => {
     const database = createLegacyProfileDatabase(options);
     const versionBefore = database.prepare("PRAGMA user_version").get()?.user_version;
     const profile = ensureProfileForEmail("ada@example.com", options);
-    const release = (await prepareUserProfileCatalog(options)).release;
+    let release = (await prepareUserProfileCatalog(options)).release;
     try {
-      expect(readUserProfileIdentity(profile.id, options)?.role).toBeNull();
+      expect(readResidentUserProfileIdentity(profile.id, options)?.role).toBeNull();
 
       expect(tableHasColumn(database, "user_profiles", "role")).toBe(false);
       expect(getUserProfileListItem(profile.id, options)).not.toHaveProperty("role");
@@ -144,7 +147,8 @@ describe("user profile role schema", () => {
       });
       expect(readUserProfileSnapshotSync(options).profiles[0]).not.toHaveProperty("role");
       expect(tableHasColumn(database, "user_profiles", "role")).toBe(false);
-      expect(getUserProfileRole(profile.id, options)).toBeNull();
+      ensureUserProfileRoleSchema(options);
+      expect(readResidentUserProfileIdentity(profile.id, options)?.role).toBeNull();
       expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(versionBefore);
       expect(database.prepare("PRAGMA table_info(user_profiles)").all()).toContainEqual(
         expect.objectContaining({
@@ -157,17 +161,20 @@ describe("user profile role schema", () => {
       );
 
       setUserProfileRole(profile.id, "maintainer", options);
-      expect(readUserProfileIdentity(profile.id, options)?.role).toBe("maintainer");
+      expect(readResidentUserProfileIdentity(profile.id, options)?.role).toBe("maintainer");
       database
         .prepare("UPDATE user_profiles SET display_name = ? WHERE id = ?")
         .run("Older Reader", profile.id);
       database
         .prepare("INSERT INTO user_profiles (id, created_at, updated_at) VALUES (?, ?, ?)")
         .run("older-profile", 1, 1);
+      release();
       closeOpenClawStateDatabaseForTest();
+      release = (await prepareUserProfileCatalog(options)).release;
 
-      expect(getUserProfileRole(profile.id, options)).toBe("maintainer");
-      expect(getUserProfileRole("older-profile", options)).toBeNull();
+      expect(readResidentUserProfileIdentity(profile.id, options)?.role).toBe("maintainer");
+      expect(readResidentUserProfileIdentity("older-profile", options)?.role).toBeNull();
+      expect(getUserProfileListItem("older-profile", options)).not.toHaveProperty("role");
       expect(getUserProfileListItem(profile.id, options)).toMatchObject({
         displayName: "Older Reader",
         role: "maintainer",
@@ -185,8 +192,9 @@ describe("user profile role schema", () => {
       const profile = ensureProfileForEmail("rollback@example.test", options);
       const assertRestored = () => {
         expect(tableHasColumn(database, "user_profiles", "role")).toBe(false);
-        expect(resolveUserProfileId(profile.id, options)).toBe(profile.id);
-        expect(getUserProfileListItem(profile.id, options)).not.toHaveProperty("role");
+        const stored = getUserProfileListItem(profile.id, options);
+        expect(stored.id).toBe(profile.id);
+        expect(stored).not.toHaveProperty("role");
         expect(readUserProfileSnapshotSync(options).profiles[0]).not.toHaveProperty("role");
       };
       const rollBackRole = () =>
@@ -226,6 +234,7 @@ it("upgrades deferred channel links without granting legacy recovery custody", a
   renameSync(options.path, `${options.path}.seed`);
   copyFileSync(`${options.path}.seed`, options.path);
   const legacy = new DatabaseSync(options.path);
+  addPreCutoverClientCredentialTablesForTest(legacy);
   legacy.exec(`
     DROP INDEX idx_user_profile_identities_authorization;
     ALTER TABLE user_profile_identities DROP COLUMN authorization_id;
@@ -235,6 +244,7 @@ it("upgrades deferred channel links without granting legacy recovery custody", a
   `);
   const before = legacy.prepare("SELECT * FROM user_profile_identities").all();
   legacy.close();
+  await withStateMigrationBackupForTest(options, () => openOpenClawStateDatabase(options));
   let db = openOpenClawStateDatabase(options).db;
   expect(db.prepare("SELECT * FROM user_profile_identities").all()).toEqual(
     before.map((row) =>

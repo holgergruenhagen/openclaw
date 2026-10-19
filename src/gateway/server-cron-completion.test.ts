@@ -19,16 +19,20 @@ import {
 import { makeCronJob } from "../cron/delivery.test-helpers.js";
 import { createNoopLogger } from "../cron/service.test-harness.js";
 import { createCronCompletionDeliveryFence } from "../cron/service/delivery-attempt-fence.js";
-import { reserveQueuedCronRun } from "../cron/service/run-admission.js";
 import { markServiceCronJobActive } from "../cron/service/run-receipts.js";
 import { createCronServiceState } from "../cron/service/state.js";
 import { loadCronStore, saveCronStore } from "../cron/store.js";
 import { cronStoreKey } from "../cron/store/key.js";
 import { readActiveCronRunReceiptsInDatabase } from "../cron/store/run-receipt-read.js";
-import { finishCronRunReceiptAsync } from "../cron/store/run-receipt-store.js";
-import { claimCronRunReceiptForTest } from "../cron/store/run-receipt-store.test-support.js";
+import {
+  claimCronRunReceiptForTest,
+  finishCronRunReceiptAsync,
+} from "../cron/store/run-receipt-store.test-support.js";
 import type { CronStoredJob } from "../cron/types.js";
-import { OutboundDeliveryError } from "../infra/outbound/deliver-types.js";
+import {
+  OutboundDeliveryError,
+  PlatformMessageNotDispatchedError,
+} from "../infra/outbound/deliver-types.js";
 import * as outboundSession from "../infra/outbound/outbound-session.js";
 import { getChildLogger } from "../logging.js";
 import {
@@ -45,7 +49,6 @@ import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
-import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import {
@@ -115,10 +118,6 @@ async function createCompletionFixture(
     enqueueSystemEvent: vi.fn(),
     requestHeartbeat: vi.fn(),
     runIsolatedAgentJob: vi.fn(),
-  });
-  reserveQueuedCronRun(service, job.id, 1000, {
-    runReceipt: receipt,
-    runReceiptContext: captureOpenClawStateWorkerContext(),
   });
   const marker = markServiceCronJobActive(service, job, receipt);
   const controller = new AbortController();
@@ -258,9 +257,9 @@ async function createCompletionFixture(
         // A retained terminal receipt uses only columns shipped in v2026.9.9.
         db.prepare(
           `INSERT INTO cron_run_receipts (
-            receipt_id, store_key, job_id, config_revision, agent_id, request_run_id,
+            cursor_id, receipt_id, store_key, job_id, config_revision, agent_id, request_run_id,
             status, owner_pid, owner_start_time, started_at_ms, finished_at_ms, error_text
-          ) VALUES (?, ?, ?, ?, 'main', 'released-request', 'ok', 123, NULL, 10, 20, NULL)`,
+          ) VALUES ((SELECT coalesce(max(cursor_id), 0) + 1 FROM cron_run_receipts), ?, ?, ?, ?, 'main', 'released-request', 'ok', 123, NULL, 10, 20, NULL)`,
         ).run("released-receipt", receipt.storeKey, job.id, receipt.configRevision);
       });
       const loaded = (await loadCronStore(cronStorePath)).jobs[0]!;
@@ -381,7 +380,10 @@ describe("completion announcement", () => {
             });
           }
           if (failure === "rejected") {
-            throw new Error("notification rejected");
+            throw new PlatformMessageNotDispatchedError("notification rejected", {
+              cause: new Error("synthetic recipient rejection"),
+              retryable: false,
+            });
           }
           return { channel: "telegram", messageId: "notification-message" };
         });
@@ -605,18 +607,22 @@ describe("completion announcement", () => {
   });
 
   it.each(["NO_REPLY", "Scheduled report\nNO_REPLY"])(
-    "suppresses script control text before committing or adding an inspection link: %s",
+    "delivers prepared script text literally without a second control parser: %s",
     async (text) => {
       await withCompletionFixture("script", async (fixture) => {
         await expect(fixture.finalize({ text })).resolves.toMatchObject({
-          delivered: false,
-          deliveryAttempted: false,
+          delivered: true,
+          deliveryAttempted: true,
           deliveryError: undefined,
-          deliverySuppressionReason: "silent",
         });
-        expect(fixture.sendText).not.toHaveBeenCalled();
+        const deliveredText = `${text}\nInspect: https://automation.example.test/automations?job=script-job&run=cron%3Ascript-job%3A1000`;
+        expect(fixture.sendText).toHaveBeenCalledWith(
+          expect.objectContaining({ text: deliveredText }),
+        );
         expect(fixture.warn).not.toHaveBeenCalled();
-        expect(await fixture.messages(fixture.destination)).toEqual([]);
+        expect(await fixture.messages(fixture.destination)).toEqual([
+          expect.objectContaining({ content: [{ type: "text", text: deliveredText }] }),
+        ]);
         await fixture.assertNoOtherResults();
       });
     },

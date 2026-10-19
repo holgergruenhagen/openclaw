@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { isArtifactPreservingStateRead } from "../state/artifact-preserving-state-reads.js";
 import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "../state/openclaw-state-db-readonly.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
@@ -190,7 +191,7 @@ export function readMeetingTranscriptMigrationDetectionState(params: {
     pendingImportCount: 0,
     hasOversizedSessionSlugs: false,
   });
-  const read = ({ db: database }: { db: import("node:sqlite").DatabaseSync }) => {
+  const read = ({ db: database }: { db: import("./sql-connection.js").SqlConnection }) => {
     const tables = new Set(
       database
         .prepare(
@@ -243,13 +244,13 @@ export function readMeetingTranscriptMigrationDetectionState(params: {
       hasOversizedSessionSlugs,
     };
   };
-  if (params.artifactPreservingReadOnly) {
+  const databasePath = resolveOpenClawStateSqlitePath(params.env);
+  if (params.artifactPreservingReadOnly || isArtifactPreservingStateRead("shared", databasePath)) {
     return (
       withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(read, { env: params.env }) ??
       empty()
     );
   }
-  const databasePath = resolveOpenClawStateSqlitePath(params.env);
   if (!fs.existsSync(databasePath)) {
     return empty();
   }

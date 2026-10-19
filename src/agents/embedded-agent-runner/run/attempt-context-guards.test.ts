@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { queryObjects } from "node:v8";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDiagnosticTraceContext } from "../../../infra/diagnostic-trace-context.js";
 import type { AssistantMessage, Model } from "../../../llm/types.js";
 import { createAssistantMessageEventStream } from "../../../llm/utils/event-stream.js";
 import type { AgentMessage } from "../../runtime/index.js";
+import { agentSessionDeferThresholdCompaction } from "../../sessions/agent-session-types.js";
 import type { AgentSession } from "../../sessions/index.js";
 import { makeZeroUsageSnapshot } from "../../usage.js";
 import { createToolResultPromptProjectionState } from "../session-prompt-state.js";
@@ -125,6 +128,27 @@ describe("installEmbeddedAttemptContextGuards", () => {
     hoisted.readLastCacheTtlTimestamp.mockReturnValue(null);
   });
 
+  it("retained cache-touch callbacks do not keep completed attempt continuations", async () => {
+    const completed = Array.from({ length: 20 }, () => {
+      const input = createInput();
+      const continuation = { prompt: "continue", messages: prunableHistory() };
+      const guards = installEmbeddedAttemptContextGuards({
+        ...input,
+        attempt: { ...input.attempt, continuation },
+      } as never);
+      guards.remove();
+      return { callback: guards.recordCacheTouch, continuation: new WeakRef(continuation) };
+    });
+    const control = new WeakRef({});
+    await nextTurn();
+    queryObjects(WeakRef);
+    expect(control.deref()).toBeUndefined();
+    expect(completed.filter(({ continuation }) => continuation.deref())).toHaveLength(0);
+    for (const { callback } of completed) {
+      callback(1);
+    }
+  });
+
   it("tracks mid-turn requests and restores attempt-local transforms", async () => {
     const input = createInput();
     const originalTransform = input.activeSession.agent.transformContext;
@@ -156,6 +180,20 @@ describe("installEmbeddedAttemptContextGuards", () => {
     guards.remove();
     expect(input.activeSession.agent.transformContext).toBe(originalTransform);
     expect(removeToolResultGuard).toHaveBeenCalledOnce();
+  });
+
+  it("defers local pressure recovery while the provider request boundary owns compaction", () => {
+    const input = createInput();
+    input.activeSession[agentSessionDeferThresholdCompaction] = true;
+    const guards = installEmbeddedAttemptContextGuards(input as never);
+    const request = {
+      context: { messages: [{ role: "user" as const, content: "x".repeat(8_000), timestamp: 1 }] },
+    };
+    expect(() => guards.checkMidTurnPrecheck(request)).not.toThrow();
+    expect(guards.takePendingMidTurnPrecheckRequest()).toBeNull();
+    input.activeSession[agentSessionDeferThresholdCompaction] = false;
+    expect(() => guards.checkMidTurnPrecheck(request)).toThrow(MidTurnPrecheckSignal);
+    guards.remove();
   });
 
   it("hydrates current images and their failure notice before context transforms", async () => {

@@ -4,7 +4,7 @@ import type {
   TranscriptsListResult,
 } from "@openclaw/gateway-protocol";
 
-export type TranscriptReadState = {
+type TranscriptReadState = {
   summary: TranscriptsGetResult | null;
   pages: TranscriptsGetResult[];
   loading: boolean;
@@ -13,6 +13,10 @@ export type TranscriptReadState = {
 
 export type TranscriptsViewProps = {
   basePath: string;
+  onFocusTarget?: (
+    kind: "search" | "reader-title" | "reader-error",
+    element: HTMLElement,
+  ) => (() => void) | undefined;
   now: number;
   search: string;
   drafts: Readonly<Record<string, string>>;

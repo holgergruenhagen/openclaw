@@ -14,8 +14,8 @@ import type {
   SessionActorPhaseResults,
   SessionActorReducer,
   SessionActorTarget,
+  SessionActorStorage,
 } from "./session-actor-contract.js";
-import type { SessionActorStorage } from "./session-actor-storage-contract.js";
 
 export type SessionActorExecutorGuards = {
   target: SessionActorTarget;
@@ -91,6 +91,8 @@ export function createSessionActorWithExecutor(params: {
       phase?.pending.delete(promise);
     };
     void promise.then(settled, settled);
+    // Keep dispatch in this try and convert operation() throws to rejections:
+    // adoptRun restores cleanup custody on synchronous throws because no write has started.
     try {
       const work = executor.retain ? executor.retain(operation) : operation();
       void work.then(retained.resolve, retained.reject);
@@ -139,6 +141,12 @@ export function createSessionActorWithExecutor(params: {
     ...(storage
       ? {
           storage: {
+            acquire(sessionKey, lifetime) {
+              return storage.acquire(sessionKey, lifetime);
+            },
+            readCurrent(query, authority) {
+              return storage.readCurrent(query, authority);
+            },
             read(query, authority) {
               const captured = structuredClone(query);
               return retain(() => storage.read(captured, authority), phase);

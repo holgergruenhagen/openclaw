@@ -12,6 +12,18 @@ type PaneHighlight = {
 
 const panes = new Map<Element, PaneHighlight>();
 
+// Transcript text blocks (messages, notices, typing previews) announce themselves
+// from their ref, so highlighting never has to search transcript DOM for them.
+const textBlocks = new Set<HTMLElement>();
+
+/** Adds a rendered transcript text block to search highlighting until released. */
+export function registerChatSearchTextBlock(element: HTMLElement): () => void {
+  textBlocks.add(element);
+  return () => {
+    textBlocks.delete(element);
+  };
+}
+
 function highlightRegistry(): HighlightRegistry | null {
   return typeof CSS !== "undefined" && CSS.highlights && typeof Highlight === "function"
     ? CSS.highlights
@@ -64,14 +76,18 @@ function readableNode(node: Node): number {
 }
 
 /** Ranges for each visible occurrence of `query` in rendered message text. */
-export function collectChatSearchRanges(root: ParentNode, query: string): Range[] {
+export function collectChatSearchRanges(root: Node, query: string): Range[] {
   const pattern = phraseQueryPattern(query);
   const ranges: Range[] = [];
   if (!pattern) {
     return ranges;
   }
-  for (const container of root.querySelectorAll<HTMLElement>(".chat-text")) {
-    if (container.parentElement?.closest(".chat-text")) {
+  for (const container of textBlocks) {
+    if (
+      !container.classList.contains("chat-text") ||
+      !root.contains(container) ||
+      container.parentElement?.closest(".chat-text")
+    ) {
       continue;
     }
     const document = container.ownerDocument;
@@ -160,7 +176,7 @@ export function syncChatSearchHighlight(root: Element, query: string): void {
   refresh(root, pane, registry);
 }
 
-export function releaseChatSearchHighlight(root: Element): void {
+function releaseChatSearchHighlight(root: Element): void {
   const pane = panes.get(root);
   const registry = highlightRegistry();
   if (!pane || !registry) {
@@ -172,4 +188,21 @@ export function releaseChatSearchHighlight(root: Element): void {
   }
   panes.delete(root);
   publish(registry);
+}
+
+type TranscriptSearch = {
+  readonly snapshot: Readonly<{ open: boolean; query: string }>;
+  subscribe(notify: () => void): () => void;
+};
+
+/** Follows the pane's search owner directly; the returned function stops marking. */
+export function watchChatSearchHighlight(root: Element, search: TranscriptSearch): () => void {
+  const sync = () =>
+    syncChatSearchHighlight(root, search.snapshot.open ? search.snapshot.query : "");
+  sync();
+  const unsubscribe = search.subscribe(sync);
+  return () => {
+    unsubscribe();
+    releaseChatSearchHighlight(root);
+  };
 }

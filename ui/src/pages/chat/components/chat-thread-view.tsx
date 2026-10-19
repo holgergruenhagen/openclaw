@@ -1,4 +1,4 @@
-import { Show, createEffect, createMemo, onCleanup, onSettled } from "solid-js";
+import { Show, createMemo, onCleanup, onSettled } from "solid-js";
 import { handleMarkdownCodeBlockClick } from "../../../components/markdown-code-blocks.ts";
 import {
   linkReaderPrefetchRef as createLinkReaderPrefetchRef,
@@ -33,7 +33,7 @@ import {
 import { ChatCommentPins } from "./chat-comment-pins.tsx";
 import { CHAT_HISTORY_BOUNDARY_HEIGHT_PX, ChatHistoryBoundary } from "./chat-history-boundary.tsx";
 import { ChatPositionRail } from "./chat-position-rail-solid.tsx";
-import { releaseChatSearchHighlight, syncChatSearchHighlight } from "./chat-search-highlight.ts";
+import { watchChatSearchHighlight } from "./chat-search-highlight.ts";
 import {
   getTranscriptState,
   handleTranscriptContextMenu,
@@ -67,10 +67,12 @@ export function ChatThread(input: {
   const historyIntent = (event: Event) => input.props.onHistoryIntent?.(event);
   let stopHistory: (() => void)[] = [];
   let releaseViewport: (() => void) | undefined;
+  let releaseSearchHighlight: (() => void) | undefined;
   // Retained transcript roots can settle before refs; bind native input at the ref.
   onCleanup(() => {
     stopHistory.forEach((stop) => stop());
     releaseViewport?.();
+    releaseSearchHighlight?.();
   });
   const paneId = createMemo(() => input.props.paneId);
   onSettled(() => root && registerTranscriptElement(paneId(), root));
@@ -136,19 +138,6 @@ export function ChatThread(input: {
     Boolean(input.props.gatewayClient?.connected),
   ]);
   const markdownRef = createMarkdownBlocksRef(() => input.props.transcriptVisible ?? true);
-  createEffect(
-    () => (searchOpen() ? search().read().query : ""),
-    (query) => {
-      if (root) {
-        syncChatSearchHighlight(root, query);
-      }
-    },
-  );
-  onCleanup(() => {
-    if (root) {
-      releaseChatSearchHighlight(root);
-    }
-  });
   const historyHeader = () =>
     input.props.historyPagination
       ? {
@@ -198,6 +187,10 @@ export function ChatThread(input: {
           releaseViewport = input.bindViewport?.(element);
           markdownRef(element);
           prefetchRef(element);
+          releaseSearchHighlight = watchChatSearchHighlight(
+            element,
+            getTranscriptState(paneId()).search,
+          );
           stopHistory = ["wheel", "touchstart", "touchmove"].map((type) =>
             listen(element, type, historyIntent, { passive: true }),
           );

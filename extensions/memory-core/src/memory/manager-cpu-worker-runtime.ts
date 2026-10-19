@@ -1,6 +1,7 @@
 import { resolveStateDir } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { ensureSqliteLibrarySelected } from "openclaw/plugin-sdk/memory-core-host-engine-knn";
 import type { readTranscriptStatsBatchReadOnlySync } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
+import { DatabaseSearchCapabilityUnavailableError } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { resolveRuntimeWorkerUrl, WorkerTaskPool } from "openclaw/plugin-sdk/process-runtime";
 import type {
   MemoryOriginReadFilters,
@@ -198,9 +199,12 @@ export async function runMemoryCuratedCandidates(
   );
 }
 
-export async function runMemoryPresenceInspection(databasePath: string): Promise<boolean> {
+export async function runMemoryPresenceInspection(
+  databasePath: string,
+  agentId?: string,
+): Promise<boolean> {
   const result = await runRetrieval(
-    { kind: "presence", databasePath },
+    { kind: "presence", databasePath, agentId },
     { inputBytes: databasePath.length * 2 },
     "presence",
   );
@@ -217,7 +221,16 @@ export async function runMemoryKeywordSearch(
     { ...target, kind: "keyword", query, includeIndexState },
     {
       signal,
-      inputBytes: 2 * (query.body.query.length + query.path.query.length),
+      inputBytes:
+        2 * (query.body.query.length + query.path.query.length) +
+        (query.body.sourceFilter.excludedSessionPaths?.reduce(
+          (bytes, path) => bytes + path.length * 2,
+          0,
+        ) ?? 0) +
+        (query.path.sourceFilter.excludedSessionPaths?.reduce(
+          (bytes, path) => bytes + path.length * 2,
+          0,
+        ) ?? 0),
     },
     "keyword",
   );
@@ -234,10 +247,20 @@ export async function runMemoryVectorFallback(
       signal,
       inputBytes:
         query.queryVec.length * 8 +
-        (query.candidateIds?.reduce((bytes, id) => bytes + id.length * 2, 0) ?? 0),
+        (query.candidateIds?.reduce((bytes, id) => bytes + id.length * 2, 0) ?? 0) +
+        (query.sourceFilter.excludedSessionPaths?.reduce(
+          (bytes, path) => bytes + path.length * 2,
+          0,
+        ) ?? 0),
     },
     "vector",
   );
+  if (result.capabilityError) {
+    throw new DatabaseSearchCapabilityUnavailableError(
+      result.capabilityError.capability,
+      result.capabilityError.message,
+    );
+  }
   return result.rows;
 }
 

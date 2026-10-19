@@ -18,6 +18,7 @@ import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { resolveLineAccount } from "./accounts.js";
 import { messageAction, normalizeLineMessage } from "./actions.js";
 import { resolveLineChannelAccessToken } from "./channel-access-token.js";
+import { normalizeLineMessagingTarget } from "./messaging-target.js";
 import { buildLineMediaMessage } from "./outbound-media.js";
 import { recordLineSentMessages } from "./outbound-message-log.js";
 import { applyLineQuoteToken, withoutLineQuoteTokens } from "./quote-tokens.js";
@@ -95,7 +96,6 @@ interface LineSendOpts {
   cfg: OpenClawConfig;
   channelAccessToken?: string;
   accountId?: string;
-  verbose?: boolean;
   mediaUrl?: string;
   mediaKind?: LineOutboundMediaKind;
   previewImageUrl?: string;
@@ -113,7 +113,6 @@ type LinePushOpts = Pick<
   | "cfg"
   | "channelAccessToken"
   | "accountId"
-  | "verbose"
   | "quoteToken"
   | "authorize"
   | "assertDirectAdapterHandoff"
@@ -141,17 +140,7 @@ function resolveLineProviderMessageIds(
 }
 
 function normalizeTarget(to: string): string {
-  const trimmed = to.trim();
-  if (!trimmed) {
-    throw new Error("Recipient is required for LINE sends");
-  }
-
-  const normalized = trimmed
-    .replace(/^line:group:/i, "")
-    .replace(/^line:room:/i, "")
-    .replace(/^line:user:/i, "")
-    .replace(/^line:/i, "");
-
+  const normalized = normalizeLineMessagingTarget(to);
   if (!normalized) {
     throw new Error("Recipient is required for LINE sends");
   }
@@ -386,7 +375,6 @@ async function pushLineMessages(
     messageId,
     chatId,
     receipt: createLineSendReceipt({
-      messageId,
       messageIds,
       chatId,
       kind: resolveLineReceiptKind(messages),
@@ -520,17 +508,14 @@ export function createQuickReplyItems(labels: string[]): QuickReply {
   return { items };
 }
 
-export async function showLoadingAnimation(
-  chatId: string,
-  opts: LineClientOpts & { loadingSeconds?: number },
-): Promise<void> {
+export async function showLoadingAnimation(chatId: string, opts: LineClientOpts): Promise<void> {
   const { token } = resolveLineMessagingAccount(opts);
   const client = new messagingApi.MessagingApiClient({ channelAccessToken: token });
 
   try {
     await client.showLoadingAnimation({
       chatId: normalizeTarget(chatId),
-      loadingSeconds: opts.loadingSeconds ?? 20,
+      loadingSeconds: 20,
     });
   } catch (err) {
     logVerbose(`line: loading animation failed (non-fatal): ${String(err)}`);

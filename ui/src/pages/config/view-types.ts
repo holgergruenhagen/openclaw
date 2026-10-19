@@ -13,8 +13,6 @@ import type { ThemeCatalogSnapshot } from "../../app/theme-catalog.ts";
 import type { ThemeMode, ThemeName } from "../../app/theme.ts";
 import type { TypefaceId } from "../../app/typography.ts";
 import type { WebPushSnapshot } from "../../app/web-push.ts";
-import type { JsonSchema } from "../../components/config-form.shared.ts";
-import type { ConfigSchemaAnalysis } from "../../components/config-form.ts";
 import type { Locale } from "../../i18n/index.ts";
 import type { RealtimeTalkInputDevice } from "../chat/talk/input.ts";
 import type { SessionObserverModelSelection } from "./session-observer-settings.ts";
@@ -37,12 +35,6 @@ type RawDiffCache = {
   current: string;
   diff: ConfigDiffEntry[];
 };
-type SchemaAnalysisCache = {
-  schema: JsonSchema | null;
-  includeKey: string;
-  excludeKey: string;
-  analysis: ConfigSchemaAnalysis;
-};
 
 export type ConfigViewState = {
   rawRevealed: boolean;
@@ -50,9 +42,7 @@ export type ConfigViewState = {
   envRevealed: boolean;
   validityDismissed: boolean;
   revealedSensitivePaths: Set<string>;
-  lastCustomThemeImportFocusToken: number | null;
   rawDiffCache?: RawDiffCache;
-  schemaAnalysisCache?: SchemaAnalysisCache;
   lastConfigContextKey: string | null;
   lastFormModeForScroll: ConfigFormMode | null;
 };
@@ -154,7 +144,6 @@ export interface ConfigProps extends TabIconViewProps, AppearancePreferences {
   customThemeImportBusy: boolean;
   customThemeImportMessage: { kind: "success" | "error"; text: string } | null;
   customThemeImportExpanded?: boolean;
-  customThemeImportFocusToken?: number;
   onCustomThemeImportUrlChange: (next: string) => void;
   onImportCustomTheme: () => void;
   onClearCustomTheme: () => void;
@@ -200,8 +189,8 @@ export interface ConfigProps extends TabIconViewProps, AppearancePreferences {
   configPath?: string | null;
   navRootLabel?: string;
   showRootTab?: boolean;
-  includeSections?: string[];
-  excludeSections?: string[];
+  includeSections?: readonly string[];
+  excludeSections?: readonly string[];
   includeVirtualSections?: boolean;
   /** Layout mode: "tabs" (default flat scroll) or "accordion" (grouped collapsible). */
   settingsLayout?: "tabs" | "accordion";

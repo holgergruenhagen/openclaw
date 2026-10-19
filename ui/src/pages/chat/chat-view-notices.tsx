@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type {
   SessionPlacementDiskSpace,
   SessionPlacementWorkerRuntimeInstall,
@@ -19,6 +19,7 @@ import {
   type ChatProviderReviewOwner,
 } from "./chat-provider-review-controller.tsx";
 import type { SubagentRoster, SubagentRowContext } from "./chat-spawned-subagent.ts";
+import { ChatGPTUsageLimit } from "./chatgpt-usage-limit.tsx";
 import { ChatChildAttention } from "./components/chat-child-attention.tsx";
 import { WorkspaceConflictNotice } from "./components/chat-workspace-conflict.tsx";
 import type { ChatRunError } from "./run-lifecycle.ts";
@@ -43,6 +44,7 @@ type ChatComposerNoticesProps = ChatPlacementStartupNoticeProps &
   SubagentRowContext &
   Pick<SubagentRoster, "subagentSessionsRead"> & {
     sessionKey?: string;
+    presented?: boolean;
     onSessionSelect?: (key: string) => void;
     connected?: boolean;
     messages: readonly unknown[];
@@ -64,7 +66,7 @@ function renderStatusNotice(
 ) {
   return (
     <div
-      class={`chat-composer-neighbor-card chat-composer-neighbor-card--${tone} ${className}`}
+      class={["chat-composer-neighbor-card", `chat-composer-neighbor-card--${tone}`, className]}
       role={tone === "danger" ? "alert" : "status"}
       title={tooltip}
     >
@@ -145,7 +147,11 @@ function ChatErrorNotice(props: {
   const tone = () => props.tone ?? "danger";
   return (
     <div
-      class={`chat-composer-neighbor-card chat-composer-neighbor-card--${tone()} chat-error`}
+      class={[
+        "chat-composer-neighbor-card",
+        `chat-composer-neighbor-card--${tone()}`,
+        "chat-error",
+      ]}
       role={tone() === "warn" ? "status" : "alert"}
     >
       <span class="chat-composer-neighbor-card__icon" aria-hidden="true">
@@ -216,6 +222,12 @@ export function renderChatComposerNotices(props: ChatComposerNoticesProps) {
       ),
     );
   const contention = () => props.runError?.kind === "state_contention";
+  const usageLimit = (): "business" | "consumer" | undefined =>
+    props.runError?.kind === "chatgpt_business_usage_limit"
+      ? "business"
+      : props.runError?.kind === "chatgpt_consumer_usage_limit"
+        ? "consumer"
+        : undefined;
   const refresh = (
     <Show when={props.onRefresh}>
       <button
@@ -243,7 +255,14 @@ export function renderChatComposerNotices(props: ChatComposerNoticesProps) {
         {(owner) => <ChatProviderReviewNotice owner={owner()} />}
       </Show>
       {renderProviderPolicyNotice(providerPolicyNotice())}
-      <Show when={!hasTranscriptFailure() && props.runError}>
+      <Show when={usageLimit()}>
+        {(kind) => (
+          <For each={[`${props.sessionKey}:${props.runError?.runId}:${kind()}`]}>
+            {() => <ChatGPTUsageLimit kind={kind()} presented={props.presented ?? true} />}
+          </For>
+        )}
+      </Show>
+      <Show when={!hasTranscriptFailure() && !usageLimit() && props.runError}>
         {(error) => (
           <>
             <ChatErrorNotice

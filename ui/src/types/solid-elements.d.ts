@@ -39,6 +39,19 @@ declare module "@solidjs/web" {
       messageActions: MessageActionDetails | null | undefined;
     }
     interface IntrinsicElements {
+      "openclaw-chat-sent-comments": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-sources": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-summary-automations": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-details-progress": HTMLAttributes<HTMLElement>;
+      "openclaw-microphone-activity": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-content": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-raw": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-outcome": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-card": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-icon": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-reviews": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-outcome-summary": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-tool-review-outcome": HTMLAttributes<HTMLElement>;
       "openclaw-custodian-setup-card": HTMLAttributes<HTMLElement>;
       "openclaw-agent-memory-panel": HTMLAttributes<HTMLElement>;
       "openclaw-chat-ci-details": HTMLAttributes<HTMLElement> & ElementProperties<ChatCiProperties>;
@@ -119,6 +132,7 @@ declare module "@solidjs/web" {
       "openclaw-tooltip": HTMLAttributes<Tooltip> & {
         "prop:content"?: Tooltip["content"];
         "prop:describe"?: Tooltip["describe"];
+        "prop:descriptionTarget"?: Tooltip["descriptionTarget"];
         "prop:pointerThrough"?: Tooltip["pointerThrough"];
         "prop:openOnClick"?: Tooltip["openOnClick"];
         "prop:disabled"?: Tooltip["disabled"];
@@ -170,6 +184,7 @@ declare module "@solidjs/web" {
             | "client"
             | "readers"
             | "agentId"
+            | "sessionKey"
             | "previewSeeds"
             | "pagePreviewContext"
             | "claimedReaders"
@@ -181,15 +196,9 @@ declare module "@solidjs/web" {
         ElementProperties<Pick<HTMLElementTagNameMap["openclaw-session-owner-chip"], "owner">> & {
           size?: HTMLElementTagNameMap["openclaw-session-owner-chip"]["size"];
         };
-      "openclaw-chat-pdf-preview": HTMLAttributes<
-        HTMLElementTagNameMap["openclaw-chat-pdf-preview"]
-      > &
-        ElementProperties<
-          Pick<
-            HTMLElementTagNameMap["openclaw-chat-pdf-preview"],
-            "src" | "sourceIdentity" | "label" | "mimeType" | "sizeBytes"
-          >
-        >;
+      "openclaw-chat-pdf-preview": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-pane-versions-menu": HTMLAttributes<HTMLElement>;
+      "openclaw-chat-skill-learned-notice": HTMLAttributes<HTMLElement>;
       "openclaw-agent-row-chip": HTMLAttributes<HTMLElement> & {
         "prop:agentId"?: string;
       };

@@ -17,7 +17,6 @@ import {
   applyCodexAppServerAuthProfile,
   bridgeCodexAppServerStartOptions,
   resolveCodexAppServerPreparedAuthProfileSnapshot,
-  reconcileCodexComputerUseStartArtifacts,
 } from "./auth-bridge.js";
 import {
   CodexAppServerAuthProfileUnavailableError,
@@ -39,7 +38,8 @@ import {
   withCodexAppServerAcquireDeadline,
 } from "./client-startup-retry.js";
 import { CodexAppServerClient, isUnsupportedCodexAppServerVersionError } from "./client.js";
-import type { CodexAppServerStartOptions } from "./config-contracts.js";
+import { reconcileCodexComputerUseStartArtifacts } from "./computer-use-artifacts.js";
+import type { CodexAppServerStartOptions, CodexPluginConfig } from "./config-contracts.js";
 import {
   resolveCodexAppServerRequestTimeoutMs,
   resolveCodexAppServerRuntimeOptions,
@@ -173,7 +173,7 @@ export function readCodexAppServerClientDesktopGeneration(
 
 export type CodexAppServerClientOptions = {
   startOptions?: CodexAppServerStartOptions;
-  pluginConfig?: unknown;
+  pluginConfig?: CodexPluginConfig;
   timeoutMs?: number;
   authProfileId?: string | null;
   authProfileStore?: AuthProfileStore;
@@ -333,7 +333,6 @@ async function resolveCodexAppServerClientStartContext(
       : {}),
     authRequirement,
     config: options?.config,
-    pluginConfig: options?.pluginConfig,
     ...(authProfileStore ? { authProfileStore } : {}),
   });
   return {
@@ -654,9 +653,7 @@ export async function createIsolatedCodexAppServerClient(
 function startInitializedCodexAppServerClient(params: CodexAppServerClientStartupOptions) {
   return withCodexWebSocketOpenRetry({
     timeoutMs: params.timeoutMs ?? 0,
-    signal: params.abandonSignal
-      ? AbortSignal.any([params.lifetime.controller.signal, params.abandonSignal])
-      : params.lifetime.controller.signal,
+    signal: params.abandonSignal ?? params.lifetime.controller.signal,
     start: (timeoutMs) => startInitializedCodexAppServerClientOnce({ ...params, timeoutMs }),
   });
 }
@@ -666,9 +663,7 @@ async function startInitializedCodexAppServerClientOnce(
 ): Promise<CodexAppServerClient> {
   const acquireStartedAt = performance.now();
   const timeoutMs = params.timeoutMs ?? 0;
-  const abandonSignal = params.abandonSignal
-    ? AbortSignal.any([params.lifetime.controller.signal, params.abandonSignal])
-    : params.lifetime.controller.signal;
+  const abandonSignal = params.abandonSignal ?? params.lifetime.controller.signal;
   const waitForStartup = <T>(
     operation: () => Promise<T>,
     timeoutErrorFactory?: () => CodexAppServerStartupError,
@@ -795,15 +790,18 @@ async function startInitializedCodexAppServerClientOnce(
         });
         return starting;
       });
-    } catch (error) {
+    } catch (initialError) {
       // A timed-out registration may settle later; it cannot publish a live
       // client after the acquisition owner has already released its claim.
+      let error = initialError;
       if (starting) {
         await ownCodexStartup(
           params.lifetime,
           starting.then(
             (lateClient) => lateClient.closeAndWait(),
-            () => {},
+            (startupError: unknown) => {
+              error = startupError;
+            },
           ),
         );
       }

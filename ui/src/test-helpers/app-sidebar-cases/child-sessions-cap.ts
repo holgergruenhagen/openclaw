@@ -132,7 +132,9 @@ describe("AppSidebar spawned session cap", () => {
         row.getAttribute("data-session-key")?.replace("agent:main:dashboard:", ""),
       );
 
-    sidebar.querySelector<HTMLButtonElement>("[data-child-session-toggle]")?.click();
+    expect(
+      sidebar.querySelector("[data-child-session-toggle]")?.getAttribute("aria-expanded"),
+    ).toBe("true");
     await waitForFast(() =>
       expect(visibleChildren()).toEqual(["child-2", "child-4", "child-6", "child-1"]),
     );

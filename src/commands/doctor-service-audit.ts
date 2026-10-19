@@ -1,7 +1,7 @@
 import { SUPPORTED_NODE_VERSIONS } from "../../node-version.mjs";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { formatCliCommand } from "../cli/command-format.js";
-import { SYSTEMD_SERVICE_AUDIT_CODES } from "../daemon/service-audit-systemd.js";
+import { isHostOnlyServiceAuditIssue } from "../daemon/service-audit-systemd.js";
 import {
   SERVICE_AUDIT_CODES,
   type ServiceConfigAudit,
@@ -54,9 +54,7 @@ export function reportGatewayServiceConfigAudit(
   audit.issues.splice(
     0,
     audit.issues.length,
-    ...audit.issues.filter(
-      (issue) => issue.code !== SYSTEMD_SERVICE_AUDIT_CODES.systemdUserManagerStopTimeout,
-    ),
+    ...audit.issues.filter((issue) => !isHostOnlyServiceAuditIssue(issue)),
   );
   return sourceCheckoutWarningToShow;
 }

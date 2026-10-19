@@ -306,6 +306,45 @@ describe("eligible status recovery", () => {
     );
   });
 
+  it.each([
+    { name: "alone", repairable: false },
+    { name: "beside a repairable finding", repairable: true },
+  ])(
+    "offers a reinstall for a host-only user-manager timeout only when other findings need it ($name)",
+    async ({ repairable }) => {
+      await withStatusFixture(
+        () => ({}),
+        async (accountHome, print) => {
+          const status = await createStatus("config-audit", accountHome);
+          const hostOnly = {
+            code: "systemd-user-manager-stop-timeout",
+            message:
+              "Host shutdown or reboot stops user@1000.service within 5s, cutting short the Gateway drain and cleanup; set TimeoutStopSec=90 or longer in /etc/systemd/system/user@1000.service.d/zz-openclaw-stop-timeout.conf (330 keeps the full drain).",
+            detail: "user@1000.service: 5s (systemd system manager)",
+            level: "recommended" as const,
+          };
+          status.service.configAudit = {
+            ok: false,
+            issues: repairable
+              ? [...(status.service.configAudit?.issues ?? []), hostOnly]
+              : [hostOnly],
+          };
+          print(status, { json: false });
+
+          const output = humanOutput();
+          expect(output).toContain("Host shutdown or reboot stops user@1000.service within 5s");
+          if (repairable) {
+            expect(output).toContain("embeds OPENCLAW_GATEWAY_TOKEN");
+            expect(output).toContain("openclaw gateway install --force");
+          } else {
+            expect(output).not.toMatch(/\bgateway\s+install\b/);
+            expect(output).not.toMatch(/\breinstall\b/i);
+          }
+        },
+      );
+    },
+  );
+
   it("keeps remote service-install facts diagnostic-only even when installation is blocked", async () => {
     await withStatusFixture(
       () => ({ OPENCLAW_NIX_MODE: "1" }),

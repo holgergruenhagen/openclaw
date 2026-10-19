@@ -42,6 +42,11 @@ export const SYSTEMD_SERVICE_AUDIT_CODES = {
   systemdUserManagerStopTimeout: "systemd-user-manager-stop-timeout",
 } as const;
 
+/** Host-only findings describe the enclosing manager; reinstalling the Gateway unit cannot change them. */
+export function isHostOnlyServiceAuditIssue(issue: Pick<ServiceConfigIssue, "code">): boolean {
+  return issue.code === SYSTEMD_SERVICE_AUDIT_CODES.systemdUserManagerStopTimeout;
+}
+
 const SYSTEMD_AUDIT_TIMEOUT_MS = 10_000;
 
 type UnitDirective = { section: string; key: string; value: string };

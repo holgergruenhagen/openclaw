@@ -16,6 +16,7 @@ import {
 } from "../../daemon/restart-logs.js";
 import { buildGatewayRuntimeRecoveryHints } from "../../daemon/runtime-hints.js";
 import { SERVICE_RUNTIME_AUDIT_CODES } from "../../daemon/service-audit-runtime.js";
+import { isHostOnlyServiceAuditIssue } from "../../daemon/service-audit-systemd.js";
 import { formatServiceInspectionReason } from "../../daemon/service-inspection-error.js";
 import { isSystemdStartLimitHit } from "../../daemon/service-runtime.js";
 import {
@@ -171,7 +172,10 @@ export function printDaemonStatus(status: DaemonStatus, opts: { json: boolean; d
         (runtimeNeedsAttention
           ? `Recommendation: run "${formatCliCommand("openclaw doctor")}" interactively to resolve the runtime findings before reinstalling. Reinstalling alone may select the same runtime.`
           : `Recommendation: run "${formatCliCommand("openclaw doctor")}" interactively for guided checks, or reinstall with "${reinstallCommand}".`));
-    printWarning(recommendation);
+    // Host-only findings carry their own host fix; a reinstall cannot resolve them.
+    if (service.configAudit.issues.some((issue) => !isHostOnlyServiceAuditIssue(issue))) {
+      printWarning(recommendation);
+    }
   }
 
   if (status.config) {

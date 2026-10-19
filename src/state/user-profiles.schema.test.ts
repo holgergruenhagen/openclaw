@@ -13,6 +13,10 @@ import {
   runOpenClawStateWriteTransaction,
 } from "./openclaw-state-db.js";
 import {
+  addPreCutoverClientCredentialTablesForTest,
+  withStateMigrationBackupForTest,
+} from "./openclaw-state-schema.test-support.js";
+import {
   linkUserChannelIdentity,
   authorizeUserChannelIdentityInDatabase,
   publishUserChannelPolicyInDatabase,
@@ -20,11 +24,11 @@ import {
   configuredCommandOwnerPolicyFingerprint,
 } from "./user-channel-identities.js";
 import { prepareConfiguredCommandOwnerAuthority } from "./user-channel-identity-operations.js";
+import { readUserProfileEmailBindings } from "./user-profile-identity.read.js";
 import {
+  getUserProfileListItem,
   readUserProfileSnapshotSync,
-  readUserProfileEmailBindings,
-} from "./user-profile-identity.read.js";
-import { getUserProfileListItem } from "./user-profile-list-item.test-support.js";
+} from "./user-profile-list-item.test-support.js";
 import {
   getUserProfileDisplay,
   readResidentUserProfileIdentity,
@@ -230,6 +234,7 @@ it("upgrades deferred channel links without granting legacy recovery custody", a
   renameSync(options.path, `${options.path}.seed`);
   copyFileSync(`${options.path}.seed`, options.path);
   const legacy = new DatabaseSync(options.path);
+  addPreCutoverClientCredentialTablesForTest(legacy);
   legacy.exec(`
     DROP INDEX idx_user_profile_identities_authorization;
     ALTER TABLE user_profile_identities DROP COLUMN authorization_id;
@@ -239,6 +244,7 @@ it("upgrades deferred channel links without granting legacy recovery custody", a
   `);
   const before = legacy.prepare("SELECT * FROM user_profile_identities").all();
   legacy.close();
+  await withStateMigrationBackupForTest(options, () => openOpenClawStateDatabase(options));
   let db = openOpenClawStateDatabase(options).db;
   expect(db.prepare("SELECT * FROM user_profile_identities").all()).toEqual(
     before.map((row) =>

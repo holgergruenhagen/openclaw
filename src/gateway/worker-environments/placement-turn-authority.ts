@@ -19,7 +19,6 @@ import {
 import { WorkerPlacementInventoryChangedError } from "./placement-inventory-changed-error.js";
 import {
   affectsPlacementObservation,
-  applyPlacementReadPublication,
   hasPendingPublication,
   prepareCachedPlacementPreservationRead,
   preparePlacementRead,
@@ -84,12 +83,11 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
   } else if (!newerPlacement && change.kind === "workspace-result" && change.facts) {
     owner.placements.set(change.sessionId, { placement: change.facts.placement, sequence });
   }
-  applyPlacementReadPublication(owner, change, sequence);
   if (change.kind !== "tools" && (change.kind !== "claim" || !change.localOnly)) {
     owner.preservation = undefined;
+    owner.recoveryCandidatesEmpty = undefined;
   }
   if (change.kind !== "tools") {
-    owner.recoveryCandidatesEmpty = undefined;
     owner.projections.delete(change.sessionId);
     if (change.kind === "claim" && change.projection && !change.indeterminate) {
       retainProjection(owner, change.sessionId, change.projection);
@@ -228,7 +226,7 @@ function capturePlacementObservation(pathname: string, sessionId?: string) {
             ]),
           );
         }
-        throw changed();
+        throw new WorkerPlacementInventoryChangedError(new Set([sessionId]), changedMessage);
       }
     },
     release(this: void) {
@@ -301,9 +299,9 @@ export async function prepareSessionPlacementRead(
 ) {
   const captured = capturePlacementObservation(pathname, sessionId);
   try {
-    const placement = await read();
+    await read();
     captured.assertUsable();
-    return retainSessionPlacementRead(sessionId, placement, captured);
+    return retainSessionPlacementRead(sessionId, captured);
   } catch (error) {
     captured.authority.release();
     throw error;
@@ -421,9 +419,9 @@ export function capturePlacementReplicaRead(identity: DatabasePathIdentity) {
 
 /** Synchronous SDK reads consume committed writer receipts; cold reads use the async API. */
 export function readPlacementReplica(identity: DatabasePathIdentity, sessionId: string) {
-  const owner = owners.get(identity.key);
-  const published = owner?.placements.get(sessionId);
-  if (!owner?.active || !published || hasPendingPublication(owner, sessionId)) {
+  const owner = ownerFor(identity);
+  const published = owner.placements.get(sessionId);
+  if (!owner.active || !published || hasPendingPublication(owner, sessionId)) {
     return undefined;
   }
   return { placement: published.placement };

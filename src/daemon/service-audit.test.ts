@@ -11,6 +11,7 @@ import {
 } from "./service-audit.js";
 import { buildServiceEnvironment } from "./service-env.js";
 import {
+  execSystemctlMock,
   execSystemctlUserMock,
   hasIssue,
   resetServiceAuditMocks,
@@ -460,10 +461,73 @@ describe("auditGatewayServiceConfig systemd", () => {
         "openclaw-audit.service",
         "--no-page",
         "--property",
-        "After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec",
+        "After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec,ControlGroup",
       ],
       321,
     );
+  });
+
+  const healthyManager = [
+    "LoadState=loaded",
+    "After=network-online.target",
+    "Wants=network-online.target",
+    "RestartUSec=5s",
+    "KillMode=mixed",
+    "TimeoutStopUSec=5min 30s",
+  ];
+  it.each([
+    {
+      name: "a distro 5s user-manager timeout",
+      controlGroup:
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/openclaw-audit.service",
+      system: { code: 0, stdout: "TimeoutStopUSec=5s\nLoadState=loaded" },
+      detail: "user@1000.service: 5s (systemd system manager)",
+    },
+    {
+      name: "the systemd default user-manager timeout",
+      controlGroup:
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/openclaw-audit.service",
+      system: { code: 0, stdout: "TimeoutStopUSec=1min 30s\nLoadState=loaded" },
+    },
+    {
+      name: "an unreadable system manager",
+      controlGroup:
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/openclaw-audit.service",
+      system: { code: 1, stdout: "", stderr: "Failed to connect to bus: Permission denied" },
+    },
+    {
+      name: "a service outside a user manager",
+      controlGroup: "/system.slice/openclaw-audit.service",
+      system: { code: 0, stdout: "TimeoutStopUSec=5s\nLoadState=loaded" },
+    },
+  ])("checks the enclosing user manager stop timeout for $name", async (scenario) => {
+    await writeUnit([]);
+    manager([...healthyManager, `ControlGroup=${scenario.controlGroup}`]);
+    execSystemctlMock.mockResolvedValueOnce({
+      stderr: "",
+      termination: "exit",
+      ...scenario.system,
+    });
+    const result = await auditUnit(321);
+    expect(
+      result.issues.filter((issue) => issue.code === codes.systemdUserManagerStopTimeout),
+    ).toEqual(
+      scenario.detail
+        ? [
+            {
+              code: codes.systemdUserManagerStopTimeout,
+              message: expect.stringContaining(
+                "set TimeoutStopSec=90 or longer in /etc/systemd/system/user@1000.service.d/*.conf",
+              ),
+              detail: scenario.detail,
+              level: "recommended",
+            },
+          ]
+        : [],
+    );
+    expect(
+      systemdCodes(result).filter((code) => code !== codes.systemdUserManagerStopTimeout),
+    ).toEqual([]);
   });
 
   it("does not repair masked manager defaults or fall back to the base unit", async () => {

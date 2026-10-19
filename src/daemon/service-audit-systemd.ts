@@ -17,7 +17,7 @@ import type {
 } from "./service-audit-types.js";
 import { withServiceInspectionBudget } from "./service-inspection-budget.js";
 import { resolveManagedGatewayServiceCommand } from "./service-types.js";
-import { execSystemctlUser } from "./systemd-exec.js";
+import { execSystemctl, execSystemctlUser } from "./systemd-exec.js";
 import {
   resolveSystemdServiceName,
   resolveSystemdUnitPath,
@@ -39,6 +39,7 @@ export const SYSTEMD_SERVICE_AUDIT_CODES = {
   systemdKillModeControlGroup: "systemd-kill-mode-control-group",
   systemdUnitBackupUnsafe: "systemd-unit-backup-unsafe",
   systemdStopTimeout: "systemd-stop-timeout",
+  systemdUserManagerStopTimeout: "systemd-user-manager-stop-timeout",
 } as const;
 
 const SYSTEMD_AUDIT_TIMEOUT_MS = 10_000;
@@ -171,7 +172,7 @@ export async function auditSystemdUnit(
         `${resolveSystemdServiceName(env)}.service`,
         "--no-page",
         "--property",
-        "After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec",
+        "After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec,ControlGroup",
       ],
       timeoutMs && timeoutMs > 0 ? timeoutMs : SYSTEMD_AUDIT_TIMEOUT_MS,
     ),
@@ -201,6 +202,7 @@ export async function auditSystemdUnit(
       `${unitPath}: ${parsed.stopTimeoutMs / 1_000}s (${entries ? "systemd manager" : "base unit; manager unavailable"})`,
     );
   }
+  await auditSystemdUserManagerStopTimeout(entries?.controlgroup, report, timeoutMs);
   if (!parsed.after.has("network-online.target")) {
     report(
       SYSTEMD_SERVICE_AUDIT_CODES.systemdAfterNetworkOnline,
@@ -230,6 +232,44 @@ export async function auditSystemdUnit(
     );
   }
   return definitionDriftError;
+}
+
+// Host shutdown stops the whole user manager under its own TimeoutStopSec, not the
+// Gateway unit's. Ubuntu ships user@.service.d/timeout.conf with 5s, which
+// SIGKILLs a lingering Gateway before drain and cleanup. Unreadable state is silent.
+async function auditSystemdUserManagerStopTimeout(
+  controlGroup: string | undefined,
+  report: (code: string, message: string, detail?: string) => void,
+  timeoutMs?: number,
+) {
+  const managerUnit = controlGroup?.match(/\/(user@\d+\.service)(?:\/|$)/u)?.[1];
+  if (!managerUnit) {
+    return;
+  }
+  const result = await withServiceInspectionBudget(() =>
+    execSystemctl(
+      ["show", managerUnit, "--no-page", "--property", "TimeoutStopUSec,LoadState"],
+      undefined,
+      timeoutMs && timeoutMs > 0 ? timeoutMs : SYSTEMD_AUDIT_TIMEOUT_MS,
+    ),
+  ).catch(() => undefined);
+  const entries = result?.code === 0 ? parseKeyValueOutput(result.stdout, "=") : undefined;
+  const stopTimeoutMs =
+    entries?.loadstate === "loaded"
+      ? parseSystemdTimeSpanMs(entries.timeoutstopusec ?? "")
+      : undefined;
+  if (
+    stopTimeoutMs === undefined ||
+    stopTimeoutMs === 0 ||
+    stopTimeoutMs >= SYSTEMD_DEFAULT_STOP_TIMEOUT_MS
+  ) {
+    return;
+  }
+  report(
+    SYSTEMD_SERVICE_AUDIT_CODES.systemdUserManagerStopTimeout,
+    `Host shutdown or reboot stops ${managerUnit} within ${stopTimeoutMs / 1_000}s, cutting short the Gateway drain and cleanup; set TimeoutStopSec=${SYSTEMD_DEFAULT_STOP_TIMEOUT_MS / 1_000} or longer in /etc/systemd/system/${managerUnit}.d/*.conf (${GATEWAY_SERVICE_STOP_TIMEOUT_MS / 1_000} keeps the full drain).`,
+    `${managerUnit}: ${stopTimeoutMs / 1_000}s (systemd system manager)`,
+  );
 }
 
 async function auditSystemdDefinition(

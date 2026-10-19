@@ -1,6 +1,7 @@
 import { SUPPORTED_NODE_VERSIONS } from "../../node-version.mjs";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { formatCliCommand } from "../cli/command-format.js";
+import { SYSTEMD_SERVICE_AUDIT_CODES } from "../daemon/service-audit-systemd.js";
 import {
   SERVICE_AUDIT_CODES,
   type ServiceConfigAudit,
@@ -19,7 +20,8 @@ export function formatServiceConfigIssues(issues: ServiceConfigIssue[]): string[
   return issues.map(({ message, detail }) => `- ${message}${detail ? ` (${detail})` : ""}`);
 }
 
-/** Keep source-checkout and native audit findings in one panel. */
+/** Keep source-checkout and native audit findings in one panel. Host-only findings
+ * are reported, then removed: reinstalling the unit cannot change them. */
 export function reportGatewayServiceConfigAudit(
   audit: ServiceConfigAudit,
   layout: GatewayServiceLayoutSummary | undefined,
@@ -48,6 +50,13 @@ export function reportGatewayServiceConfigAudit(
       ...formatServiceConfigIssues(audit.issues),
     ].join("\n"),
     "Gateway service config",
+  );
+  audit.issues.splice(
+    0,
+    audit.issues.length,
+    ...audit.issues.filter(
+      (issue) => issue.code !== SYSTEMD_SERVICE_AUDIT_CODES.systemdUserManagerStopTimeout,
+    ),
   );
   return sourceCheckoutWarningToShow;
 }

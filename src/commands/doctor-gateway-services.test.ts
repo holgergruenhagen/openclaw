@@ -178,6 +178,23 @@ describe("maybeRepairGatewayServiceConfig", () => {
     expect(mocks.install).not.toHaveBeenCalled();
   });
 
+  it("reports a short user-manager stop timeout without offering a service repair", async () => {
+    const command = createGatewayCommand("/opt/openclaw/dist/index.js");
+    mocks.readCommand.mockResolvedValue(command);
+    mocks.buildGatewayInstallPlan.mockResolvedValue(command);
+    mocks.auditGatewayServiceConfig.mockResolvedValue(
+      createRecommendedServiceAudit(
+        "systemd-user-manager-stop-timeout",
+        "Host shutdown or reboot stops user@1000.service within 5s",
+      ),
+    );
+    const prompter = makeDoctorPrompts();
+    await runRepair(undefined, undefined, prompter);
+    configNote("Host shutdown or reboot stops user@1000.service within 5s");
+    expect(prompter.confirmRuntimeRepair).not.toHaveBeenCalled();
+    expectNoServiceWrite("stage", "install");
+  });
+
   it("skips service audit and rewrite for a non-default install identity", async () => {
     mocks.isDefaultInstallIdentity.mockReturnValue(false);
     await runRepair();

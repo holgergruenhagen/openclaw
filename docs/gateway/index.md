@@ -278,6 +278,8 @@ For persistence after logout, enable lingering:
 sudo loginctl enable-linger $(whoami)
 ```
 
+With lingering, host shutdown stops the Gateway through the user manager `user@<uid>.service`, whose own `TimeoutStopSec` applies (5 seconds on Ubuntu 24.04). `openclaw doctor` reports short values; see [Linux](/platforms/linux) for the drop-in that raises it.
+
 On a headless server without a desktop session, also make sure `XDG_RUNTIME_DIR` is set (`export XDG_RUNTIME_DIR=/run/user/$(id -u)`) before retrying `systemctl --user` commands.
 
 Service inspection preserves an explicit `DBUS_SESSION_BUS_ADDRESS` that reaches

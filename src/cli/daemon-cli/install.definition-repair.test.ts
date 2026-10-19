@@ -592,7 +592,9 @@ it.skipIf(process.platform === "win32")(
     const edited = f.original.replace("[Service]", "[Service]\nNice=7");
     const before = await fs.readdir(path.dirname(f.source));
     native.systemctl.mockImplementation(async (_env, args: string[]) => {
-      if (args.includes("After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec")) {
+      if (
+        args.includes("After,Wants,RestartUSec,KillMode,LoadState,TimeoutStopUSec,ControlGroup")
+      ) {
         await fs.writeFile(f.source, edited);
       }
       return { code: args[0] === "show" ? 1 : 0, stdout: "", stderr: "", termination: "exit" };

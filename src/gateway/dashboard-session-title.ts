@@ -173,26 +173,25 @@ function stripTitleLeadIn(line: string): { text: string; introduced: boolean } {
   return { text, introduced: title !== collapsed };
 }
 
-// A line that introduces the next one, or several sentences beyond the title budget,
-// is the model explaining its task before the title it was asked for.
-function isTitlePreamble(line: string): boolean {
-  return (
-    line.endsWith(":") ||
-    line.length > DASHBOARD_SESSION_TITLE_MAX_CHARS * 2 ||
-    (line.length > DASHBOARD_SESSION_TITLE_MAX_CHARS && /[.!?]\s+\S/u.test(line))
-  );
-}
-
 function normalizeDashboardSessionTitle(raw: string): string | null {
   const lines = raw
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => stripTitleLeadIn(line))
     .filter(({ text }) => text && !text.startsWith("```"));
-  // A line the model introduced as the title ("Titel: …") wins over earlier explanation.
-  const candidates = lines.filter(({ text }) => !isTitlePreamble(text));
-  const chosen = (candidates.find(({ introduced }) => introduced) ?? candidates[0] ?? lines[0])
-    ?.text;
+  // A line ending in ":" introduces the next one instead of naming the session.
+  const candidates = lines.filter(({ text }) => !text.endsWith(":"));
+  const [first] = candidates;
+  // Prefer a line the model introduced as the title ("Titel: …"), then a later line
+  // that an over-long first line quotes, as in "… a fitting title is "X".\n\nX".
+  const chosen = (
+    candidates.find(({ introduced }) => introduced) ??
+    (first && first.text.length > DASHBOARD_SESSION_TITLE_MAX_CHARS
+      ? candidates.slice(1).find(({ text }) => first.text.includes(text))
+      : undefined) ??
+    first ??
+    lines[0]
+  )?.text;
   if (!chosen || chosen.endsWith(":")) {
     return null;
   }

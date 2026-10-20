@@ -424,9 +424,9 @@ describe("generated titles over the real OpenAI-compatible transport", () => {
       "Usefulness for our team",
     ],
     [
-      "one long sentence before the title",
-      "Docker Compose with a named volume is the usual setup, but this message is only a title request, so I will reply with the label itself.\n\nGateway Docker state volume",
-      "Gateway Docker state volume",
+      "long punctuated title before an explanation",
+      "Fix Docker startup failures on Windows. Restore volume permissions\n\nThis captures the main topic.",
+      "Fix Docker startup failures on Windows. Restore volume permi",
     ],
     [
       "introduction before the title",

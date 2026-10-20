@@ -424,6 +424,16 @@ describe("generated titles over the real OpenAI-compatible transport", () => {
       "Usefulness for our team",
     ],
     [
+      "long title containing a later line without quotes",
+      "Investigate intermittent Docker startup failures caused by Permission denied\n\nPermission denied",
+      "Investigate intermittent Docker startup failures caused by P",
+    ],
+    [
+      "German explanation quoting the title",
+      "Die Aufgabe ist, einen kurzen Sitzungstitel zu erzeugen. Ein passender Titel wäre: „Nützlichkeit für unser Team prüfen“.\n\nNützlichkeit für unser Team prüfen",
+      "Nützlichkeit für unser Team prüfen",
+    ],
+    [
       "long punctuated title before an explanation",
       "Fix Docker startup failures on Windows. Restore volume permissions\n\nThis captures the main topic.",
       "Fix Docker startup failures on Windows. Restore volume permi",

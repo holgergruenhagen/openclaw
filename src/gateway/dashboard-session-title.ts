@@ -173,6 +173,24 @@ function stripTitleLeadIn(line: string): { text: string; introduced: boolean } {
   return { text, introduced: title !== collapsed };
 }
 
+// Opening quote → matching closing quote, shared by title extraction and wrapper removal.
+const TITLE_QUOTE_PAIRS: Record<string, string> = {
+  '"': '"',
+  "'": "'",
+  "`": "`",
+  "„": "“",
+  "“": "”",
+  "«": "»",
+  "»": "«",
+  "‘": "’",
+};
+
+function quotesExactly(line: string, text: string): boolean {
+  return Object.entries(TITLE_QUOTE_PAIRS).some(([open, close]) =>
+    line.includes(`${open}${text}${close}`),
+  );
+}
+
 function normalizeDashboardSessionTitle(raw: string): string | null {
   const lines = raw
     .replace(/\r/g, "")
@@ -183,11 +201,11 @@ function normalizeDashboardSessionTitle(raw: string): string | null {
   const candidates = lines.filter(({ text }) => !text.endsWith(":"));
   const [first] = candidates;
   // Prefer a line the model introduced as the title ("Titel: …"), then a later line
-  // that an over-long first line quotes, as in "… a fitting title is "X".\n\nX".
+  // that an over-long first line quotes exactly, as in "… a fitting title is "X".\n\nX".
   const chosen = (
     candidates.find(({ introduced }) => introduced) ??
     (first && first.text.length > DASHBOARD_SESSION_TITLE_MAX_CHARS
-      ? candidates.slice(1).find(({ text }) => first.text.includes(text))
+      ? candidates.slice(1).find(({ text }) => quotesExactly(first.text, text))
       : undefined) ??
     first ??
     lines[0]
@@ -197,16 +215,6 @@ function normalizeDashboardSessionTitle(raw: string): string | null {
   }
   const title = truncateUtf16Safe(chosen, DASHBOARD_SESSION_TITLE_MAX_CHARS);
   const quotes = /["'`„“”«»‘’]/gu;
-  const quotePairs: Record<string, string> = {
-    '"': '"',
-    "'": "'",
-    "`": "`",
-    "„": "“",
-    "“": "”",
-    "«": "»",
-    "»": "«",
-    "‘": "’",
-  };
   const pending: Array<{ index: number; close: string }> = [];
   const removed = new Set<number>();
   // Pair after truncation so a cut-off span cannot leave a dangling delimiter.
@@ -239,8 +247,8 @@ function normalizeDashboardSessionTitle(raw: string): string | null {
         removed.add(opening.index);
         removed.add(index);
       }
-    } else if (quotePairs[character]) {
-      pending.push({ index, close: quotePairs[character] });
+    } else if (TITLE_QUOTE_PAIRS[character]) {
+      pending.push({ index, close: TITLE_QUOTE_PAIRS[character] });
       removed.add(index);
     } else if (/[”’]/u.test(character)) {
       removed.add(index);

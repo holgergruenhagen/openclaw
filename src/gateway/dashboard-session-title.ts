@@ -159,22 +159,38 @@ function resolveDashboardTitleAuthProfile(params: {
   return configuredModel.provider === params.regularProvider ? configuredProfile : undefined;
 }
 
+// Introductions models put before the requested title, e.g. "Session title:",
+// "Concise title for this session:" or "Sitzungstitel:"; topics such as
+// "Fix button label:" stay part of the title.
+const TITLE_LEAD_IN =
+  /^(?:(?:concise|short|suggested|proposed|final|correct|session|chat|conversation|kurzer|kürzester|passender|richtiger|vorgeschlagener)\s+)?(?:(?:sitzungs|session-?|chat-?)?(?:title|titel)|label)(?:\s+(?:for|für)\s[^:]*)?\s*:\s*/iu;
+
+function stripTitleLeadIn(line: string): string {
+  const title = line.replace(/\s+/g, " ").trim().replace(TITLE_LEAD_IN, "");
+  // Markdown emphasis around the whole title is formatting, not title text.
+  return (/^\*\*([^*]+)\*\*$/u.exec(title)?.[1] ?? title).trim();
+}
+
+// A line that introduces the next one, or several sentences beyond the title budget,
+// is the model explaining its task before the title it was asked for.
+function isTitlePreamble(line: string): boolean {
+  return (
+    line.endsWith(":") ||
+    (line.length > DASHBOARD_SESSION_TITLE_MAX_CHARS && /[.!?]\s+\S/u.test(line))
+  );
+}
+
 function normalizeDashboardSessionTitle(raw: string): string | null {
-  const firstLine = raw
+  const lines = raw
     .replace(/\r/g, "")
     .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line && !line.startsWith("```"));
-  if (!firstLine) {
+    .map((line) => stripTitleLeadIn(line))
+    .filter((line) => line && !line.startsWith("```"));
+  const chosen = lines.find((line) => !isTitlePreamble(line)) ?? lines[0];
+  if (!chosen || chosen.endsWith(":")) {
     return null;
   }
-  const title = truncateUtf16Safe(
-    firstLine
-      .replace(/^title\s*:\s*/i, "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    DASHBOARD_SESSION_TITLE_MAX_CHARS,
-  );
+  const title = truncateUtf16Safe(chosen, DASHBOARD_SESSION_TITLE_MAX_CHARS);
   const quotes = /["'`„“”«»‘’]/gu;
   const quotePairs: Record<string, string> = {
     '"': '"',

@@ -30,8 +30,8 @@ import {
   type PendingChatAbort,
 } from "./chat-abort-request.ts";
 import { chatOutboxOwner } from "./chat-outbox-owner.ts";
+import { chatRunPresentation } from "./chat-run-presentation.ts";
 import { readChatSessionActionAccess } from "./chat-session-action-access.ts";
-import { mutateChatRunState, publishChatRunState } from "./chat-state-render.ts";
 import { formatConnectError } from "./connect-error.ts";
 import {
   getChatSessionProjection,
@@ -200,13 +200,26 @@ export function adoptStartedChatRun(
   }
 }
 
+/** sessions.create acknowledged the first turn the way chat.send does; adopt
+ *  its run before roster events catch up so the working claw never drops. */
+export function adoptInitialChatRun(host: Parameters<typeof adoptStartedChatRun>[0]): void {
+  const initial = host.chatSubmissions?.readInitial(
+    host.sessionKey,
+    host.client ?? null,
+    host.currentSessionId,
+  );
+  if (initial?.pending && !host.chatRunId) {
+    adoptStartedChatRun(host, initial.pendingRunId, initial.message.timestamp);
+  }
+}
+
 export function setChatRunError(
   state: { chatRunError?: ChatRunError | null },
   summary: string,
   runId?: string,
   kind?: ChatRunError["kind"],
 ) {
-  mutateChatRunState(state, () => {
+  chatRunPresentation(state).batch(() => {
     setChatRunOwner(state, runId);
     state.chatRunError = {
       ...(kind ? { kind } : {}),
@@ -513,8 +526,7 @@ function reconcileSessionRows(
 }
 
 export function reconcileChatRunLifecycle(host: RunLifecycleHost, options: ReconcileOptions = {}) {
-  return mutateChatRunState(
-    host,
+  return chatRunPresentation(host).batch(
     () => applyChatRunLifecycle(host, options),
     options.publishRunState === false ? false : "immediate",
   );
@@ -579,7 +591,7 @@ function applyChatRunLifecycle(host: RunLifecycleHost, options: ReconcileOptions
     clearChatRunStatus(host);
   }
   if (options.publishRunState !== false) {
-    publishChatRunState(host);
+    chatRunPresentation(host).publish();
   }
 }
 
@@ -640,7 +652,7 @@ function reconcileStaleSelectedSessionRunAfterLocalCompletion(host: RunLifecycle
     },
     Date.now(),
   );
-  publishChatRunState(host);
+  chatRunPresentation(host).publish();
   return true;
 }
 

@@ -9,8 +9,10 @@ import {
 } from "../../app/panel-availability.ts";
 import { canUseQuestionPrompts } from "../../app/question-prompt-client.ts";
 import {
+  listQuestionPrompts,
   refreshPendingQuestionsWithRetry,
   setQuestionPromptClient,
+  type QuestionPrompt,
 } from "../../app/question-prompt.ts";
 import { loadSettings } from "../../app/settings.ts";
 import { readPresenceEntries } from "../../app/user-profile.ts";
@@ -331,10 +333,11 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       agentId?: string | null;
     }) =>
       uiConversationMatches(state, state.sessionKey, request.sessionKey, request.agentId, agentId);
+    const questions = visible ? listQuestionPrompts(this.questionPromptState) : [];
     this.questionProjection = reuseQuestionProjection(
       this.questionProjection,
-      visible ? this.questionPrompts.filter(matchesConversation) : [],
-      visible ? this.projectChildQuestions(state) : undefined,
+      questions.filter(matchesConversation),
+      visible ? this.projectChildQuestions(state, questions) : undefined,
     );
     return {
       gatewayQuestions: {
@@ -353,13 +356,13 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
   }
 
   // Reads the same child roster and owner-qualified ancestry key as the subagent rows.
-  private projectChildQuestions(state: ChatPageHost) {
+  private projectChildQuestions(state: ChatPageHost, questions: readonly QuestionPrompt[]) {
     const roster = this.projectChildRoster(this.resolveChatReadTarget());
     return projectChildSessionQuestions(
       state,
       roster.subagentParentKey,
       roster.subagentSessions,
-      this.questionPrompts,
+      questions,
     );
   }
 

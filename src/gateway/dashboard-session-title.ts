@@ -178,6 +178,7 @@ function stripTitleLeadIn(line: string): { text: string; introduced: boolean } {
 function isTitlePreamble(line: string): boolean {
   return (
     line.endsWith(":") ||
+    line.length > DASHBOARD_SESSION_TITLE_MAX_CHARS * 2 ||
     (line.length > DASHBOARD_SESSION_TITLE_MAX_CHARS && /[.!?]\s+\S/u.test(line))
   );
 }

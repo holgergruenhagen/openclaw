@@ -424,6 +424,11 @@ describe("generated titles over the real OpenAI-compatible transport", () => {
       "Usefulness for our team",
     ],
     [
+      "one long sentence before the title",
+      "Docker Compose with a named volume is the usual setup, but this message is only a title request, so I will reply with the label itself.\n\nGateway Docker state volume",
+      "Gateway Docker state volume",
+    ],
+    [
       "introduction before the title",
       "A fitting title would be:\n\nUsefulness for our team",
       "Usefulness for our team",

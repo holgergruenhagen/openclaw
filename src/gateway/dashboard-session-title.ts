@@ -165,10 +165,12 @@ function resolveDashboardTitleAuthProfile(params: {
 const TITLE_LEAD_IN =
   /^(?:(?:concise|short|suggested|proposed|final|correct|session|chat|conversation|kurzer|kürzester|passender|richtiger|vorgeschlagener)\s+)?(?:(?:sitzungs|session-?|chat-?)?(?:title|titel)|label)(?:\s+(?:for|für)\s[^:]*)?\s*:\s*/iu;
 
-function stripTitleLeadIn(line: string): string {
-  const title = line.replace(/\s+/g, " ").trim().replace(TITLE_LEAD_IN, "");
+function stripTitleLeadIn(line: string): { text: string; introduced: boolean } {
+  const collapsed = line.replace(/\s+/g, " ").trim();
+  const title = collapsed.replace(TITLE_LEAD_IN, "");
   // Markdown emphasis around the whole title is formatting, not title text.
-  return (/^\*\*([^*]+)\*\*$/u.exec(title)?.[1] ?? title).trim();
+  const text = (/^\*\*([^*]+)\*\*$/u.exec(title)?.[1] ?? title).trim();
+  return { text, introduced: title !== collapsed };
 }
 
 // A line that introduces the next one, or several sentences beyond the title budget,
@@ -185,8 +187,11 @@ function normalizeDashboardSessionTitle(raw: string): string | null {
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => stripTitleLeadIn(line))
-    .filter((line) => line && !line.startsWith("```"));
-  const chosen = lines.find((line) => !isTitlePreamble(line)) ?? lines[0];
+    .filter(({ text }) => text && !text.startsWith("```"));
+  // A line the model introduced as the title ("Titel: …") wins over earlier explanation.
+  const candidates = lines.filter(({ text }) => !isTitlePreamble(text));
+  const chosen = (candidates.find(({ introduced }) => introduced) ?? candidates[0] ?? lines[0])
+    ?.text;
   if (!chosen || chosen.endsWith(":")) {
     return null;
   }

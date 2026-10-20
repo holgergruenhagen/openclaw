@@ -419,6 +419,11 @@ describe("generated titles over the real OpenAI-compatible transport", () => {
       "Usefulness for our team",
     ],
     [
+      "explanations before an introduced title",
+      "Generate a short session title from the source message.\n\nI will only return the title.\n\nTitle: Usefulness for our team",
+      "Usefulness for our team",
+    ],
+    [
       "introduction before the title",
       "A fitting title would be:\n\nUsefulness for our team",
       "Usefulness for our team",

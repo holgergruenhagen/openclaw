@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { TEST_TLS_CERT_PEM, TEST_TLS_KEY_PEM } from "../../test/helpers/tls-fixture.js";
 import { waitForGatewayHttpReadiness } from "../cli/daemon-cli/restart-health-probe.js";
 import { startProxy } from "../infra/net/proxy/proxy-lifecycle.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import { PROXY_FIXTURE_CERTIFICATE, PROXY_FIXTURE_KEY } from "../test-helpers/proxy-tls-fixture.js";
 import { createSuiteTempRootTracker, withTestDir } from "../test-helpers/temp-dir.js";
 import {
@@ -53,6 +54,42 @@ const configFor = (certPath: string) => ({
       keyPath: path.join(path.dirname(certPath), "missing-key.pem"),
     },
   },
+});
+
+test("reads detailed channel outages and retains status when the body exceeds its bound", async () => {
+  let oversized = false;
+  const failing = Array.from({ length: 80 }, (_, index) => `channel-${index}-${"x".repeat(30)}`);
+  const server = http.createServer((req, res) => {
+    res.writeHead(req.url === "/readyz" ? 503 : 200).end(
+      JSON.stringify({
+        ready: false,
+        coreReady: true,
+        failing,
+        ...(oversized ? { padding: "x".repeat(70_000) } : {}),
+      }),
+    );
+  });
+  const port = await listen(server);
+  const observe = () =>
+    waitForGatewayHttpReadiness({
+      attempts: 1,
+      deadlineAt: performance.now() + 1000,
+      delayMs: 0,
+      port,
+      requireChannelHealth: false,
+    });
+  try {
+    expect(await observe()).toEqual({
+      healthz: 200,
+      readyz: 503,
+      coreReady: true,
+      failingChannels: failing,
+    });
+    oversized = true;
+    expect(await observe()).toEqual({ healthz: 200, readyz: 503, coreReady: false });
+  } finally {
+    await close(server);
+  }
 });
 
 describe("local TLS probes", () => {

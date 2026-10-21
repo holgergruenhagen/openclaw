@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
+import { For, Show, createMemo, createSignal, onSettled } from "solid-js";
 import {
   normalizeSessionIconValue,
   SESSION_ICON_SVG_DATA_URL_PREFIX,
@@ -94,7 +94,7 @@ function PluginContributionsContent(props: ContributionsProps, host: Contributio
       },
     ),
   );
-  onCleanup(() => {
+  onSettled(() => () => {
     lifetime.abort();
     actionLifetimes.clear();
   });

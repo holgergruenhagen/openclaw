@@ -15,6 +15,7 @@ import {
 } from "../lib/sessions/grouping.ts";
 import { runSessionNavigationIntent } from "../lib/sessions/navigation-handoff.ts";
 import {
+  SESSION_NAVIGATION_KEY_PARAM,
   composerDraftSearch,
   resolveSessionPreferredFace,
   sessionNavigationTarget,
@@ -119,18 +120,7 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     };
   }
 
-  shouldPublishSessionData(): boolean {
-    return this.sessionProjection.shouldPublishSessionData(this, {
-      snapshot: Boolean(this.sidebarSnapshot),
-      sections: () =>
-        this.zonedVisibleSections(this.selectedAgentSessionRows(this.getSessionNavigationState()))
-          .sections,
-      tree: () => this.visibleSessionTreeInOrder(),
-      catalogs: () => this.sidebarSessionCatalogs(),
-      catalogRows: this.catalogLiveRows,
-      ownerOptions: () => this.ownerOptions,
-    });
-  }
+  abstract shouldPublishSessionData(): boolean;
 
   private admittedRoster:
     | { context: ApplicationContext; collapsedAgentIds: ReadonlySet<string> }
@@ -141,7 +131,7 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
 
   get rosterSessionSource() {
     const context = this.context;
-    if (!context || this.sidebarAgentsMode !== "roster") {
+    if (this.sidebarAgentsMode !== "roster") {
       return null;
     }
     // Cache release and row projection read the same owner before the child renders.
@@ -180,7 +170,7 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
   private readonly sectionsMemo = new SidebarProjectionMemo<SidebarVisibleSections>();
   private readonly homeMemos = new Map<string, SidebarProjectionMemo<SidebarHomeSession>>();
   readonly sessionOwnerFilter = new SessionOwnerFilter(
-    () => this.context?.gateway,
+    () => this.context.gateway,
     () => this.invalidate(),
   );
   readonly sessionData = new SessionDataOwner(this, () => this.invalidate());
@@ -249,7 +239,7 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     return personalSidebarOwnerFilterId(this);
   }
 
-  private ownerOptions: readonly SessionOwnerOption[] = [];
+  protected ownerOptions: readonly SessionOwnerOption[] = [];
 
   get sessionOwnerOptions(): readonly SessionOwnerOption[] {
     this.selectedAgentSessionRows(this.getSessionNavigationState());
@@ -404,8 +394,8 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     return resolveUiSessionRowAgentId(
       session,
       resolveUiDefaultAgentId({
-        agentsList: this.context?.agents.state.agentsList,
-        hello: this.context?.gateway.snapshot.hello,
+        agentsList: this.context.agents.state.agentsList,
+        hello: this.context.gateway.snapshot.hello,
       }),
     );
   }
@@ -416,9 +406,9 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
       face: resolveSessionPreferredFace(session),
       sessionKey: session.key,
       fallbackAgentId: this.sessionNavigationAgentId(session),
-      basePath: this.context?.basePath ?? "",
+      basePath: this.context.basePath,
       row: session,
-      mainKey: this.context ? this.sessionMainKey() : undefined,
+      mainKey: this.sessionMainKey(),
       preferenceDerivedFace: true,
     }).href;
   }
@@ -454,7 +444,9 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
         }
         this.prepareSessionNavigation(sessionKey, target.options.pathname);
         this.onNavigate?.(face, target.options);
-        this.bindLiteralSession(sessionKey, agentId, target.options);
+        if (!new URLSearchParams(target.options.search ?? "").has(SESSION_NAVIGATION_KEY_PARAM)) {
+          this.setApplicationSession(sessionKey, agentId);
+        }
         return true;
       },
       face,
@@ -465,7 +457,11 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
   /** Collapsed zones keep full rows for true header counts and status dots. */
   protected zonedVisibleSections(rows: SidebarRecentSession[]): SidebarVisibleSections {
     if (this.sidebarSnapshot) {
-      return restoreSnapshotSections(this.sidebarSnapshot, this.getRouteSessionKey());
+      const model = this.sidebarSnapshot;
+      return this.sectionsMemo.read(
+        () => [model, this.getRouteSessionKey()],
+        () => restoreSnapshotSections(model, this.getRouteSessionKey()),
+      );
     }
     return memoizedSidebarSections(
       this.sectionsMemo,
@@ -476,8 +472,17 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     );
   }
 
-  reconciledSidebarZone(rows = this.selectedAgentSessionRows(this.getSessionNavigationState())) {
-    return personalSidebarZone(this, rows);
+  private readonly cachedZone = new SidebarProjectionMemo<ReturnType<typeof personalSidebarZone>>();
+
+  reconciledSidebarZone(rows?: SidebarRecentSession[]) {
+    if (this.sidebarSnapshot) {
+      return this.cachedZone.read(
+        () => [this.sidebarSnapshot, this.getRouteSessionKey()],
+        () => personalSidebarZone(this, []),
+      );
+    }
+    const liveRows = rows ?? this.selectedAgentSessionRows(this.getSessionNavigationState());
+    return personalSidebarZone(this, liveRows);
   }
 
   /** Explicit personal unpins remove a reference, never shared session metadata. */
@@ -533,9 +538,6 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
   /** Chip switching selects the agent for the application. */
   protected readonly expandAgent = (agentId: string) => {
     const context = this.context;
-    if (!context) {
-      return;
-    }
     const nextAgentId = normalizeAgentId(agentId);
     if (nextAgentId === normalizeAgentId(this.expandedAgentId())) {
       if (this.sidebarAgentsMode !== "roster") {
@@ -552,15 +554,15 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
   };
 
   expandedAgentId(): string {
-    const selected = normalizeOptionalString(this.context?.agentSelection.state.selectedId);
+    const selected = normalizeOptionalString(this.context.agentSelection.state.selectedId);
     return normalizeAgentId(selected || this.getSessionNavigationState().selectedAgentId);
   }
 
   activeChipAgent() {
     return resolveActiveSidebarAgent({
       activeId: this.expandedAgentId(),
-      roster: this.context?.agents.state.agentsList?.agents ?? [],
-      identities: this.context?.agentIdentity.entries() ?? [],
+      roster: this.context.agents.state.agentsList?.agents ?? [],
+      identities: this.context.agentIdentity.entries(),
     });
   }
 
@@ -573,22 +575,17 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     return latest?.key ?? buildAgentMainSessionKey({ agentId, mainKey: this.sessionMainKey() });
   }
 
-  /** Offline routes to Settings instead of a dead chat load. */
-  private openAgentConversation(agentId: string) {
-    if (!this.connected) {
-      this.onNavigate?.("appearance");
-      return;
-    }
-    this.selectSession(this.agentResumeKey(agentId));
-  }
-
   switchChipAgent(agentId: string) {
     this.sidebarMenus.closeAgentMenu();
     this.expandAgent(agentId);
     // Skills uses the shared agent selection in place; opening chat would
     // discard the discovery page instead of updating its workspace scope.
     if (this.activeRouteId !== "skills") {
-      this.openAgentConversation(agentId);
+      if (this.connected) {
+        this.selectSession(this.agentResumeKey(agentId));
+      } else {
+        this.onNavigate?.("appearance");
+      }
     }
   }
 
@@ -623,13 +620,13 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
 
   knownSessionGroups(): string[] {
     return collectKnownSessionGroups(
-      this.sessionData.sessionsResult ? (this.context?.sessions.state.groups ?? []) : [],
+      this.sessionData.sessionsResult ? this.context.sessions.state.groups : [],
       this.sessionData.sessionsResult?.sessions ?? [],
     );
   }
 
   readonly knownSectionOrder = () =>
-    this.sessionData.sessionsResult ? [...(this.context?.sessions.state.sectionOrder ?? [])] : [];
+    this.sessionData.sessionsResult ? [...(this.context.sessions.state.sectionOrder ?? [])] : [];
 
   knownSessionCatalogIds(): string[] {
     return collectKnownSidebarSessionCatalogIds({
@@ -670,8 +667,10 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
     navigationState: SidebarSessionNavigationState,
   ): SidebarRecentSession[] {
     if (this.sidebarSnapshot) {
-      return this.sidebarSnapshot.sessions.map((row) =>
-        restoreSnapshotSession(row, this.getRouteSessionKey()),
+      const model = this.sidebarSnapshot;
+      return this.rowsMemo.read(
+        () => [model, this.getRouteSessionKey()],
+        () => model.sessions.map((row) => restoreSnapshotSession(row, this.getRouteSessionKey())),
       );
     }
     const rows = this.rowsMemo.read(
@@ -685,7 +684,7 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
           selected,
           agentIds: roster?.agentIds ??
             (this.sessionData.sessionsAgentId === null
-              ? this.context?.agents.state.agentsList?.agents.map((agent) => agent.id)
+              ? this.context.agents.state.agentsList?.agents.map((agent) => agent.id)
               : undefined) ?? [selected],
           result: roster?.result,
           compareSessions: createSidebarSessionRowsComparator(this.readSidebarSessionSortOptions),
@@ -721,8 +720,8 @@ export abstract class AppSidebarSessionNavigationElement extends AppSidebarBase 
   selectedAgentMainSessionKey(agentId?: string): string {
     return resolveSidebarMainSessionKey({
       agentId: agentId ?? this.expandedAgentId(),
-      agentsList: this.context?.agents.state.agentsList,
-      hello: this.context?.gateway.snapshot.hello,
+      agentsList: this.context.agents.state.agentsList,
+      hello: this.context.gateway.snapshot.hello,
     });
   }
 

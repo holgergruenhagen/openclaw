@@ -1,3 +1,4 @@
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import { createSubagentRunRecord } from "../agents/subagent-test-fixtures.test-helpers.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
@@ -142,10 +143,24 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
               read.state.rowContext,
             );
             const presentations = vi.spyOn(projection, "present");
+            const runViews = vi.spyOn(read.state.rowContext.subagentRuns, "atTime");
             const message = {
               role: "assistant",
               content: [{ type: "text", text: '"🦞"\n\\\ud800'.repeat(256) }],
             };
+            const stringify = JSON.stringify;
+            let envelopes = 0;
+            const serialization = vi.spyOn(JSON, "stringify").mockImplementation((...args) => {
+              const value: unknown = args[0];
+              if (
+                isRecord(value) &&
+                isRecord(value.payload) &&
+                value.payload.sessionKey === query.key
+              ) {
+                envelopes++;
+              }
+              return stringify(...args);
+            });
             connection.broadcast(
               "session.message",
               {
@@ -161,6 +176,8 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
                 }),
               },
             );
+            serialization.mockRestore();
+            expect(envelopes).toBe(restriction === "child and swarm links" ? 2 : 1);
             for (const [index, { send }] of peers.entries()) {
               const visible = index % 2 === 0 || restriction === "child and swarm links";
               expect(send).toHaveBeenCalledTimes(visible ? 1 : 0);
@@ -204,6 +221,8 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
             expect(presentations).toHaveBeenCalledTimes(
               restriction === "child and swarm links" ? 2 : 1,
             );
+            expect(runViews).toHaveBeenCalledTimes(restriction === "child and swarm links" ? 2 : 1);
+            runViews.mockRestore();
             presentations.mockRestore();
           },
         );

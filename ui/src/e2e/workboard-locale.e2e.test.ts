@@ -1,7 +1,4 @@
-import { writeFile } from "node:fs/promises";
-import path from "node:path";
 import { expect, it } from "vitest";
-import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   controlUiBundledSettingsStorageKey,
   installMockGateway,
@@ -68,22 +65,20 @@ suite.define(() => {
             .click();
           await gateway.waitForRequest("workboard.sessionsBoard.read");
           await page.locator(".workboard-page-title").hover();
-          await page.getByRole("button", { name: "Edit board", exact: true }).click();
+          await page
+            .getByRole("button", {
+              name: locale === "fr" ? "Modifier le tableau" : "Edit board",
+              exact: true,
+            })
+            .click();
           const form = page.locator(".workboard-board-draft");
           const column = form.locator('[data-column-id="working"]');
           await column.waitFor();
-          if (process.env.OPENCLAW_CAPTURE_UI_PROOF === "1") {
-            const frame = await takeControlUiScreenshotFrame(page, form, [column], {
-              animations: "disabled",
-            });
-            await writeFile(
-              path.join(suite.artifactDir, `workboard-column-color-${locale}.png`),
-              frame.png,
-            );
-          }
-          expect(await column.getByRole("combobox", { name: "Color", exact: true }).count()).toBe(
-            1,
-          );
+          expect(
+            await column
+              .getByRole("combobox", { name: locale === "fr" ? "Couleur" : "Color", exact: true })
+              .count(),
+          ).toBe(1);
           expect(await form.textContent()).not.toContain("workboard.boardColor");
           await form
             .getByRole("button", { name: locale === "fr" ? "Annuler" : "Cancel", exact: true })

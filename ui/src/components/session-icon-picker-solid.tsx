@@ -19,9 +19,15 @@ import { Kbd, ShortcutText } from "./solid/kbd.tsx";
 
 registerSessionOrganizationEnglish();
 
-export type AppearancePickerFocus = (target: "first" | "grid" | "custom", roving?: boolean) => void;
+export type AppearancePickerFocus = (
+  target: "first" | "grid" | "custom",
+  roving?: boolean,
+  canFocus?: () => boolean,
+) => void;
 
 export type AppearancePickerProps = {
+  mobile?: boolean;
+  sessionLabel?: string;
   ref?: (handle: AppearancePickerFocus) => void;
   controlRef?: () => (element: HTMLElement) => void;
   allowSvg?: boolean;
@@ -49,8 +55,11 @@ export function AppearancePicker(props: AppearancePickerProps) {
   let custom: HTMLButtonElement | undefined;
   let input: HTMLTextAreaElement | undefined;
   onSettled(() => {
-    props.ref?.((target, roving) =>
+    props.ref?.((target, roving, canFocus) =>
       onSettled(() => {
+        if (canFocus?.() === false) {
+          return;
+        }
         if (target === "first") {
           [...colors.values(), ...choices.values()]
             .find((button) => button.isConnected && !button.disabled)
@@ -99,7 +108,24 @@ export function AppearancePicker(props: AppearancePickerProps) {
     </button>
   );
   return (
-    <div class="session-menu__appearance">
+    <div class={["session-menu__appearance", { "session-menu__appearance--mobile": props.mobile }]}>
+      {props.mobile && (
+        <div class="session-menu__appearance-identity">
+          <span>
+            {props.currentIcon ? (
+              props.currentIcon.startsWith(SESSION_ICON_SVG_DATA_URL_PREFIX) ||
+              SESSION_ICON_GLYPH_IDS.some((id) => id === props.currentIcon) ? (
+                <SessionIconGraphic icon={props.currentIcon} />
+              ) : (
+                props.currentIcon
+              )
+            ) : (
+              <Icon name="circleX" />
+            )}
+          </span>
+          <span>{props.sessionLabel}</span>
+        </div>
+      )}
       <div class="session-menu__icon-section-label">{t("sessionsView.setColorMenu")}</div>
       <div class="session-menu__colors" role="group" aria-label={t("sessionsView.setColorMenu")}>
         <For each={props.clearable === false ? SESSION_COLOR_IDS : [null, ...SESSION_COLOR_IDS]}>
@@ -151,8 +177,8 @@ export function AppearancePicker(props: AppearancePickerProps) {
       <div class="session-menu__icon-picker session-menu__icon-panel" data-mode={props.mode}>
         <div
           class="session-menu__icon-options"
-          aria-hidden={props.mode !== "grid" ? "true" : undefined}
-          inert={props.mode !== "grid"}
+          aria-hidden={!props.mobile && props.mode !== "grid" ? "true" : undefined}
+          inert={!props.mobile && props.mode !== "grid"}
           role="group"
           aria-label={t("sessionsView.setIconMenu")}
           ref={nativeListener("keydown", (event) =>
@@ -200,8 +226,8 @@ export function AppearancePicker(props: AppearancePickerProps) {
         </div>
         <div
           class="session-menu__icon-custom-entry"
-          aria-hidden={props.mode !== "custom" ? "true" : undefined}
-          inert={props.mode !== "custom"}
+          aria-hidden={!props.mobile && props.mode !== "custom" ? "true" : undefined}
+          inert={!props.mobile && props.mode !== "custom"}
         >
           <div class="session-menu__icon-custom-header">
             <button
@@ -220,6 +246,15 @@ export function AppearancePicker(props: AppearancePickerProps) {
           <div class="session-menu__icon-custom-controls">
             <textarea
               class="session-menu__icon-custom-input"
+              placeholder={
+                props.mobile
+                  ? t(
+                      props.allowSvg
+                        ? "sessionsView.customIconHintNoShortcut"
+                        : "sessionsView.customEmojiHintNoShortcut",
+                    )
+                  : undefined
+              }
               data-form-control
               rows="1"
               autocomplete="off"
@@ -283,6 +318,7 @@ export function AppearancePicker(props: AppearancePickerProps) {
             title={props.disabledReason ?? props.colorDisabledReason}
             ref={[props.controlRef?.(), nativeListener("click", (event) => props.onReset(event))]}
           >
+            {props.mobile && <Icon name="rotateCcw" />}
             {t("sessionsView.resetAppearance")}
           </button>
         </>
@@ -346,7 +382,7 @@ type AppearanceAction =
   | { kind: "reset-appearance" };
 export function useSessionMenuAppearance(
   readState: () => {
-    session: { icon: string | null; color: string | null };
+    session: { icon: string | null; color: string | null; label?: string };
     actionDisabledReasons: Partial<Record<"set-icon" | "set-color", string>>;
   },
   actionDisabled: (kind: "set-icon" | "set-color") => boolean,
@@ -367,12 +403,17 @@ export function useSessionMenuAppearance(
   };
   return {
     prepare,
-    focusFirst: () => focus?.("first"),
+    focusFirst: (canFocus?: () => boolean) => focus?.("first", undefined, canFocus),
     showIconGrid,
-    render: () => (
+    render: (mobile = false, onReady?: () => void) => (
       <AppearancePicker
         controlRef={controlRef}
-        ref={(handle) => (focus = handle)}
+        mobile={mobile}
+        sessionLabel={readState().session.label}
+        ref={(handle) => {
+          focus = handle;
+          onReady?.();
+        }}
         allowSvg
         mode={mode()}
         currentIcon={readState().session.icon}

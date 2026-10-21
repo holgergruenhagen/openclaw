@@ -73,6 +73,7 @@ export function ChatThread(input: {
   const historyIntent = (event: Event) => input.props.onHistoryIntent?.(event);
   const paneId = createMemo(() => input.props.paneId);
   onSettled(() => root && registerTranscriptElement(paneId(), root));
+  onSettled(() => root && watchChatSearchHighlight(root, getTranscriptState(paneId()).search));
   const search = createMemo(() =>
     projectOwner(getTranscriptState(paneId()).search, (owner) => owner.snapshot, Object.is),
   );
@@ -191,14 +192,9 @@ export function ChatThread(input: {
             const stopHistory = ["wheel", "touchstart", "touchmove"].map((type) =>
               listen(element, type, historyIntent, { passive: true }),
             );
-            const releaseSearchHighlight = watchChatSearchHighlight(
-              element,
-              getTranscriptState(paneId()).search,
-            );
             return () => {
               stopHistory.forEach((stop) => stop());
               releaseViewport?.();
-              releaseSearchHighlight();
             };
           }),
           markdownRef,

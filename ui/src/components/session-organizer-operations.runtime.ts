@@ -280,9 +280,17 @@ export async function runBatchSessionAction(
   }
 }
 
+export type SessionRenameHost = SessionActionHost & {
+  readonly sessionData: SessionActionHost["sessionData"] &
+    Pick<
+      SessionOrganizerDependencies["sessionData"],
+      "beginSessionMutation" | "sessionDraftSignal" | "sessionMutationError"
+    >;
+};
+
 export async function renameSession(
-  deps: SessionOrganizerDependencies,
-  session: SidebarRecentSession,
+  deps: SessionRenameHost,
+  session: SessionActionRow & Pick<SidebarRecentSession, "renameValue" | "userLabel">,
   scope: SidebarSessionMutationScope,
 ): Promise<void> {
   if (!deps.sessionData.isSessionMutationScopeCurrent(scope)) {
@@ -348,15 +356,14 @@ export async function assignSessionOwner(
   ) {
     return;
   }
-  const assigned = await scope.sessions.assignOwner(session.key, owner, {
-    agentId: resolveUiSessionRowAgentId(session, scope.selectedAgentId),
-  });
-  if (
-    deps.sessionData.isSessionMutationScopeCurrent(scope) &&
-    !assigned &&
-    scope.sessions.state.error
-  ) {
-    deps.sessionData.publishSessionMutationError(scope, scope.sessions.state.error);
+  try {
+    await scope.sessions.assignOwner(session.key, owner, {
+      agentId: resolveUiSessionRowAgentId(session, scope.selectedAgentId),
+    });
+  } catch (error) {
+    if (deps.sessionData.isSessionMutationScopeCurrent(scope)) {
+      deps.sessionData.publishSessionMutationError(scope, error);
+    }
   }
 }
 

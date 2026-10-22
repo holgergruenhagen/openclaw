@@ -6,13 +6,8 @@ import path from "node:path";
 import { text as readBody } from "node:stream/consumers";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { withFastReplyConfig } from "../../../../src/auto-reply/reply/get-reply-fast-path.test-support.js";
-import {
-  clearConfigCache,
-  clearRuntimeConfigSnapshot,
-  getRuntimeConfigSnapshot,
-} from "../../../../src/config/config.js";
-import { resetConfigOverrides } from "../../../../src/config/runtime-overrides.js";
-import { clearSessionStoreCacheForTest } from "../../../../src/config/sessions/store-writer-state.js";
+import { getRuntimeConfigSnapshot } from "../../../../src/config/config.js";
+import { captureCronSchedulerWakeForTest } from "../../../../src/cron/service/scheduler-actor.test-support.js";
 import type { CronJob } from "../../../../src/cron/types.js";
 import type { GatewayClient } from "../../../../src/gateway/client.js";
 import type { SessionsListResult } from "../../../../src/gateway/session-utils.types.js";
@@ -21,9 +16,7 @@ import {
   disconnectGatewayClient,
   startGatewayWithClient,
 } from "../../../../src/gateway/test-helpers.e2e.js";
-import { resetAgentEventsForTest } from "../../../../src/infra/agent-events.js";
 import type { GatewaySchedulerClock } from "../../../../src/infra/gateway-scheduler.js";
-import { resetSystemEventsForTest } from "../../../../src/infra/system-events.js";
 import { withEnvAsync } from "../../../../src/test-utils/env.js";
 import { createGatewaySchedulerClock } from "../../../../src/test-utils/gateway-scheduler-clock.js";
 import {
@@ -41,6 +34,7 @@ import {
 import { createDeferred, withinTest } from "../../../helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../helpers/temp-dir.js";
 import { isolatedGatewayEnv, messageText } from "./gateway-recovery.test-support.js";
+import { resetGatewayState } from "./gateway-startup-routing.test-support.js";
 
 type ProviderRequest = {
   instructions?: string;
@@ -60,8 +54,8 @@ type CronEvent = {
   sessionKey?: string;
 };
 
-// Only the host clock is replaced, using the existing Gateway startup seam.
-// Transport, scheduler dispatch, admission, model execution, and actions stay real.
+// Control the host clock and worker timer wake delivery through existing test seams.
+// Scheduler dispatch, admission, model execution, and actions stay real.
 const schedulerClock = vi.hoisted(() => ({
   current: undefined as GatewaySchedulerClock | undefined,
 }));
@@ -80,14 +74,6 @@ vi.mock("../../../../src/infra/gateway-scheduler.js", async (importOriginal) => 
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-function resetGatewayState(): void {
-  resetConfigOverrides();
-  clearRuntimeConfigSnapshot();
-  clearConfigCache();
-  clearSessionStoreCacheForTest();
-  resetAgentEventsForTest({ preserveListeners: true });
-  resetSystemEventsForTest();
-}
 beforeEach(resetGatewayState);
 afterEach(() => {
   schedulerClock.current = undefined;
@@ -332,34 +318,39 @@ it(
           toolSearch: { enabled: false },
         };
         config.gateway = { auth: { mode: "token", token } };
-        gateway = await startGatewayWithClient({
-          cfg: config,
-          configPath,
-          token,
-          ...controlUi,
-          onEvent: (event) => {
-            if (event.event !== "cron") {
-              return;
-            }
-            const cron = event.payload as CronEvent;
-            events.push(cron);
-            if (cron.jobId !== jobId) {
-              return;
-            }
-            if (cron.action === "finished") {
-              firstFinished.resolve(cron);
-              if (cron.status !== "ok") {
-                providerFailure.resolve(new Error(cron.error ?? "Scheduled continuation failed"));
+        const cronScheduler = await captureCronSchedulerWakeForTest(async (wakeRegistered) => {
+          gateway = await startGatewayWithClient({
+            cfg: config,
+            configPath,
+            token,
+            ...controlUi,
+            onEvent: (event) => {
+              if (event.event !== "cron") {
+                return;
               }
-            }
-            if (cron.action === "removed") {
-              removed.resolve(cron);
-            }
-          },
+              const cron = event.payload as CronEvent;
+              events.push(cron);
+              if (cron.jobId !== jobId) {
+                return;
+              }
+              if (cron.action === "finished") {
+                firstFinished.resolve(cron);
+                if (cron.status !== "ok") {
+                  providerFailure.resolve(new Error(cron.error ?? "Scheduled continuation failed"));
+                }
+              }
+              if (cron.action === "removed") {
+                removed.resolve(cron);
+              }
+            },
+          });
+          await gateway.server.startupSettled;
+          // Cron starts in post-ready maintenance; retain capture until its actor registers.
+          void clock.advanceBy(500);
+          await observe(wakeRegistered);
+          return gateway;
         });
-        await gateway.server.startupSettled;
-        // server.close drains startup work waiting on this clock wake.
-        void clock.advanceBy(500);
+        gateway = cronScheduler.result;
         const runtimeConfig = getRuntimeConfigSnapshot();
         assert(runtimeConfig, "Gateway runtime config was not initialized");
         withFastReplyConfig(runtimeConfig);
@@ -405,6 +396,7 @@ it(
         // Expire the original deadline; editing it would retire the captured source.
         assert(before.schedule.kind === "at", "Expected a one-shot continuation");
         void clock.advanceTo(Date.parse(before.schedule.at));
+        cronScheduler.notify();
         const first = await observe(firstFinished.promise);
         expect(first, first.error).toMatchObject({ status: "ok", jobId, sessionKey });
         const rearmed = await observer.request<CronJob>("cron.get", { id: jobId });
@@ -421,6 +413,7 @@ it(
         const nextRunAtMs = rearmed.state.nextRunAtMs;
         assert(nextRunAtMs !== undefined, "Continuation was not rearmed");
         void clock.advanceTo(nextRunAtMs);
+        cronScheduler.notify();
         await observe(removed.promise);
         expect(step).toBe(8);
         const runs = await observer.request<{

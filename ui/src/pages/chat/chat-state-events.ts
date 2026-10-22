@@ -45,7 +45,7 @@ import {
 } from "./chat-send-support.ts";
 import { refreshCurrentChatSessionList } from "./chat-session.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
-import { applyChatModelCatalogSnapshot } from "./chat-state-refresh.ts";
+import { applyChatModelCatalogSnapshot, refreshChatModelAuthStatus } from "./chat-state-refresh.ts";
 import { resolveChatAgentId, selectedChatSessionRow } from "./chat-state-route.ts";
 import {
   refreshSessionWorkspace,
@@ -63,7 +63,7 @@ import {
   reconcileChatRunFromSessionRow,
   reconcileChatRunAfterSessionStatePublication,
 } from "./run-lifecycle.ts";
-import { reconcileSessionApprovalEvent } from "./session-approval-projection.ts";
+import { applySessionApprovalEvent } from "./session-approval-projection.ts";
 import { applySessionMessagePayload } from "./session-message-apply.ts";
 import { isSidebarSlotVisible } from "./sidebar-layout.ts";
 import { rememberAuthoritativeTerminal } from "./terminal-message-identity.ts";
@@ -415,18 +415,7 @@ function applyPageGatewayEvent(
     return;
   }
   if (event.event === "session.approval") {
-    const payload = asNullableRecord(event.payload);
-    if (!payload || typeof payload.sessionKey !== "string") {
-      return;
-    }
-    const queue = reconcileSessionApprovalEvent(
-      state.chatSessionApprovalQueue ?? [],
-      payload,
-      state.sessionKey,
-      resolveChatAgentId(state),
-    );
-    if (queue) {
-      state.chatSessionApprovalQueue = queue;
+    if (applySessionApprovalEvent(state, event.payload, resolveChatAgentId(state))) {
       chatRunPresentation(state).publish();
     }
     return;
@@ -486,6 +475,8 @@ function applyPageGatewayEvent(
           }
           if (terminalPayload && sessionMatches) {
             clearPendingQueueItemsForRun(state, terminalPayload.runId);
+            // Refresh stale usage after a run; split panes share the Gateway deadline.
+            void refreshChatModelAuthStatus(state, terminalPayload.runId);
           }
           if (shouldRefreshPullRequests && payload) {
             refreshPullRequestsForFinalReply(state, payload.runId, payload.message);
@@ -526,6 +517,7 @@ function applyPageGatewayEvent(
           if (sessionMatches) {
             chatRunPresentation(state).publish(
               payload?.state === "delta" ? "animation-frame" : "immediate",
+              payload?.state === "delta",
             );
           }
         },

@@ -80,6 +80,7 @@ export function createComposerQuestions(paneId: string, readProps: () => Questio
               panel: (options: QuestionPanelOptions) =>
                 createGatewayQuestionPanelProps(prompt, {
                   ...options,
+                  requestedBySession: props.gatewayQuestionSources?.get(prompt.id),
                   onChange: props.onGatewayQuestionChange,
                   onSubmit: props.onGatewayQuestionSubmit
                     ? (answers) => props.onGatewayQuestionSubmit?.(prompt.id, answers)

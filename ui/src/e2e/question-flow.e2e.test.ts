@@ -286,58 +286,121 @@ suite.define(() => {
     await expect.poll(() => shell.getAttribute("class")).not.toContain("shell--nav-drawer-open");
   });
 
-  it("docks a visible child session's question in the parent and answers it there", async () => {
-    const childKey = "agent:main:dashboard:child-question";
-    const { gateway, page } = await openQuestionPage(undefined, false, [
-      {
-        key: childKey,
-        kind: "direct",
-        label: "Release checks",
-        parentSessionKey: questionSessionKey,
-        spawnDepth: 1,
-        status: "running",
-        hasActiveRun: true,
-        updatedAt: Date.now(),
-      },
-    ]);
-    const choice = (question: string) => ({
-      questionId: "channel",
-      header: "Channel",
-      question,
-      options: [{ label: "Beta" }, { label: "Stable" }],
-      isOther: false,
-    });
-    const unrelatedPrompt = "Which channel should the unrelated session use?";
-    await gateway.emitGatewayEvent("question.requested", {
-      ...questionRecord("unrelated-session-question", [choice(unrelatedPrompt)]),
-      sessionKey: "agent:main:dashboard:unrelated",
-    });
-    const childPrompt = "Which channel should the release checks use?";
-    const request = {
-      ...questionRecord("child-session-question", [choice(childPrompt)]),
-      sessionKey: childKey,
-    };
-    const panel = await showQuestion(page, gateway, request);
-    expect((await panel.locator(".chat-question-panel__source").textContent())?.trim()).toBe(
-      "Asked by session Release checks",
-    );
-    expect(await panelFor(page, unrelatedPrompt).count()).toBe(0);
+  it.each(["parent", "child"] as const)(
+    "shows one child question in both sessions and resolves it from the %s",
+    async (answerFrom) => {
+      const childKey = "agent:main:dashboard:child-question";
+      const { gateway, page } = await openQuestionPage(undefined, false, [
+        {
+          key: childKey,
+          kind: "direct",
+          label: "Release checks",
+          parentSessionKey: questionSessionKey,
+          spawnDepth: 1,
+          status: "running",
+          hasActiveRun: true,
+          updatedAt: Date.now(),
+        },
+      ]);
+      const choice = (question: string) => ({
+        questionId: "channel",
+        header: "Channel",
+        question,
+        options: [{ label: "Beta" }, { label: "Stable" }],
+        isOther: false,
+      });
+      const unrelatedPrompt = "Which channel should the unrelated session use?";
+      await gateway.emitGatewayEvent("question.requested", {
+        ...questionRecord("unrelated-session-question", [choice(unrelatedPrompt)]),
+        sessionKey: "agent:main:dashboard:unrelated",
+      });
+      const childPrompt = "Which channel should the release checks use?";
+      const request = {
+        ...questionRecord("child-session-question", [choice(childPrompt)]),
+        sessionKey: childKey,
+      };
+      const composer = page.locator(composerSelector);
+      await composer.fill("Continue reviewing the release notes");
+      await gateway.setMethodResponse("question.list", { questions: [request] });
+      let panel = await showQuestion(page, gateway, request);
+      expect(await composer.inputValue()).toBe("Continue reviewing the release notes");
+      await expectFocused(composer);
+      expect(
+        (await panel.locator(".chat-question-panel__source > span").textContent())?.trim(),
+      ).toBe("Asked by");
+      expect((await panel.locator(".chat-question-panel__source a").textContent())?.trim()).toBe(
+        "Release checks",
+      );
+      expect(await panelFor(page, unrelatedPrompt).count()).toBe(0);
+      await panel.getByRole("button", { name: "Collapse question", exact: true }).click();
+      expect(await gateway.getRequests("question.resolve")).toHaveLength(0);
+      await page.getByRole("button", { name: "Expand question", exact: true }).click();
+      if (answerFrom === "child") {
+        await panel.locator(".chat-question-panel__source a").click();
+        panel = page
+          .getByRole("region", { name: "Chat", exact: true })
+          .locator("openclaw-chat-question-panel")
+          .filter({ hasText: childPrompt });
+        await page.waitForFunction(
+          (key) =>
+            window.openclawControlUi?.snapshot().sessionKey === key &&
+            window.openclawControlUi.snapshot().routeReady,
+          childKey,
+        );
+        await panel.waitFor();
+        await expectCount(panel.locator(".chat-question-panel__source"), 0);
+        await expectCount(
+          page.getByRole("region", { name: "Chat", exact: true }).locator(composerSelector),
+          0,
+        );
+      }
 
-    await panel.getByRole("radio", { name: /Beta/ }).click();
-    const answers = { answers: { channel: ["Beta"] } };
-    await gateway.setMethodResponse("question.resolve", {
-      status: "answered",
-      answers,
-    } satisfies QuestionResolveResult);
-    await panel.getByRole("button", { name: "Submit", exact: true }).click();
-    expect((await gateway.waitForRequest("question.resolve")).params).toEqual({
-      id: request.id,
-      answers,
-    });
-    await expect.poll(() => panel.count()).toBe(0);
-    // The answered question belongs to the child's transcript, not the parent's.
-    expect(await page.locator(".chat-thread").getByText(childPrompt).count()).toBe(0);
-  });
+      await panel.getByRole("radio", { name: /Beta/ }).click();
+      const answers = { answers: { channel: ["Beta"] } };
+      await gateway.setMethodResponse("question.resolve", {
+        status: "answered",
+        answers,
+      } satisfies QuestionResolveResult);
+      await gateway.setMethodResponse("question.list", { questions: [] });
+      await panel.getByRole("button", { name: "Submit", exact: true }).click();
+      expect((await gateway.waitForRequest("question.resolve")).params).toEqual({
+        id: request.id,
+        answers,
+      });
+      await expect.poll(() => panel.count()).toBe(0);
+      if (answerFrom === "child") {
+        await page
+          .locator(`[data-session-key="${questionSessionKey}"] .sidebar-recent-session__link`)
+          .first()
+          .click();
+        await page.waitForFunction(
+          (key) =>
+            window.openclawControlUi?.snapshot().sessionKey === key &&
+            window.openclawControlUi.snapshot().routeReady,
+          questionSessionKey,
+        );
+        await page.getByRole("textbox", { name: "Chat composer", exact: true }).waitFor();
+      }
+      // The answered question belongs to the child's transcript, not the parent's.
+      await expectCount(
+        page
+          .getByRole("region", { name: "Chat", exact: true })
+          .locator("openclaw-chat-question-panel")
+          .filter({ hasText: childPrompt }),
+        0,
+      );
+      expect(
+        await page
+          .getByRole("region", { name: "Chat", exact: true })
+          .locator(".chat-thread")
+          .getByText(childPrompt)
+          .count(),
+      ).toBe(0);
+      expect(
+        await page.getByRole("textbox", { name: "Chat composer", exact: true }).inputValue(),
+      ).toBe("Continue reviewing the release notes");
+    },
+  );
 
   it("opens an external question step without answering until completion is submitted", async () => {
     const { gateway, page } = await openQuestionPage();

@@ -148,7 +148,15 @@ openclaw-chat-question-panel {
   transform: rotate(180deg);
 }
 
+.chat-question-panel__header {
+  display: grid;
+  gap: 2px;
+}
+
 .chat-question-panel__source {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   overflow: hidden;
   color: var(--muted);

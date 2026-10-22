@@ -35,9 +35,12 @@ export function createGatewayQuestionPanelProps(
       drafts: prompt.drafts,
       error: prompt.error,
       requestedBySession: options.requestedBySession,
+      requestedBySessionHref: options.requestedBySessionHref,
+      autoFocus: options.requestedBySession ? false : undefined,
       requestPosition: options.requestPosition,
     },
     onChange,
+    onOpenSession: options.onOpenSession,
     onSecretStoreAllowedHostsChange: (allowedHosts) => {
       prompt.secretStoreAllowedHostsDraft = allowedHosts;
       onChange?.();

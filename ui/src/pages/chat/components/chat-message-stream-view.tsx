@@ -4,6 +4,7 @@ import type { ThemeBranding } from "../../../../../packages/gateway-protocol/src
 import type { QuestionPrompt } from "../../../app/question-prompt.ts";
 import { Icon } from "../../../components/solid/icon.tsx";
 import type { ChatReplyTarget, MessageGroup, ChatItem } from "../../../lib/chat/chat-types.ts";
+import { prepareChatMessageRender } from "../../../lib/chat/message-display.ts";
 import { describeToolGroup, readPreparedActivity } from "../../../lib/chat/tool-call-grouping.ts";
 import { extractToolCardsCached, resolveToolCardOutcome } from "../../../lib/chat/tool-cards.ts";
 import { resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
@@ -14,10 +15,7 @@ import { ChatAvatar, type ChatAvatarProps } from "../chat-avatar-view.tsx";
 import type { ChatSubagentWait } from "../chat-subagent-wait.ts";
 import type { MessageRenderOptions } from "./chat-message-bubble-options.ts";
 import { GroupedMessage } from "./chat-message-bubble-view.tsx";
-import {
-  prepareChatMessageRender,
-  resolveMessageActionDetails,
-} from "./chat-message-markdown-view.tsx";
+import { resolveMessageActionDetails } from "./chat-message-markdown-view.tsx";
 import { ChatTimestamp } from "./chat-message-timestamp-view.tsx";
 import { ChatQuestionSummary } from "./chat-question-summary.tsx";
 import { resolveGroupReplyLine } from "./chat-reply-attribution.ts";

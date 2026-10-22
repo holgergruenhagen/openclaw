@@ -3,7 +3,7 @@ import { page, userEvent } from "vitest/browser";
 import type { ChatItem } from "../../../lib/chat/chat-types.ts";
 import { cleanupSolid, mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { ChatNotice } from "./chat-divider.tsx";
-import { collectChatSearchRanges } from "./chat-search-highlight.ts";
+import { CHAT_SEARCH_HIGHLIGHT, syncChatSearchHighlight } from "./chat-search-highlight.ts";
 import "../../../styles/base.css";
 import "../../../styles/chat/grouped.css";
 
@@ -75,7 +75,7 @@ it.each([
   await expect.element(body).not.toBeVisible();
 });
 
-it("offers notice text to transcript search highlighting", () => {
+it("offers notice text to transcript search highlighting", async () => {
   const item: Extract<ChatItem, { kind: "notice" }> = {
     kind: "notice",
     key: "search-notice",
@@ -85,9 +85,16 @@ it("offers notice text to transcript search highlighting", () => {
     text: "Check the **rollback path** before continuing.",
   };
   const view = mountSolid(() => <ChatNotice item={item} />);
-  const marked = collectChatSearchRanges(view.container, "the rollback").map((range) =>
-    range.toString(),
-  );
-
-  expect(marked).toEqual(["the ", "rollback"]);
+  syncChatSearchHighlight(view.container, "the rollback");
+  try {
+    await expect
+      .poll(() =>
+        Array.from(CSS.highlights.get(CHAT_SEARCH_HIGHLIGHT) ?? [], (range) =>
+          range instanceof Range ? range.toString() : null,
+        ),
+      )
+      .toEqual(["the ", "rollback"]);
+  } finally {
+    syncChatSearchHighlight(view.container, "");
+  }
 });

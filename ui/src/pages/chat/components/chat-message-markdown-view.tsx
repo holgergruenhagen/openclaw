@@ -1,4 +1,3 @@
-import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { onSettled, Show } from "solid-js";
 import { CHAT_PENDING_INPUT_MESSAGE_PREFIX } from "../../../../../packages/gateway-protocol/src/schema/chat-history-constants.js";
@@ -7,12 +6,8 @@ import { CopyButton } from "../../../components/solid/copy-button.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { registerChatMessageMetadataEnglish } from "../../../i18n/locales/en-chat-message-metadata.ts";
 import type { NormalizedMessage } from "../../../lib/chat/chat-types.ts";
-import { readHumanMentions } from "../../../lib/chat/human-mentions.ts";
-import { resolveMessageDisplayMarkdown } from "../../../lib/chat/message-display.ts";
-import {
-  normalizeMessage,
-  normalizeRoleForGrouping,
-} from "../../../lib/chat/message-normalizer.ts";
+import type { ChatMessageRenderPreparation } from "../../../lib/chat/message-display.ts";
+import { normalizeRoleForGrouping } from "../../../lib/chat/message-normalizer.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
 import { stripThinkingTags } from "../../../lib/strip-thinking-tags.ts";
 import {
@@ -38,35 +33,6 @@ registerEnglishCatalog(registerChatMessageMetadataEnglish);
 
 // Loading and completion each advance the revision: three automatic attempts.
 export const FULL_MESSAGE_RETRY_REVISION_LIMIT = 6;
-
-// Options and action handlers outlive a render; keep this preparation separate from them.
-export function prepareChatMessageRender(message: unknown) {
-  const normalizedMessage = normalizeMessage(message);
-  const displayMarkdown = resolveMessageDisplayMarkdown(message, normalizedMessage);
-  const record = asNullableRecord(message);
-  const metadata = asNullableRecord(record?.["__openclaw"]);
-  let humanMentions: ReturnType<typeof readHumanMentions>;
-  if (record?.role === "user" && metadata?.humanMentions) {
-    const source =
-      typeof record.content === "string"
-        ? record.content
-        : Array.isArray(record.content)
-          ? record.content
-              .flatMap((block: unknown) => {
-                const item = asNullableRecord(block);
-                return item?.type === "text" && typeof item.text === "string" ? [item.text] : [];
-              })
-              .join("\n")
-          : null;
-    // Selections belong to submitted bytes, not a stripped envelope or display cap.
-    if (source === displayMarkdown) {
-      humanMentions = readHumanMentions(displayMarkdown, metadata.humanMentions);
-    }
-  }
-  return { message, normalizedMessage, displayMarkdown, humanMentions };
-}
-
-export type ChatMessageRenderPreparation = ReturnType<typeof prepareChatMessageRender>;
 
 export function resolveMessageReplyText(
   message: unknown,

@@ -1,13 +1,12 @@
-/* @vitest-environment jsdom */
-
 import { createComponent, flush } from "solid-js";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
+/* @vitest-environment jsdom */
+import { prepareChatMessageRender } from "../../../lib/chat/message-display.ts";
 import { mountSolid } from "../../../test-helpers/solid-render.tsx";
 import { groupMessages } from "../chat-thread-grouping.ts";
 import { buildMessageItems } from "../chat-thread-items.ts";
 import { GroupedMessage } from "./chat-message-bubble-view.tsx";
 import { MessageGroup, MessageGroupContent } from "./chat-message-group-view.tsx";
-import { prepareChatMessageRender } from "./chat-message-markdown-view.tsx";
 import { StreamGroupParts, type StreamGroupPart } from "./chat-message-stream-view.tsx";
 import { createCanvasPreview } from "./chat-message.test-support.ts";
 

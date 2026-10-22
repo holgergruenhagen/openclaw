@@ -2,16 +2,15 @@ import { createComponent } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { wrapExternalContent } from "../../../../../src/security/external-content.js";
 import { projectImportedMessageForDisplay } from "../../../lib/chat/imported-message-display.ts";
-import { resolveMessageDisplayMarkdown } from "../../../lib/chat/message-display.ts";
+import {
+  prepareChatMessageRender,
+  resolveMessageDisplayMarkdown,
+} from "../../../lib/chat/message-display.ts";
 import { extractText, extractTextCached } from "../../../lib/chat/message-extract.ts";
 import { normalizeMessage } from "../../../lib/chat/message-normalizer.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { GroupedMessage } from "./chat-message-bubble-view.tsx";
-import {
-  prepareChatMessageRender,
-  MessageActions,
-  resolveMessageActionDetails,
-} from "./chat-message-markdown-view.tsx";
+import { MessageActions, resolveMessageActionDetails } from "./chat-message-markdown-view.tsx";
 
 const importKey = "example-catalog:thread:item";
 const wrap = (text: string) =>

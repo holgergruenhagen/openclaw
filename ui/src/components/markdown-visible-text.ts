@@ -1,18 +1,34 @@
 import type { MarkdownIt, Token } from "markdown-it";
+import { ASSISTANT_TRANSCRIPT_ROLE_NODE_TYPE } from "../../../packages/markdown-core/src/assistant-transcript.js";
 import { stripUnsupportedCitationControlMarkers } from "../../../src/shared/text/citation-control-markers.js";
+import { prepareMarkdownHumanMentions } from "./markdown-human-mentions.ts";
 import { parseMarkdownJson } from "./markdown-json.ts";
 import { createMarkdownParser } from "./markdown-parser.ts";
-import { MARKDOWN_PARSE_LIMIT, normalizeMarkdownRenderOptions } from "./markdown-render-options.ts";
+import {
+  MARKDOWN_PARSE_LIMIT,
+  normalizeMarkdownRenderOptions,
+  type MarkdownRenderOptions,
+} from "./markdown-render-options.ts";
 import { normalizeMarkdownLineBreaks } from "./markdown-text.ts";
 
 // Transcript search compares what a reader sees, not the syntax around it:
 // `Title: \`fix\`` must match "title: fix". Parse with the transcript's own
 // rules so raw HTML stays literal and disclosure summaries keep their inline text.
 let parser: MarkdownIt | undefined;
-// Every transcript bubble shortens file-link labels while parsing; per-message
-// options (mention names, repository context) stay with the source fallback.
-const PROJECTION_OPTIONS = { fileLinks: true, sessionLinks: true } as const;
-const visibleTexts = new WeakMap<object, { markdown: string; text: string }>();
+type VisibleTextOptions = Pick<
+  MarkdownRenderOptions,
+  "mode" | "humanMentions" | "assistantTranscriptRoleHeaders"
+>;
+const visibleTexts = new WeakMap<
+  object,
+  {
+    markdown: string;
+    document: boolean;
+    roleHeaders: boolean;
+    humanMentions: VisibleTextOptions["humanMentions"];
+    text: string;
+  }
+>();
 
 function collectVisibleText(tokens: readonly Token[], parts: string[]): void {
   for (const token of tokens) {
@@ -21,10 +37,15 @@ function collectVisibleText(tokens: readonly Token[], parts: string[]): void {
         collectVisibleText(token.children ?? [], parts);
         break;
       case "text":
+      case "hex_color":
+      case ASSISTANT_TRANSCRIPT_ROLE_NODE_TYPE:
       case "code_inline":
       case "code_block":
       case "fence":
         parts.push(token.content);
+        break;
+      case "human_mention":
+        parts.push(token.content.startsWith("@") ? token.content.slice(1) : token.content);
         break;
       case "html_block":
       case "html_inline":
@@ -50,31 +71,71 @@ function collectVisibleText(tokens: readonly Token[], parts: string[]): void {
 }
 
 /** Plain text of rendered Markdown, cached on the immutable owner of `markdown`. */
-export function markdownVisibleText(owner: unknown, markdown: string): string {
+export function markdownVisibleText(
+  owner: unknown,
+  markdown: string,
+  options: VisibleTextOptions = {},
+): string {
   const cacheOwner = owner !== null && typeof owner === "object" ? owner : undefined;
+  const document = options.mode === "document";
+  const roleHeaders = options.assistantTranscriptRoleHeaders === true;
   const cached = cacheOwner && visibleTexts.get(cacheOwner);
-  if (cached && cached.markdown === markdown) {
+  const mentions = options.humanMentions ?? [];
+  const sameMentions =
+    cached &&
+    (cached.humanMentions?.length ?? 0) === mentions.length &&
+    mentions.every((mention, index) => {
+      const previous = cached.humanMentions?.[index];
+      return (
+        previous?.profileId === mention.profileId &&
+        previous.start === mention.start &&
+        previous.end === mention.end
+      );
+    });
+  if (
+    cached &&
+    cached.markdown === markdown &&
+    cached.document === document &&
+    cached.roleHeaders === roleHeaders &&
+    sameMentions
+  ) {
     return cached.text;
   }
-  // Messages above the parse budget and JSON messages render as literal source text.
-  if (markdown.length > MARKDOWN_PARSE_LIMIT || parseMarkdownJson(markdown)) {
-    return markdown;
+  let text = markdown;
+  // Selected mention offsets belong to the same immutable message as this cache.
+  // Recovered document-mode messages use the renderer's full parse path.
+  if ((document || markdown.length <= MARKDOWN_PARSE_LIMIT) && !parseMarkdownJson(markdown)) {
+    const parts: string[] = [];
+    try {
+      parser ??= createMarkdownParser();
+      const prepared = prepareMarkdownHumanMentions(
+        markdown,
+        options.humanMentions ?? [],
+        parser.utils.normalizeReference,
+      );
+      const source = normalizeMarkdownLineBreaks(
+        stripUnsupportedCitationControlMarkers(prepared.source),
+      );
+      const environment = normalizeMarkdownRenderOptions({
+        fileLinks: true,
+        sessionLinks: true,
+        ...options,
+      });
+      environment.humanMentionTokens = prepared.tokens;
+      collectVisibleText(parser.parse(source, environment), parts);
+      text = parts.join("");
+    } catch {
+      // As in the renderer, failed parses keep literal source. Cache that result too.
+    }
   }
-  const parts: string[] = [];
-  try {
-    parser ??= createMarkdownParser();
-    const source = normalizeMarkdownLineBreaks(stripUnsupportedCitationControlMarkers(markdown));
-    collectVisibleText(
-      parser.parse(source, normalizeMarkdownRenderOptions(PROJECTION_OPTIONS)),
-      parts,
-    );
-  } catch {
-    // The renderer falls back to escaped source text when parsing fails.
-    return markdown;
-  }
-  const text = parts.join("");
   if (cacheOwner) {
-    visibleTexts.set(cacheOwner, { markdown, text });
+    visibleTexts.set(cacheOwner, {
+      markdown,
+      document,
+      roleHeaders,
+      humanMentions: mentions,
+      text,
+    });
   }
   return text;
 }

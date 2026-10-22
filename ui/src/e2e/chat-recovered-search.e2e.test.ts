@@ -103,12 +103,12 @@ suite.define(() => {
         historyMessages: [
           {
             role: "user",
-            content: "Draft the pull request for @Ada Lovelace.",
+            content: "**Draft** the pull request for @**Ada** Lovelace.",
             timestamp: 1_800_000_000_000,
             __openclaw: {
               id: "search-highlight-prompt",
               seq: 1,
-              humanMentions: [{ profileId: "profile-ada", start: 27, end: 40 }],
+              humanMentions: [{ profileId: "profile-ada", start: 31, end: 48 }],
             },
           },
           {
@@ -121,6 +121,7 @@ suite.define(() => {
               "Raw <b>html</b> stays literal.<br>Next line",
               `Chart ![chart](${PIXEL_PNG}) below, then chart below.`,
               "Open `/tmp/src/foo.ts` now.",
+              "**Use** #fff now.",
             ].join("\n\n"),
             timestamp: 1_800_000_000_001,
             __openclaw: { id: "search-highlight-answer", seq: 2 },
@@ -196,10 +197,25 @@ suite.define(() => {
         .poll(async () => (await marked()).map(({ text }) => text).join(""))
         .toBe("Open foo.ts now");
 
-      // A mention renders its visible name inside a button; it is message text.
-      await search.fill("Ada Lovelace");
+      await search.fill("Use #fff now");
+      await expect
+        .poll(async () => (await marked()).map(({ text }) => text).join(""))
+        .toBe("Use #fff now");
+      await search.fill("Use now");
       await expect.poll(() => reply.count()).toBe(0);
-      await expect.poll(marked).toEqual([{ text: "Ada Lovelace", code: false }]);
+
+      // The copied @ has zero font size; visible-text search follows the shown name.
+      await search.fill("for **Ada** Lovelace");
+      await expect
+        .poll(async () => (await marked()).map(({ text }) => text).join(""))
+        .toBe("for **Ada** Lovelace");
+      await search.fill("for @**Ada** Lovelace");
+      await expect.poll(() => prompt.count()).toBe(1);
+      await expect.poll(marked).toEqual([]);
+      // A mention renders its visible name inside a button; it is message text.
+      await search.fill("**Ada** Lovelace");
+      await expect.poll(() => reply.count()).toBe(0);
+      await expect.poll(marked).toEqual([{ text: "**Ada** Lovelace", code: false }]);
 
       await search.fill("REVIEW");
       await expect

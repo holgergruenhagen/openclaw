@@ -7,6 +7,7 @@ import { stripInboundMetadata } from "../../../../src/auto-reply/reply/strip-inb
 import { resolveToolUseId } from "../../../../src/chat/tool-content.js";
 import { markdownVisibleText } from "../../components/markdown-visible-text.ts";
 import type { ChatItem, ChatQueueItem } from "../../lib/chat/chat-types.ts";
+import { prepareChatMessageRender } from "../../lib/chat/message-display.ts";
 import { extractTextCached, readTranscriptMediaEntries } from "../../lib/chat/message-extract.ts";
 import {
   canvasPreviewsMatch,
@@ -85,24 +86,40 @@ export function messageMatchesSearchQuery(
     recovery && messageId
       ? recovery.messages.get(messageRecoveryKey(recovery.agentId, messageId))
       : undefined;
-  // Source text keeps link targets and literal syntax searchable; the visible
-  // projection matches what transcript highlighting can mark on screen.
+  // Keep source syntax and link destinations searchable, then compare the same
+  // display preparation used by message rendering.
   const phrase = phraseQueryPattern(query);
-  const matches = (owner: unknown, markdown: string | null) =>
-    normalizeLowercaseStringOrEmpty(markdown).includes(normalizedQuery) ||
-    (markdown !== null &&
-      phrase !== null &&
-      markdownVisibleText(owner, markdown).search(phrase) >= 0);
+  const sourceMatches = (markdown: string | null) =>
+    normalizeLowercaseStringOrEmpty(markdown).includes(normalizedQuery);
   if (expansion?.status === "loaded") {
     const role = normalizeRoleForGrouping(normalizeMessage(message).role);
     if (resolveCappedMessageId(message, role)) {
-      return matches(
-        expansion,
-        role === "assistant" ? stripThinkingTags(expansion.markdown) : expansion.markdown,
+      const markdown =
+        role === "assistant" ? stripThinkingTags(expansion.markdown) : expansion.markdown;
+      const recovered = expansion.message ? prepareChatMessageRender(expansion.message) : undefined;
+      return (
+        sourceMatches(markdown) ||
+        (phrase !== null &&
+          markdownVisibleText(expansion, markdown, {
+            mode: "document",
+            humanMentions:
+              recovered?.displayMarkdown === markdown ? recovered.humanMentions : undefined,
+            assistantTranscriptRoleHeaders: role === "assistant",
+          }).search(phrase) >= 0)
       );
     }
   }
-  return matches(message, extractTextCached(message));
+  if (sourceMatches(extractTextCached(message))) {
+    return true;
+  }
+  const prepared = prepareChatMessageRender(message);
+  return (
+    phrase !== null &&
+    markdownVisibleText(message, prepared.displayMarkdown, {
+      humanMentions: prepared.humanMentions,
+      assistantTranscriptRoleHeaders: prepared.normalizedMessage.role === "assistant",
+    }).search(phrase) >= 0
+  );
 }
 
 type ChatMessagePreview = NonNullable<ReturnType<typeof readChatMessagePreview>>;

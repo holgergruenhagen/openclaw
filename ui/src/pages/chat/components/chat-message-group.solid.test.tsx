@@ -1,5 +1,3 @@
-/* @vitest-environment jsdom */
-
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -7,6 +5,8 @@ import type {
   ControlUiReplacement,
 } from "../../../../../src/plugin-sdk/control-ui.js";
 import type { ApplicationContext } from "../../../app/context.ts";
+/* @vitest-environment jsdom */
+import { prepareChatMessageRender } from "../../../lib/chat/message-display.ts";
 import { ContentPresentation } from "../../../lib/solid/presentation.ts";
 import type { ControlUiPluginCapability } from "../../../plugins/control-ui-capability.ts";
 import "../../../plugins/control-ui-view.solid.tsx";
@@ -22,7 +22,6 @@ import {
   MessageGroup,
   type NativeMessageGroupOptions,
 } from "./chat-message-group-view.tsx";
-import { prepareChatMessageRender } from "./chat-message-markdown-view.tsx";
 import { createMessageGroup, createToolResultMessage } from "./chat-message.test-support.ts";
 
 it.each([false, true])(

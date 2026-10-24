@@ -39,6 +39,14 @@ export const ChatHistoryParamsSchema = closedObject({
   sessionKey: NonEmptyString,
   agentId: Type.Optional(NonEmptyString),
   cursor: Type.Optional(Type.String()),
+  // Receipts are useful only with the exact retained fields, not the transcript cursor alone.
+  knownState: Type.Optional(
+    closedObject({
+      pendingInputs: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+      sessionInfo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+      commands: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+    }),
+  ),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: CHAT_HISTORY_MAX_ENTRIES })),
   maxBytes: Type.Optional(Type.Integer({ minimum: 1024 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -117,7 +125,18 @@ export const ChatInputConsumptionsSchema = Type.Array(
 );
 export type ChatInputConsumptions = Static<typeof ChatInputConsumptionsSchema>;
 
+/** Immutable execution receipts, scoped by the owning activity's message and run. */
+export const AgentActivityDelegationSchema = closedObject({
+  runId: Type.String({ minLength: 1, maxLength: 256 }),
+  childSessionKey: Type.String({ minLength: 1, maxLength: 1024 }),
+  label: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  groupId: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  runtimeMs: Type.Optional(Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  status: stringLiteralUnion(["accepted", "done", "failed", "killed", "timeout"]),
+});
+export type AgentActivityDelegation = Static<typeof AgentActivityDelegationSchema>;
 export const AgentActivityItemSchema = closedObject({
+  delegation: Type.Optional(Type.Array(AgentActivityDelegationSchema, { maxItems: 32 })),
   itemId: NonEmptyString,
   phase: stringLiteralUnion(["start", "update", "end"]),
   kind: Type.String(),
@@ -158,7 +177,9 @@ export const ChatHistoryDeltaResultSchema = closedObject({
   messages: Type.Array(Type.Unknown()),
   activity: Type.Optional(Type.Array(ChatHistoryActivitySchema)),
   deltaCursor: Type.String(),
-  sessionInfo: Type.Unknown(),
+  sessionInfo: Type.Optional(Type.Unknown()),
+  sessionInfoSnapshotAt: Type.Optional(Type.Number()),
+  stateRevision: Type.Optional(ChatHistoryParamsSchema.properties.knownState),
   agentsList: Type.Optional(Type.Unknown()),
   inFlightRun: Type.Optional(Type.Unknown()),
   metadata: Type.Optional(Type.Unknown()),
@@ -419,6 +440,7 @@ export const ChatRunStartupPhaseSchema = stringLiteralUnion([
   "waiting_for_state",
   "preparing_workspace",
   "naming_worktree",
+  "preparing_worktree_base",
   "creating_worktree",
   "running_setup",
   "provisioning_environment",
@@ -474,6 +496,8 @@ export const ChatFinalEventSchema = closedObject({
 export const ChatAbortedEventSchema = closedObject({
   ...ChatEventBaseSchema,
   state: Type.Literal("aborted"),
+  // Captured before abort clears the local provider wait; not backend-release evidence.
+  localModelMayStillBeFinishing: Type.Optional(Type.Literal(true)),
   message: Type.Optional(Type.Unknown()),
   errorMessage: Type.Optional(Type.String()),
   stopReason: Type.Optional(Type.String()),
@@ -488,6 +512,7 @@ const ChatErrorDetailSchema = closedObject({
   model: ChatErrorDetailTextSchema,
   failoverReason: ChatErrorDetailTextSchema,
   providerRuntimeFailureKind: ChatErrorDetailTextSchema,
+  providerErrorCode: ChatErrorDetailTextSchema,
   providerErrorType: ChatErrorDetailTextSchema,
   httpStatus: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
   providerErrorMessagePreview: ChatErrorDetailTextSchema,
@@ -513,6 +538,7 @@ export function projectChatErrorDetail(observation: unknown): ChatErrorDetail | 
     model: readText(source.model),
     failoverReason: readText(source.failoverReason),
     providerRuntimeFailureKind: readText(source.providerRuntimeFailureKind),
+    providerErrorCode: readText(source.providerErrorCode),
     providerErrorType: readText(source.providerErrorType),
     httpStatus:
       httpStatus !== undefined &&

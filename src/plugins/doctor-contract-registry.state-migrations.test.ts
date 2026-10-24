@@ -10,6 +10,16 @@ function mockDoctorPlugins(...plugins: Record<string, unknown>[]): void {
   mocks.loadPluginManifestRegistry.mockReturnValue({ plugins, diagnostics: [] });
 }
 
+const workspaceActivation = [
+  { name: "inactive workspace", config: {}, allowed: false },
+  { name: "allowlisted workspace", config: { plugins: { allow: ["alpha"] } }, allowed: true },
+  {
+    name: "enabled workspace",
+    config: { plugins: { entries: { alpha: { enabled: true } } } },
+    allowed: true,
+  },
+];
+
 function pluginRecord(rootDir: string, overrides: Record<string, unknown> = {}) {
   return {
     id: "alpha",
@@ -110,6 +120,11 @@ function legacyFixture(
 
 function mockModernPlugin(overrides: Record<string, unknown>, configRepair = false) {
   const root = makeTempDir();
+  const detectLegacyState = vi.fn(() => ({ preview: ["alpha state"] }));
+  const migrateLegacyState = vi.fn(() => ({
+    changes: configRepair ? ["migrated alpha state"] : [],
+    warnings: [],
+  }));
   fs.writeFileSync(path.join(root, "doctor-contract-api.ts"), "export {};\n", "utf8");
   mocks.createJiti.mockImplementation(() => () => ({
     legacyConfigRules: configRepair
@@ -119,15 +134,13 @@ function mockModernPlugin(overrides: Record<string, unknown>, configRepair = fal
       {
         id: "alpha-state",
         label: "Alpha state",
-        detectLegacyState: () => ({ preview: ["alpha state"] }),
-        migrateLegacyState: () => ({
-          changes: configRepair ? ["migrated alpha state"] : [],
-          warnings: [],
-        }),
+        detectLegacyState,
+        migrateLegacyState,
       },
     ],
   }));
   mockDoctorPlugins(pluginRecord(root, overrides));
+  return { detectLegacyState, migrateLegacyState };
 }
 
 function modernLegacyFixture(source = directDetector) {
@@ -259,12 +272,9 @@ describe("doctor-contract-registry state migrations", () => {
     },
   );
 
-  it.each([
-    { name: "entry feature present", entryFeature: true, expectedCount: 1 },
-    { name: "entry feature absent", entryFeature: false, expectedCount: 0 },
-  ])(
-    "gates the legacy setup-plugin lifecycle fallback when the $name",
-    async ({ entryFeature, expectedCount }) => {
+  it.each([false, true])(
+    "gates the legacy setup-plugin lifecycle fallback (entry feature=%s)",
+    async (entryFeature) => {
       const { pluginRoot, events } = legacyFixture(
         `module.exports = {
   kind: "bundled-channel-setup-entry",
@@ -276,7 +286,7 @@ describe("doctor-contract-registry state migrations", () => {
 };`,
       );
       const entries = migrationEntries({ pluginIds: ["legacy-channel"] });
-      expect(entries).toHaveLength(expectedCount);
+      expect(entries).toHaveLength(Number(entryFeature));
       if (entries[0]) {
         await expect(
           entries[0].migration.detectLegacyState(detectionInput(pluginRoot)),
@@ -311,28 +321,13 @@ describe("doctor-contract-registry state migrations", () => {
   });
 
   it.each([
-    {
-      name: "explicitly disabled channel",
-      config: { channels: { alpha: { enabled: false } } },
-    },
-    {
-      name: "explicitly disabled plugin",
-      config: { plugins: { entries: { alpha: { enabled: false } } } },
-    },
-    {
-      name: "denylisted plugin",
-      config: { plugins: { deny: ["alpha"] } },
-    },
-    {
-      name: "globally disabled plugins",
-      config: { plugins: { enabled: false } },
-    },
-    {
-      name: "every configured channel alias disabled",
-      config: { channels: { alpha: { enabled: false }, "alpha-alias": { enabled: false } } },
-    },
-  ])("never loads state migrations for an $name, but still repairs its config", ({ config }) => {
-    mockModernPlugin(
+    { channels: { alpha: { enabled: false } } },
+    { plugins: { entries: { alpha: { enabled: false } } } },
+    { plugins: { deny: ["alpha"] } },
+    { plugins: { enabled: false } },
+    { channels: { alpha: { enabled: false }, "alpha-alias": { enabled: false } } },
+  ])("repairs disabled owner config without loading state migrations: %j", (config) => {
+    const { detectLegacyState, migrateLegacyState } = mockModernPlugin(
       {
         origin: "global",
         channels: ["alpha", "alpha-alias"],
@@ -347,32 +342,18 @@ describe("doctor-contract-registry state migrations", () => {
       { path: ["channels", "alpha", "legacy"], message: "repair disabled alpha" },
     ]);
     expect(mocks.createJiti).toHaveBeenCalledTimes(1);
+    expect(migrationIds({ config, includeDisabled: true })).toEqual(["alpha-state"]);
+    expect(detectLegacyState).not.toHaveBeenCalled();
+    expect(migrateLegacyState).not.toHaveBeenCalled();
   });
 
   it.each([
-    {
-      name: "untrusted workspace even when explicitly scoped",
-      origin: "workspace",
-      config: {},
-      allowed: false,
-    },
+    ...workspaceActivation.map((scenario) => ({ ...scenario, origin: "workspace" })),
     {
       name: "non-bundled owner omitted from a restrictive allowlist",
       origin: "global",
       config: { plugins: { allow: ["other-plugin"] } },
       allowed: false,
-    },
-    {
-      name: "explicitly allowlisted workspace",
-      origin: "workspace",
-      config: { plugins: { allow: ["alpha"] } },
-      allowed: true,
-    },
-    {
-      name: "explicitly enabled workspace",
-      origin: "workspace",
-      config: { plugins: { entries: { alpha: { enabled: true } } } },
-      allowed: true,
     },
   ])("honors effective activation before loading an $name", ({ origin, config, allowed }) => {
     const { events } = legacyFixture(directDetector, {
@@ -389,24 +370,15 @@ describe("doctor-contract-registry state migrations", () => {
     expect(doctorContractWarnMock).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { name: "inactive workspace owner", config: {}, allowed: false },
-    {
-      name: "allowlisted workspace owner",
-      config: { plugins: { allow: ["alpha"] } },
-      allowed: true,
-    },
-    {
-      name: "explicitly enabled workspace owner",
-      config: { plugins: { entries: { alpha: { enabled: true } } } },
-      allowed: true,
-    },
-  ])("gates a modern non-channel $name before loading", ({ config, allowed }) => {
-    mockModernPlugin({ origin: "workspace" });
+  it.each(workspaceActivation)(
+    "gates a modern non-channel $name before loading",
+    ({ config, allowed }) => {
+      mockModernPlugin({ origin: "workspace" });
 
-    expect(migrationIds({ config })).toEqual(allowed ? ["alpha-state"] : []);
-    expect(mocks.createJiti).toHaveBeenCalledTimes(allowed ? 1 : 0);
-  });
+      expect(migrationIds({ config })).toEqual(allowed ? ["alpha-state"] : []);
+      expect(mocks.createJiti).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    },
+  );
 
   it("preserves an enabled channel alias and the existing restrictive-allowlist bypass", () => {
     const pluginRoot = makeTempDir();

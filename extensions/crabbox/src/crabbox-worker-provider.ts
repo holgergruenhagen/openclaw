@@ -1,4 +1,3 @@
-import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
@@ -7,12 +6,7 @@ import {
   type WorkerProfile,
   type WorkerProvider,
 } from "openclaw/plugin-sdk/plugin-entry";
-import { runCrabboxProcess } from "./crabbox-process.js";
-import {
-  type CrabboxCommandRunner,
-  type LeaseCommandContext,
-  stopCrabboxLease,
-} from "./crabbox-worker-command.js";
+import { type LeaseCommandContext, stopCrabboxLease } from "./crabbox-worker-command.js";
 import { createCrabboxHeartbeatManager } from "./crabbox-worker-heartbeat.js";
 import type { ParsedInspect } from "./crabbox-worker-inspect.js";
 import { prepareCrabboxCaptureLifetime } from "./crabbox-worker-lifetime.js";
@@ -87,12 +81,7 @@ type LeaseHeartbeatContext = LeaseCommandContext &
   Pick<CrabboxProfile, "heartbeatIntervalMs" | "heartbeatTimeoutMs" | "idleTimeout">;
 
 type CrabboxWorkerProviderDependencies = {
-  isExecutable?: (candidate: string) => boolean;
   openclawRoot?: string;
-  pathEnv?: string;
-  platform?: NodeJS.Platform;
-  runCommand?: CrabboxCommandRunner;
-  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   wallpaperPath: string;
   state: CrabboxState;
   warn?: (message: string) => void;
@@ -103,40 +92,29 @@ export function createCrabboxWorkerProvider(
   dependencies: CrabboxWorkerProviderDependencies,
 ): WorkerProvider & { dispose: () => Promise<void>; images: CrabboxSnapshotActions } {
   const wallpaperBase64 = loadCrabboxWorkerWallpaperBase64(dependencies.wallpaperPath);
-  const runCommand = dependencies.runCommand ?? runCrabboxProcess;
   const warn = dependencies.warn ?? (() => {});
-  const sleep =
-    dependencies.sleep ?? ((milliseconds, signal) => delay(milliseconds, undefined, { signal }));
   const openclawRoot = dependencies.openclawRoot ?? process.cwd();
   const heartbeats = createCrabboxHeartbeatManager({
-    runCommand,
-    sleep,
     warn,
   });
   const providerAbort = new AbortController();
   const binaryResolver = createCrabboxWorkerBinaryResolver({
-    isExecutable: dependencies.isExecutable,
     openclawRoot,
-    pathEnv: dependencies.pathEnv ?? process.env.PATH,
-    platform: dependencies.platform,
-    runCommand,
     signal: providerAbort.signal,
+    warn,
   });
   const resolveBinary = binaryResolver.resolve;
   const machineOptions = createCrabboxMachineOptionsResolver({
     resolveBinary: async (...args) => (await resolveBinary(...args)).binary,
-    runCommand,
     warn,
   });
   const warmImages = createCrabboxWarmImageManager({
     state: dependencies.state,
-    runCommand,
     warn,
     policy: dependencies.warmImagePolicy,
     prepareCapture: async (context) => {
       heartbeats.start({ ...context.profile, ...context });
       await prepareCrabboxCaptureLifetime(context, {
-        runCommand,
         observe: (inspected) =>
           heartbeats.start({
             ...context.profile,
@@ -162,14 +140,16 @@ export function createCrabboxWorkerProvider(
     signal: providerAbort.signal,
     resolveBinaries: resolveMaintenanceBinaries,
   });
-  const stopLease = async (context: LeaseCommandContext): Promise<void> => {
+  const stopLease = async (
+    context: LeaseCommandContext,
+    onCleanupAccepted?: () => void,
+  ): Promise<void> => {
     await heartbeats.stop(context.id);
     // Cleanup has its own deadline. Confirmed stop or absence releases allocation/image ownership.
     await stopCrabboxLease({
       ...context,
-      runCommand,
       warn,
-      sleep,
+      onCleanupAccepted,
     });
     await warmImages.release(context);
   };
@@ -240,7 +220,6 @@ export function createCrabboxWorkerProvider(
       await assertCrabboxSetupEgressSupport({
         binary,
         target: parsed.target,
-        runCommand,
         assertCurrent,
         signal: preparationSignal,
         projectPrepared: project ? Boolean(project.preparation) : undefined,
@@ -261,10 +240,10 @@ export function createCrabboxWorkerProvider(
     const context = warmImages.startContext(binary, parsed.provider, options, Boolean(project));
     const leaseId = allocation.leaseId;
     if (parsed.desktop && parsed.provider === "hetzner") {
-      await assertHetznerDesktopHasManagedCoordinator({ binary, runCommand, signal });
+      await assertHetznerDesktopHasManagedCoordinator({ binary, signal });
     }
     if (parsed.provider === "aws") {
-      await assertAwsWorkerHasNoInstanceProfile({ binary, runCommand, signal });
+      await assertAwsWorkerHasNoInstanceProfile({ binary, signal });
     }
 
     return async () => {
@@ -295,8 +274,6 @@ export function createCrabboxWorkerProvider(
           inspected = await inspectWithContext({
             ...context,
             id: leaseId,
-            runCommand,
-            sleep,
             timeoutMs: remainingProvisionTimeout(
               deadline,
               resolveCrabboxLifecycleTimeoutMs(parsed.provider),
@@ -332,9 +309,7 @@ export function createCrabboxWorkerProvider(
           deadline,
           inspect: inspected,
           profile: parsed,
-          runCommand,
           stopLease,
-          sleep,
           signal: preparationSignal,
           assertCurrent,
         };
@@ -346,7 +321,7 @@ export function createCrabboxWorkerProvider(
             ),
           );
         }
-        inspectedParams.inspect = await waitForProvisionReady({ ...inspectedParams, sleep });
+        inspectedParams.inspect = await waitForProvisionReady(inspectedParams);
         inspectedParams.deadline = setupDeadline;
         // The image key covers the exact setup script, so a fork already carries its results.
         if (parsed.setup && allocationChoice.kind !== "checkpoint") {
@@ -359,7 +334,6 @@ export function createCrabboxWorkerProvider(
           inspectedParams.inspect = await waitForProvisionReady({
             ...inspectedParams,
             refresh: true,
-            sleep,
           });
         }
         const desktop = await prepareProvisionDesktop({
@@ -376,7 +350,6 @@ export function createCrabboxWorkerProvider(
               id: leaseId,
               project,
               inspectPrepared: true,
-              runCommand,
               signal: preparationSignal,
               timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
             });
@@ -414,7 +387,6 @@ export function createCrabboxWorkerProvider(
               ...context,
               id: leaseId,
               project,
-              runCommand,
               signal: preparationSignal,
               timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
               recordRecipePreparation: (metadata) =>
@@ -469,7 +441,6 @@ export function createCrabboxWorkerProvider(
             inspectedParams.inspect = await waitForProvisionReady({
               ...inspectedParams,
               refresh: true,
-              sleep,
             });
           }
         }
@@ -626,6 +597,7 @@ export function createCrabboxWorkerProvider(
     },
     ...machineOptions,
     supportedExecutionModes: ["worker-turn", "remote-exec"],
+    supportsCleanupAcceptance: true,
     provisionBeforeInstallation: true,
     requiresNodeEnrollment: true,
     supportsProjectPreparation: supportsCrabboxProjectPreparation,
@@ -633,7 +605,6 @@ export function createCrabboxWorkerProvider(
     resolvePreparationTarget: resolveCrabboxPreparationTarget,
     runSetupCommand: createCrabboxSetupCommandRunner({
       resolveBinary: async (...args) => (await resolveBinary(...args)).binary,
-      runCommand,
     }),
     notePreparedDemand: async (lease, preparation) =>
       await warmImages.notePreparedDemand(lease.leaseId, preparation),
@@ -657,8 +628,6 @@ export function createCrabboxWorkerProvider(
       const { context } = await resolveLeaseContext(lease);
       const inspected = await inspectWithContext({
         ...context,
-        runCommand,
-        sleep,
         signal: lease.signal,
       });
       lease.signal?.throwIfAborted();
@@ -683,45 +652,34 @@ export function createCrabboxWorkerProvider(
           throw error;
         },
       );
-      const captureStarted = Promise.withResolvers<void>();
-      let capturing = false;
-      const teardown = (async () => {
-        try {
-          const allocation = await warmImages.lookupLease(context.id);
-          const captureProfile = resolveCrabboxWarmImageProfile(
-            profile,
-            allocation?.machineClass ?? profile.class,
-            allocation ? (allocation.os ?? "linux") : profile.target,
-          );
-          if (captureProfile.warmImage) {
-            await warmImages.capture({
-              ...context,
-              signal: providerAbort.signal,
-              profile: captureProfile,
-              teardown: true,
-              onCaptureStart: () => {
-                capturing = true;
-                captureStarted.resolve();
-              },
-            });
-          }
-        } catch (error) {
-          warn(
-            `Crabbox warm image capture failed for lease ${context.id}: ${coerceErrorMessage(error)}; next step: crabbox stop --provider ${context.provider} ${context.id}`,
-          );
+      let onCleanupAccepted = lease.onCleanupAccepted;
+      try {
+        const allocation = await warmImages.lookupLease(context.id);
+        const captureProfile = resolveCrabboxWarmImageProfile(
+          profile,
+          allocation?.machineClass ?? profile.class,
+          allocation ? (allocation.os ?? "linux") : profile.target,
+        );
+        if (captureProfile.warmImage) {
+          await warmImages.capture({
+            ...context,
+            signal: providerAbort.signal,
+            profile: captureProfile,
+            teardown: true,
+            onCaptureStart: () => {
+              onCleanupAccepted?.();
+              onCleanupAccepted = undefined;
+            },
+          });
         }
-        await stopLease(context).catch((error: unknown) => {
-          if (!capturing) {
-            throw error;
-          }
-          warn(
-            `Crabbox teardown stop failed for lease ${context.id}: ${coerceErrorMessage(error)}; next step: crabbox stop --provider ${context.provider} ${context.id}`,
-          );
-        });
-      })();
-      // Only a claimed capture detaches. If the Gateway exits during it, OpenClaw
-      // will not stop the lease; Crabbox's idle timeout / TTL reaps it.
-      await Promise.race([teardown, captureStarted.promise]);
+      } catch (error) {
+        warn(
+          `Crabbox warm image capture failed for lease ${context.id}: ${coerceErrorMessage(error)}; next step: crabbox stop --provider ${context.provider} ${context.id}`,
+        );
+      }
+      // A claimed capture releases the reclaim caller through the notification,
+      // while the lifecycle owner keeps this promise until stop is confirmed.
+      await stopLease(context, onCleanupAccepted);
     },
   };
 }

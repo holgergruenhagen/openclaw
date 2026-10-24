@@ -3,6 +3,7 @@ import { beforeEach, expect, it } from "vitest";
 import type { MessageClientSource } from "../../../../src/chat/message-client-source.js";
 import type { ChatQueueItem, MessageGroup } from "../../lib/chat/chat-types.ts";
 import { coalesceAgentRunFrames } from "./chat-agent-run-grouping.ts";
+import { assistantGroupCanOwnActiveRunStatus } from "./chat-assistant-reply.ts";
 import {
   groupsOf,
   message,
@@ -13,14 +14,10 @@ import {
   signedText as signed,
   toolResult,
 } from "./chat-thread-fixtures.test-support.ts";
-import {
-  assistantGroupCanOwnActiveRunStatus,
-  collapseCompletedTurnWork,
-  coalesceActivityRuns,
-  groupMessages,
-} from "./chat-thread-grouping.ts";
+import { groupMessages } from "./chat-thread-grouping.ts";
 import { buildItems, type CachedChatItemsProps } from "./chat-thread.test-support.ts";
 import { resetChatThreadState } from "./chat-thread.ts";
+import { collapseCompletedTurnWork, coalesceActivityRuns } from "./chat-turn-presentation.ts";
 
 const sessionKey = "agent:main:dashboard:answers";
 const cli: MessageClientSource = { id: "cli", mode: "cli", displayName: "Release helper" };
@@ -87,6 +84,22 @@ function expectHistory(messages: unknown[], shown: number[], folded: number[]) {
   }
 }
 beforeEach(() => resetChatThreadState());
+
+it("keeps provider speech separate from answer ownership and completed-work rollups", () => {
+  const answer = message("assistant", "The command exited with code 0.", 2);
+  const speech = message("assistant", "The command exited with code zero.", 3, {
+    __openclaw: { voiceTranscript: "provider-owned" },
+  });
+  const groups = cachedGroups([message("user", "Check the command.", 1), answer, speech]);
+  expect(groups.map((group) => group.messages.map((item) => item.message))).toEqual([
+    [expect.objectContaining({ role: "user" })],
+    [answer],
+    [speech],
+  ]);
+  expect(assistantGroupCanOwnActiveRunStatus(groups[1]!)).toBe(true);
+  expect(assistantGroupCanOwnActiveRunStatus(groups[2]!)).toBe(false);
+  expect(collapseCompletedTurnWork(groups, { sessionKey, runWorking: false })).toEqual(groups);
+});
 
 it("keeps each queued message in the same row through acceptance and persistence", () => {
   const queue: ChatQueueItem[] = ["First queued input", "Second queued input"].map((text, index) =>

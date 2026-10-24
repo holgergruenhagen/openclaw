@@ -82,9 +82,10 @@ describe("Feishu Card Action Handler", () => {
     resolvedCardActionChatTypes.clear();
   });
 
-  it("handles card action with JSON object payload", async () => {
+  it("handles card action with JSON object payload without logging content", async () => {
     await dispatch(cardEvent({ a: "b" }, { context: { chat_id: "" } }));
     expect(message()).toMatchObject({ content: '{"text":"{\\"a\\":\\"b\\"}"}', chat_id: "u123" });
+    expect(log.mock.calls.flat().join("\n")).not.toContain('{"a":"b"}');
   });
 
   it("opens approval cards with resolved DM type and preserved interaction context", async () => {
@@ -164,19 +165,19 @@ describe("Feishu Card Action Handler", () => {
     expect(message()).toMatchObject({ chat_id: "chat1", chat_type: "p2p" });
   });
 
-  it("keeps Feishu chat lookup error logs UTF-16 safe at the truncation boundary", async () => {
-    getChat.mockResolvedValueOnce({ code: 99, msg: `${"x".repeat(499)}😀tail` });
+  it.each(["response", "exception"])("falls back to p2p after chat lookup %s", async (failure) => {
+    const detail = "private-card-provider-detail";
+    if (failure === "response") {
+      getChat.mockResolvedValueOnce({ code: 99, msg: detail });
+    } else {
+      getChat.mockRejectedValueOnce(new Error(detail));
+    }
     await dispatch(cardEvent({ text: "/help" }));
     expect(message()?.chat_type).toBe("p2p");
     expect(log).toHaveBeenCalledWith(
-      `feishu[mock-account]: failed to resolve chat type: ${"x".repeat(499)}; defaulting to p2p`,
+      "feishu[mock-account]: failed to resolve chat type; defaulting to p2p",
     );
-  });
-
-  it("falls back to p2p when Feishu chat API throws", async () => {
-    getChat.mockRejectedValueOnce(new Error("network failure"));
-    await dispatch(cardEvent({ text: "/help" }));
-    expect(message()?.chat_type).toBe("p2p");
+    expect(log.mock.calls.flat().join("\n")).not.toContain(detail);
   });
 
   it("does not log raw duplicate callback tokens", async () => {

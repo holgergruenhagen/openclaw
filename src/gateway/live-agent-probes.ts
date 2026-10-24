@@ -75,6 +75,7 @@ export function createLiveCronProbeSpec(
   params: {
     agentId?: string;
     sessionKey?: string;
+    model?: string;
   } = {},
 ): LiveCronProbeSpec {
   const nonce = randomBytes(3).toString("hex").toUpperCase();
@@ -89,7 +90,7 @@ export function createLiveCronProbeSpec(
     job: {
       name,
       schedule: { kind: "at", at },
-      payload: { kind: "agentTurn", message },
+      payload: { kind: "agentTurn", message, ...(params.model ? { model: params.model } : {}) },
       // Live harnesses use synthetic channels that must not become announce targets.
       delivery: { mode: "none" },
       sessionTarget: params.sessionKey ? `session:${params.sessionKey}` : "current",
@@ -108,36 +109,27 @@ export function buildLiveCronProbeMessage(params: {
   exactReply: string;
 }): string {
   const claudeLike = isClaudeLikeLiveAgent(params.agent);
+  const discoverTools =
+    "If it is not already visible, search/load MCP tools for `openclaw automations` or `automations`, " +
+    "then call the matching OpenClaw MCP tool; Claude-style names may appear as `mcp__openclaw__automations`. " +
+    "Do not use Claude native `CronCreate`, `CronList`, or `CronDelete`; those are not OpenClaw proof. ";
   if (params.attempt === 0) {
     return (
       "Use the OpenClaw MCP automations tool from server `openclaw`. " +
-      "If it is not already visible, search/load MCP tools for `openclaw automations` or `automations`, " +
-      "then call the matching OpenClaw MCP tool; Claude-style names may appear as `mcp__openclaw__automations`. " +
-      "Do not use Claude native `CronCreate`, `CronList`, or `CronDelete`; those are not OpenClaw proof. " +
+      discoverTools +
       `Call it with JSON arguments ${params.argsJson}. ` +
       "Preserve the JSON exactly, including job.sessionTarget and job.sessionKey; do not omit, rename, or flatten those fields. " +
       "Do the actual tool call; I will verify externally with the OpenClaw cron CLI. " +
       `After the cron job is created, reply exactly: ${params.exactReply}`
     );
   }
-  if (claudeLike) {
-    return (
+  const retryIntro = claudeLike
+    ? "Retry the OpenClaw MCP automations tool from server `openclaw` now. " + discoverTools
+    : "Your previous OpenClaw automations MCP tool call was cancelled before the job was created. " +
       "Retry the OpenClaw MCP automations tool from server `openclaw` now. " +
-      "If it is not already visible, search/load MCP tools for `openclaw automations` or `automations`, " +
-      "then call the matching OpenClaw MCP tool; Claude-style names may appear as `mcp__openclaw__automations`. " +
-      "Do not use Claude native `CronCreate`, `CronList`, or `CronDelete`; those are not OpenClaw proof. " +
-      `Use these exact JSON arguments: ${params.argsJson}. ` +
-      "Preserve job.sessionTarget and job.sessionKey exactly as provided. " +
-      `If the cron job is created, reply exactly: ${params.exactReply}. ` +
-      "If the tool call is cancelled, the job is not created, or you cannot confirm creation, " +
-      "reply briefly saying that and ask me to retry. No markdown. " +
-      "I will verify externally with the OpenClaw cron CLI."
-    );
-  }
+      "If the harness shows Claude-style MCP names, use `mcp__openclaw__automations`. ";
   return (
-    "Your previous OpenClaw automations MCP tool call was cancelled before the job was created. " +
-    "Retry the OpenClaw MCP automations tool from server `openclaw` now. " +
-    "If the harness shows Claude-style MCP names, use `mcp__openclaw__automations`. " +
+    retryIntro +
     `Use these exact JSON arguments: ${params.argsJson}. ` +
     "Preserve job.sessionTarget and job.sessionKey exactly as provided. " +
     `If the cron job is created, reply exactly: ${params.exactReply}. ` +

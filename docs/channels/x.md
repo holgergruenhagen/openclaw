@@ -80,6 +80,22 @@ For multiple bots, put account-specific values under
 `channels.x.accounts.<accountId>`. Root fields are shared defaults; the default
 account ID is `default`.
 
+## Requester identity and credit
+
+X polling and Activity streams obtain immutable `author_id` values from the
+authenticated X API. An allowlist entry admits work; it does not identify a
+Gateway person. An administrator must [link the channel sender](/concepts/user-model#channel-identity-links)
+to their existing profile with `users.linkChannelIdentity`, using `channelId: "x"`,
+the exact configured account ID, and that immutable sender ID. Handles and
+display names are not identity evidence.
+
+After linking, subsequent turns carry the host-verified requester profile. New
+visible work sessions default to that requester when the source has no different
+human owner. Their contribution is eligible for the profile's existing verified
+GitHub credit preference, including delegated work. Linking does not rewrite
+historical creators, reassign existing sessions, change sharing, or grant an
+operator role. Unlinked senders remain channel identities, not Gateway profiles.
+
 ## Public work sessions
 
 Set `channels.x.accounts.<accountId>.autoPublishWorkSessions: true` (or the
@@ -134,16 +150,34 @@ or another bot mention in the same X conversation. The host does not yet expose
 user-turn provenance to this adapter, so the approval rule is enforced through
 the session's instructions rather than a user-turn check at send time.
 
-The X front-door agent continues to reply directly to incoming mentions.
+The X front-door agent continues to receive incoming mentions in the original
+conversation session. Maintainer turns include bounded references to recent
+visible work sessions previously started by that front door for the same X
+account and conversation. References contain only a native session key and the
+origin post URL, not work-session titles or transcripts. Deleted, archived,
+incognito, draft, and inaccessible sessions are omitted. Guest turns never
+receive these references.
+
+Before starting new work, the agent should distinguish a continuation from an
+unrelated task in the same thread. Continuations use available, authorized
+session tools; a reference is not a message delivery or an access grant. If the
+current tool policy does not provide a continuation tool, the agent must not
+claim it resumed work or start a duplicate as a workaround. Normal failure
+reporting applies. This context does not automatically route follow-ups, change
+session visibility, or waive manual approval for X replies.
 
 ## Reply outcomes and failures
 
-Automatic replies to mentions are posted only when the agent declares success.
+Model replies to mentions are posted only when the agent declares success.
 The channel's delivery rules ask the agent to start each reply with
-`[[x_success]]` or `[[x_failure]]`; the tag is removed before posting. Replies
-tagged `[[x_failure]]`, untagged replies, and host error replies are withheld
+`[[x_success]]` or `[[x_failure]]`; the tag is removed before posting. Model replies
+tagged `[[x_failure]]`, untagged model replies, and host error replies are withheld
 from X. `NO_REPLY` and empty replies are dropped. If a model omits the tag on a
 successful answer, that answer is withheld rather than posted.
+
+Runtime queue acknowledgments and steering refusal notices are posted without a
+model success tag. These notices report the actual admission decision; they do
+not declare that the agent's work succeeded.
 
 Without a failure route, withheld replies are discarded and logged as
 `reply withheld post=<id> reason=<failure|error|unclassified> route=none`. With
@@ -174,14 +208,14 @@ media URL. Native attachments are preferable to sign-in-only proof links when th
 image or video helps explain the result. Work-session approval and origin restrictions
 still apply; guest replies remain text-only.
 
-The connector accepts up to four JPEG, PNG, or WebP images (5 MiB each), or one GIF
+The X plugin accepts up to four JPEG, PNG, or WebP images (5 MiB each), or one GIF
 (15 MiB) or MP4 video (100 MiB). It does not mix videos/GIFs with other attachments.
 The video cap bounds Gateway buffering; it is not X's account upload ceiling.
 Use H.264 video and AAC-LC audio; X validates the remaining encoding and account
 limits. See [X media requirements](https://docs.x.com/x-api/media/quickstart/best-practices).
 
 Local files use the host's approved media roots and file-reader policy; remote
-URLs use the shared guarded downloader. The connector uploads in chunks and waits
+URLs use the shared guarded downloader. The plugin uploads in chunks and waits
 for X processing before creating the reply. Attachments go on the first post if a
 long caption is split into a thread. A failed upload never falls back to a text-only
 post or a local-file link. A 403 on upload may require reconnecting the bot's OAuth

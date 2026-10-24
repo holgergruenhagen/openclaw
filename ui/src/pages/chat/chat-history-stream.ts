@@ -6,7 +6,7 @@ import {
   isHiddenAssistantStreamText,
   shouldHideAssistantChatMessage,
 } from "../../lib/chat/message-visibility.ts";
-import { isSessionRunActive } from "../../lib/session-run-state.ts";
+import { isSessionRunStateActive } from "../../lib/session-run-state.ts";
 import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
 import {
   isChatRunStartupPhase,
@@ -99,6 +99,7 @@ export function readRunProjections(state: ChatState, sessionKey: string, agentId
 export function applyHistoryRun(params: {
   state: ChatState;
   run: ChatHistoryResult["inFlightRun"];
+  observedRunActivity?: boolean;
   sessionInfo: GatewaySessionRow | undefined;
   historyRun: ChatHistoryRunObservation | undefined;
   previousRunProjections: ReturnType<typeof getChatSessionProjection>["runs"];
@@ -151,7 +152,7 @@ export function applyHistoryRun(params: {
         sessionInfo.status === "killed" ||
         sessionInfo.status === "timeout") &&
       sessionInfo.hasActiveRun !== true &&
-      !isSessionRunActive(sessionInfo) &&
+      !isSessionRunStateActive(sessionInfo) &&
       (!state.chatRunId || state.chatRunId === terminalRunId) &&
       !hasOtherSendingRun(terminalRunId) &&
       ((sessionInfo.status !== "killed" && !knownRun) ||
@@ -222,7 +223,7 @@ export function applyHistoryRun(params: {
     runProjectionsUnchanged(previousRunProjections, currentRunProjections, inFlightRunId);
   const activeRunIds = sessionInfo?.activeRunIds;
   const inFlightRunIsActive =
-    isSessionRunActive(sessionInfo ?? {}) &&
+    isSessionRunStateActive(sessionInfo ?? {}) &&
     (!Array.isArray(activeRunIds) || activeRunIds.includes(inFlightRunId)) &&
     (!projectedInFlightRun || projectedInFlightRun.status === "streaming");
   // Only a read issued while this pane still owned the old run can replace it.
@@ -274,7 +275,10 @@ export function applyHistoryRun(params: {
   );
   const startupPhase = startup?.data.phase;
   if (
-    run.text &&
+    (run.text ||
+      (!startup &&
+        state.chatRunStartup?.runId !== inFlightRunId &&
+        (params.observedRunActivity ?? state.knownAgentRunIds?.has(inFlightRunId)))) &&
     startupPhase !== "waiting_for_model" &&
     !isChatRunRecoveryStatus(state.chatRunStartup)
   ) {

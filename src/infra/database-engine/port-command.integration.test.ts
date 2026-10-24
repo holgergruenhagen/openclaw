@@ -4,12 +4,21 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { doctorDatabasePort } from "../../commands/doctor-database-port.js";
 import * as configIo from "../../config/io.js";
 import * as pluginMetadata from "../../plugins/plugin-metadata-snapshot.js";
 import { readBackupEngine } from "../../snapshot/database-backup.js";
+import { assertOpenClawStateDatabaseForMaintenance } from "../../state/openclaw-state-db-maintenance.js";
+import {
+  closeOpenClawStateDatabaseAsync,
+  openOpenClawStateDatabase,
+} from "../../state/openclaw-state-db.js";
+import { readClientCredentialReceipt } from "../client-credential-readiness.js";
+import { readClientCredentialFileIdentity } from "../client-credential-receipt.js";
+import { openClientCredentialCustody } from "../client-credential-store.js";
 import * as recovery from "../database-port-recovery.js";
 import * as disk from "../disk-space.js";
 import { acquireGatewayLock } from "../gateway-lock.js";
@@ -72,18 +81,27 @@ async function loseOneCommittedReply(original: string) {
 }
 
 describe("database port command custody and inspection", () => {
-  it("takes no persistent action for a dry run, including disabled workboard stores", async () => {
-    await fixture(async ({ state, source }) => {
-      const before = await files(state.stateDir);
-      const hashes = before.map((file) => [file, hash(file)]);
-      const result = await doctorDatabasePort({ to: "sqlite", dryRun: true });
-      expect(result).toMatchObject({ phase: "preflight", stores: [source] });
-      expect(await files(state.stateDir)).toEqual(before);
-      expect(before.map((file) => [file, hash(file)])).toEqual(hashes);
-      expect(JSON.stringify(result)).not.toContain(connection ?? injected);
-      expect(JSON.stringify(result)).not.toContain(payload);
-    });
-  });
+  it.each(["canonical", "symlinked ancestor"])(
+    "takes no persistent action for a dry run through a %s state path, including disabled workboard stores",
+    async (statePath) => {
+      await fixture(async ({ state, source }) => {
+        if (statePath === "symlinked ancestor") {
+          const homeAlias = state.path("home-alias");
+          await fsp.symlink(state.home, homeAlias, "junction");
+          state.envVars.OPENCLAW_STATE_DIR = path.join(homeAlias, ".openclaw");
+          state.applyEnv();
+        }
+        const before = await files(state.stateDir);
+        const hashes = before.map((file) => [file, hash(file)]);
+        const result = await doctorDatabasePort({ to: "sqlite", dryRun: true });
+        expect(result).toMatchObject({ phase: "preflight", stores: [source] });
+        expect(await files(state.stateDir)).toEqual(before);
+        expect(before.map((file) => [file, hash(file)])).toEqual(hashes);
+        expect(JSON.stringify(result)).not.toContain(connection ?? injected);
+        expect(JSON.stringify(result)).not.toContain(payload);
+      });
+    },
+  );
 
   it("refuses an already hosted owner before touching config or stores", async () => {
     await fixture(async ({ state, source }) => {
@@ -172,29 +190,162 @@ describe("database port command custody and inspection", () => {
   });
 });
 
+it("captures prefixed destination names and preserves them when rolling back before staging", async () => {
+  await fixture(async ({ state, source }) => {
+    const config = JSON.parse(fs.readFileSync(state.configPath, "utf8"));
+    config.database.postgres.schemaPrefix = "rehearsal";
+    await state.writeConfig(config);
+    openOpenClawStateDatabase({ env: state.env });
+    await closeOpenClawStateDatabaseAsync();
+    const shared = state.statePath("state", "openclaw.sqlite");
+    {
+      using db = openNodeSqliteDatabase(shared);
+      db.exec("CREATE TABLE fleet_cells (tenant_id TEXT PRIMARY KEY) STRICT");
+    }
+    const original = hash(source);
+    const run = tasks.runDatabasePortTask;
+    vi.spyOn(tasks, "runDatabasePortTask").mockImplementation(async (...args) => {
+      if (args[0].operation === "preflight") {
+        return { version: 170000, encoding: "UTF8", privilegesChecked: false };
+      }
+      if (args[0].operation === "migrate") {
+        throw new Error(injected);
+      }
+      return await run(...args);
+    });
+    await expect(
+      doctorDatabasePort({ family: "state", to: "postgres", dryRun: true }),
+    ).resolves.toMatchObject({
+      notes: [`${shared}: Skipped empty retained SQLite table fleet_cells`],
+    });
+    await expect(doctorDatabasePort({ to: "postgres" })).rejects.toThrow("private migrate");
+    const saved = manifest(state);
+    expect(saved.targets).toHaveLength(2);
+    for (const target of saved.targets) {
+      assert(target.original.engine === "sqlite");
+      const family = target.original.path === shared ? "state" : "workboard";
+      expect(target.intended).toMatchObject({
+        engine: "postgres",
+        namespace: `rehearsal_${family}_${target.storeId.replaceAll("-", "").slice(0, 16)}`,
+      });
+    }
+    const inspection = saved.artifacts.find((artifact) =>
+      artifact.path.endsWith("/inspection.json"),
+    );
+    assert(inspection);
+    expect(JSON.parse(fs.readFileSync(inspection.path, "utf8"))).toEqual({
+      notes: ["Skipped empty retained SQLite table fleet_cells"],
+    });
+    expect(hash(source)).toBe(original);
+    await doctorDatabasePort({ rollback: recovery.databasePortManifestPath(state.stateDir) });
+    expect(hash(source)).toBe(original);
+  });
+});
+
 describe.skipIf(!connection)("database port command PostgreSQL conformance", () => {
+  it("privately adds the first-use deletion phase when porting a current-schema journal", async () => {
+    await fixture(async ({ state, client }) => {
+      assert(client);
+      openOpenClawStateDatabase({ env: state.env });
+      await closeOpenClawStateDatabaseAsync();
+      const shared = state.statePath("state", "openclaw.sqlite");
+      {
+        using db = openNodeSqliteDatabase(shared);
+        db.exec(`
+          ALTER TABLE agent_deletion_journal DROP COLUMN phase;
+          ALTER TABLE agent_database_leases ADD COLUMN unported_data TEXT;
+          INSERT INTO agent_deletion_journal (agent_id, agent_dir, workspace_dir, sessions_dir, created_at)
+          VALUES ('retired', '/retired/agent', '/retired/workspace', '/retired/sessions', 17);
+        `);
+        assertOpenClawStateDatabaseForMaintenance(db, { pathname: shared });
+      }
+      const unported = hash(shared);
+      await expect(doctorDatabasePort({ to: "postgres", dryRun: true })).rejects.toThrow(
+        "Unknown or missing columns in agent_database_leases",
+      );
+      expect(hash(shared)).toBe(unported);
+      {
+        using db = openNodeSqliteDatabase(shared);
+        db.exec("ALTER TABLE agent_database_leases DROP COLUMN unported_data");
+      }
+      const original = hash(shared);
+      const preview = await doctorDatabasePort({ to: "postgres", dryRun: true });
+      expect(preview).toMatchObject({ migrations: [shared] });
+      expect(hash(shared)).toBe(original);
+      const ported = await doctorDatabasePort({ to: "postgres" });
+      const anchor = readBackupEngine(shared);
+      assert(anchor.engine === "postgres");
+      {
+        using credentials = openClientCredentialCustody(state.env);
+        assert(credentials);
+        expect(readClientCredentialReceipt(credentials.database)).toMatchObject({
+          phase: "complete",
+          receipt: {
+            source: { kind: "canonical", engine: "postgres", identity: anchor.storeId },
+            sharedFile: readClientCredentialFileIdentity(shared),
+          },
+        });
+      }
+      expect(
+        (
+          await client.query(
+            `SELECT agent_id, phase, created_at FROM "${anchor.namespace}".agent_deletion_journal`,
+          )
+        ).rows,
+      ).toEqual([{ agent_id: "retired", phase: null, created_at: "17" }]);
+      assert("manifest" in ported && typeof ported.manifest === "string");
+      const saved = JSON.parse(
+        fs.readFileSync(ported.manifest, "utf8"),
+      ) as recovery.DatabasePortManifest;
+      const captured = saved.targets.find(
+        (target) => target.original.engine === "sqlite" && target.original.path === shared,
+      );
+      assert(captured);
+      using originalDb = openNodeSqliteDatabase(captured.originalCapture.path, { readOnly: true });
+      expect(
+        originalDb
+          .prepare("PRAGMA table_info(agent_deletion_journal)")
+          .all()
+          .map((column) => column.name),
+      ).not.toContain("phase");
+      expect(
+        originalDb.prepare("SELECT agent_id, created_at FROM agent_deletion_journal").all(),
+      ).toEqual([{ agent_id: "retired", created_at: 17 }]);
+    }, true);
+  }, 120_000);
+
   it("reconnects after a committed PostgreSQL transaction loses its reply before authorizing the anchor", async () => {
     assert(connection);
     const proxy = await loseOneCommittedReply(connection);
     try {
-      await fixture(async ({ state, source }) => {
+      await fixture(async ({ state, source, client }) => {
+        assert(client);
         state.envVars.OPENCLAW_P36_TEST_DATABASE_URL = proxy.connection;
         state.applyEnv();
         const before = canonical(source);
         await doctorDatabasePort({ to: "postgres" });
         expect(proxy.dropped()).toBe(1);
-        expect(readBackupEngine(source).engine).toBe("postgres");
-        await doctorDatabasePort({ to: "sqlite" });
-        expect(canonical(source)).toEqual(before);
+        const anchor = readBackupEngine(source);
+        assert(anchor.engine === "postgres");
+        expect(await canonicalPostgres(client, anchor.namespace)).toEqual(before);
       }, true);
     } finally {
       await proxy.close();
     }
   }, 120_000);
 
-  it("rolls back a preparing manifest before any target has been verified", async () => {
+  it("rolls back a preparing manifest including an external configured store before any target has been verified", async () => {
     await fixture(async ({ state, source }) => {
       const before = canonical(source);
+      // Discovery chooses the path; the registered provider still owns its family.
+      const agentDir = state.path("external", "agent");
+      const external = path.join(agentDir, "openclaw-agent.sqlite");
+      await fsp.mkdir(agentDir, { recursive: true });
+      await fsp.copyFile(source, external);
+      await state.writeConfig({
+        ...JSON.parse(fs.readFileSync(state.configPath, "utf8")),
+        agents: { entries: { external: { agentDir } } },
+      });
       const run = tasks.runDatabasePortTask;
       vi.spyOn(tasks, "runDatabasePortTask").mockImplementation(async (...args) => {
         if (args[0].operation === "migrate") {
@@ -207,8 +358,14 @@ describe.skipIf(!connection)("database port command PostgreSQL conformance", () 
       const target = manifest(state).targets[0];
       assert(target);
       expect(target.verification).toBeNull();
+      expect(
+        manifest(state).targets.some(
+          (entry) => entry.original.engine === "sqlite" && entry.original.path === external,
+        ),
+      ).toBe(true);
       await doctorDatabasePort({ rollback: recovery.databasePortManifestPath(state.stateDir) });
       expect(canonical(source)).toEqual(before);
+      expect(canonical(external)).toEqual(before);
       expect(fs.existsSync(recovery.databasePortManifestPath(state.stateDir))).toBe(false);
     }, true);
   }, 120_000);
@@ -421,6 +578,7 @@ describe.skipIf(!connection)("database port command PostgreSQL conformance", () 
     120_000,
   );
 
+  // Green CI runs 39068774273/39071119824 measured p95 at 82s; retain more than 2× headroom.
   it.each([false, true])(
     "rolls back a reverse port with retained PostgreSQL writes (missing namespace: %s)",
     async (missingNamespace) => {
@@ -476,7 +634,7 @@ describe.skipIf(!connection)("database port command PostgreSQL conformance", () 
         expect(await canonicalPostgres(client, restored.namespace)).toEqual(canonical(expected));
       }, true);
     },
-    120_000,
+    180_000,
   );
 
   it.each(["environment", "absent", "changed environment"])(
@@ -523,7 +681,7 @@ describe.skipIf(!connection)("database port command PostgreSQL conformance", () 
     120_000,
   );
 
-  it("resumes a complete active manifest by archiving without replacing stores or config", async () => {
+  it("resumes through a symlinked ancestor by archiving without replacing stores or config", async () => {
     await fixture(async ({ state, source }) => {
       vi.spyOn(recovery, "archiveDatabasePortManifest").mockImplementationOnce(() => {
         throw new Error(injected);
@@ -533,6 +691,10 @@ describe.skipIf(!connection)("database port command PostgreSQL conformance", () 
       expect(manifest(state).state).toBe("complete");
       const storeHash = hash(source);
       const configHash = hash(state.configPath);
+      const homeAlias = state.path("home-alias");
+      await fsp.symlink(state.home, homeAlias, "junction");
+      state.envVars.OPENCLAW_STATE_DIR = path.join(homeAlias, ".openclaw");
+      state.applyEnv();
       await doctorDatabasePort({ resume: recovery.databasePortManifestPath(state.stateDir) });
       expect(hash(source)).toBe(storeHash);
       expect(hash(state.configPath)).toBe(configHash);

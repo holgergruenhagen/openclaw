@@ -501,6 +501,11 @@ async function migrateLegacyMemorySidecarSource(params: {
 export const memorySidecarStateMigration: PluginDoctorStateMigration = {
   id: "memory-core-legacy-sidecar-index-to-agent-sqlite",
   label: "Memory Core legacy memory index sidecar",
+  sqliteOnly: {
+    family: "agent",
+    postgresNote:
+      "The legacy memory sidecar is retained unchanged. Normal reindexing rebuilds the PostgreSQL memory index from authoritative memory sources and may re-embed them.",
+  },
   async collectBackupResources(params) {
     const sources = await collectLegacyMemorySidecarSources(params);
     const resources: Array<{ path: string; kind: "sqlite" | "file" }> = [];
@@ -578,7 +583,12 @@ export const memorySidecarStateMigration: PluginDoctorStateMigration = {
         });
       }
     }
-    return { changes, warnings };
+    // These indexes are derived; failed imports retain their sources for a later repair.
+    return {
+      changes,
+      warnings,
+      ...(warnings.length > 0 ? { warningDisposition: "recoverable" as const } : {}),
+    };
   },
 };
 

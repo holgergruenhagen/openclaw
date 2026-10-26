@@ -116,7 +116,7 @@ export function captureReplyMessageInjectionTarget(
       projectRequesterToolAuthorityFingerprint: (requester) => {
         try {
           return operationAuthority
-            ? operation.projectRequesterToolAuthorityFingerprint(requester)
+            ? operation.projectRequesterToolAuthorityFingerprint?.(requester)
             : toolAuthority?.projectRequester?.(requester);
         } catch {
           toolAuthority?.assertActive();
@@ -126,7 +126,7 @@ export function captureReplyMessageInjectionTarget(
       projectRequesterToolAuthorityFingerprintAsync: async (requester) => {
         try {
           return operationAuthority
-            ? await operation.projectRequesterToolAuthorityFingerprintAsync(requester)
+            ? await operation.projectRequesterToolAuthorityFingerprintAsync?.(requester)
             : await toolAuthority?.projectRequesterAsync?.(requester);
         } catch {
           toolAuthority?.assertActive();

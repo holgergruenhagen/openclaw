@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliSessionBinding } from "../config/sessions.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
-import { runPreparedCliAgent } from "./cli-runner.js";
+import { runCliAgent, runPreparedCliAgent } from "./cli-runner.js";
 import { buildPreparedCliRunContext } from "./cli-runner.test-helpers.js";
+import * as cliPreparation from "./cli-runner/prepare.runtime.js";
 import * as cliTranscript from "./command/attempt-execution.helpers.js";
 import {
   createAgentRunDirectAbortError,
@@ -93,7 +94,7 @@ describe("runPreparedCliAgent directly stopped first turn", () => {
   });
 
   afterEach(() => {
-    vi.mocked(cliTranscript.claudeCliSessionTranscriptHasContent).mockRestore();
+    vi.restoreAllMocks();
   });
 
   function stoppedRun(params: {
@@ -144,4 +145,24 @@ describe("runPreparedCliAgent directly stopped first turn", () => {
       }
     },
   );
+
+  it("binds a stopped first turn whose run has no operator model authority", async () => {
+    const run = stoppedRun({ persist: async () => {} });
+    const { assertCurrent: _callerAssertion, ...callerParams } = run.context.params;
+    const stop = new AbortController();
+    vi.spyOn(cliPreparation, "prepareCliRunContext").mockImplementation(async (params) => ({
+      ...run.context,
+      params,
+    }));
+    executePreparedCliRunMock.mockImplementation(async () => {
+      stop.abort(run.abort);
+      return partialOutput("aborted");
+    });
+
+    await expect(runCliAgent({ ...callerParams, abortSignal: stop.signal })).rejects.toBe(
+      run.abort,
+    );
+    expect(run.persistStoppedFirstCliSession).toHaveBeenCalledOnce();
+    expect(run.persistStoppedFirstCliSession.mock.calls[0]?.[0]).toMatchObject({ sessionId });
+  });
 });

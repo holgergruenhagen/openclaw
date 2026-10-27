@@ -238,11 +238,12 @@ it("flushes a terminal CLI process failure without reporting completion", async 
 });
 
 it.each([
-  { abortKind: "manual" as const, timedOut: false },
-  { abortKind: "timeout" as const, timedOut: true },
+  { abortKind: "manual" as const, timedOut: false, rejection: "AbortError" },
+  // The run rethrows the caller's own abort reason.
+  { abortKind: "timeout" as const, timedOut: true, rejection: "TimeoutError" },
 ])("distinguishes $abortKind cancellation in the final trajectory event", async (testCase) => {
   const { context, events } = await fixture({ abortKind: testCase.abortKind });
-  await expect(runCliAgent(context.params)).rejects.toMatchObject({ name: "AbortError" });
+  await expect(runCliAgent(context.params)).rejects.toMatchObject({ name: testCase.rejection });
   expect((await events()).at(-1)).toMatchObject({
     type: "session.ended",
     data: {

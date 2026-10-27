@@ -152,7 +152,7 @@ describe("runPreparedCliAgent directly stopped first turn", () => {
     const stop = new AbortController();
     vi.spyOn(cliPreparation, "prepareCliRunContext").mockImplementation(async (params) => ({
       ...run.context,
-      params,
+      params: { ...params, admittedRunContext: run.context.params.admittedRunContext },
     }));
     executePreparedCliRunMock.mockImplementation(async () => {
       stop.abort(run.abort);

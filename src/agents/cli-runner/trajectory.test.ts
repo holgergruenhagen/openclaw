@@ -254,21 +254,16 @@ it.each([
   });
 });
 
-it("leaves trajectory disabled while still executing the CLI", async () => {
-  const { context, events } = await fixture({ disabled: true });
-  await expect(runCliAgent(context.params)).resolves.toMatchObject({
-    payloads: [{ text: "fixture reply" }],
-  });
-  expect(await events()).toEqual([]);
-});
-
-it("honors the disableTrajectory opt-out while still executing the CLI", async () => {
-  const { context, events } = await fixture({ disableTrajectory: true });
-  await expect(runCliAgent(context.params)).resolves.toMatchObject({
-    payloads: [{ text: "fixture reply" }],
-  });
-  expect(await events()).toEqual([]);
-});
+it.each([{ disabled: true }, { disableTrajectory: true }])(
+  "leaves trajectory disabled for %j while still executing the CLI",
+  async (options) => {
+    const { context, events } = await fixture(options);
+    await expect(runCliAgent(context.params)).resolves.toMatchObject({
+      payloads: [{ text: "fixture reply" }],
+    });
+    expect(await events()).toEqual([]);
+  },
+);
 
 it("records both retry prompts but ends a recovered CLI turn only once", async () => {
   const { context, events } = await fixture({ recover: true });

@@ -372,7 +372,7 @@ const transcriptEvent = (eventId: string, role: string, blocks: Content, extra =
 const assistant = (eventId: string, blocks: Content, runId = RUN_ID, extra = {}) =>
   transcriptEvent(eventId, "assistant", blocks, {
     stopReason: "stop",
-    __openclaw: { runId },
+    __openclaw: { runId, externalId: eventId },
     ...extra,
   });
 function displayOrder(display: unknown[]) {
@@ -422,6 +422,7 @@ async function seedTranscript(
   };
   const warning = text(warningText);
   const mediaGroup = singleText ? [mediaBlock, warning] : [mediaBlock];
+  const separator = singleText ? "\n" : "\n\n\n";
   const messages = [
     assistant("older-answer", [text("An earlier answer.")], "older-run"),
     transcriptEvent("request", "user", [text("Make an avatar sheet.")]),
@@ -485,13 +486,12 @@ async function seedTranscript(
         scope,
         runId,
         expectedLifecycleRevision: lifecycleRevision,
-        content: [text([caption, choice].join(singleText ? "\n" : "\n\n\n")), ...mediaGroup],
+        content: [text(["Earlier narration.", caption, choice].join(separator)), ...mediaGroup],
         mediaBySource: new Map([[generatedMediaUrl, mediaGroup]]),
         mediaUrls: [generatedMediaUrl],
       }),
   };
 }
-
 describe("generated-media transcript enrichment", () => {
   it.each([
     [null, false],
@@ -564,72 +564,5 @@ describe("generated-media transcript enrichment", () => {
         expect(snapshot()).toEqual(before);
       });
     },
-  );
-});
-
-describe("Claude CLI native final media rewrite", () => {
-  const chartPath = "/tmp/openclaw-test/chart.png";
-  const chart = {
-    type: "image",
-    url: "/api/chat/media/outgoing/agent%3Amain%3Anative-media/chart/full",
-    alt: "chart.png",
-    mimeType: "image/png",
-  };
-  it.each([
-    ["native final after narration", true, "Checking the notes.\n\nHere is the chart."],
-    ["native final without narration", true, "Here is the chart."],
-    ["row without native identity", false, "Checking the notes.\n\nHere is the chart."],
-  ] as const)("places media without repeating native narration: %s", (_label, native, delivered) =>
-    withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-      setRuntimeConfigSnapshot({});
-      const identity = {
-        agentId: "main",
-        sessionId: "native-media-session",
-        sessionKey: "agent:main:native-media",
-        env,
-      };
-      await replaceSessionEntry(identity, { sessionId: identity.sessionId, updatedAt: 1 });
-      const scope = { ...identity, storePath: openOpenClawAgentDatabase(identity).path };
-      // The Claude CLI writer keeps only the final native message on its keyed row.
-      const message = {
-        role: "assistant",
-        idempotencyKey: "cli-assistant:run-1",
-        ...(native
-          ? {
-              __openclaw: {
-                importedFrom: "claude-cli",
-                cliSessionId: "cli-session",
-                externalId: "native-final",
-              },
-            }
-          : {}),
-        content: [text(`Here is the chart.\nMEDIA:${chartPath}`)],
-      };
-      expect(appendTranscriptMessageSync(scope, { eventId: "final", message })).toMatchObject({
-        ok: true,
-      });
-
-      // Webchat delivery joins every narration block of the run into one caption.
-      await expect(
-        rewriteByKey({
-          scope,
-          idempotencyKey: "cli-assistant:run-1",
-          content: [text(delivered), chart],
-          mediaBySource: new Map([[chartPath, [chart]]]),
-          managedMediaUrls: [chartPath],
-        }),
-      ).resolves.toEqual({ messageId: "final" });
-
-      const rewritten = loadTranscriptEventsSync(scope).find(
-        (event) => isRecord(event) && event.id === "final",
-      );
-      assert(isRecord(rewritten) && isRecord(rewritten.message));
-      expect(rewritten.message.content).toEqual(message.content);
-      const display = rewritten.message.openclawDisplayContent;
-      assert(Array.isArray(display));
-      expect(displayOrder(display)).toEqual(
-        native ? ["Here is the chart.", "image"] : [delivered, "image"],
-      );
-    }),
   );
 });

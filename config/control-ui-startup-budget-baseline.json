@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 294961,
-  "reason": "Startup leaf icons, update classification, and lazy English: matched b5b24cf15c2 build 310773 to 294961 B gzip with 7 JS and 1 CSS request.",
-  "updatedAt": "2026-10-23"
+  "startupJsGzipBytes": 89354,
+  "reason": "New Session socket preconnect: 20 paired observations per profile improve 100 ms RTT composer readiness by 8.1%; accept measured startup 89354 B (+219 B vs exact base), with unchanged request counts and CPU/tail caveats recorded in PR evidence.",
+  "updatedAt": "2026-10-31"
 }
